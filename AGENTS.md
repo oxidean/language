@@ -10,4 +10,8 @@ This file is the single source of truth for agent instructions in this repo.
   skill folders in `.claude/skills/`.
 - Agent OS is installed in `agent-os/`: coding standards live in
   `agent-os/standards/` and are indexed in `agent-os/standards/index.yml`.
-  Slash commands live in `.claude/commands/agent-os/`.
+  Product docs live in `agent-os/product/`; work specs (plans) live in
+  `agent-os/specs/`. Slash commands live in `.claude/commands/agent-os/`.
+- Planning flows through Agent OS: after a brainstorming skill session
+  produces an approved design doc, hand off to `agent-os` planning —
+  see the `agent-os-planning` skill.

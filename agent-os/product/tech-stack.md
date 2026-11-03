@@ -1,0 +1,25 @@
+# Tech Stack
+
+## Frontend
+
+N/A for v0.0.1 (CLI + services only). Post-v0.0.1 charter: platform-native
+toolkit FFI bindings, a portable UI layer written in the language itself,
+and a Qt/GTK FFI bridge. Web target (JS/HTML/CSS) parked.
+
+## Backend
+
+Compiler implementation: Zig (preferred) or Rust. Codegen: LLVM
+(preferred) or self-hosted. Runtime: C-compatible, arena-based, no tracing
+GC.
+
+## Database
+
+N/A for the language itself. The pilot CRUD app uses SQLite via C FFI
+(libsqlite3).
+
+## Other
+
+- C FFI as the interop boundary, from day one
+- LSP server inside the single toolchain binary
+- Agent OS for planning, standards, and specs (`agent-os/`)
+- Execution model: single driver + parallel agent worktrees
