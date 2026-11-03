@@ -1,0 +1,34 @@
+// lang test runs every fn test_*() and reports ok per function.
+// `lang test examples/smoke_test.lang`
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn test_add() {
+    if add(2, 3) != 5 {
+        return
+    }
+}
+
+fn test_strings() {
+    s := "a" + "b"
+    if len(s) != 2 {
+        return
+    }
+}
+
+fn test_chan() {
+    ch := mkchan()
+    scope {
+        spawn send(ch, 7)
+        v := recv(ch)
+        if v != 7 {
+            println("FAIL")
+        }
+    }
+}
+
+fn main() {
+    println("not run under `lang test`")
+}

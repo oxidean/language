@@ -1,0 +1,65 @@
+// exercises the v0 surface: structs, own, [v, err], if err != nil,
+// for, scope/spawn, channels, extern FFI
+
+struct Point {
+    x: int
+    y: int
+}
+
+extern fn strlen(s: cstr) -> int
+
+fn fail(b: bool) -> [int, err] {
+    if b {
+        return 0, 1
+    }
+    return 42, nil
+}
+
+fn bump(p: mut Point) {
+    p.x = p.x + 1
+}
+
+fn worker(ch: chan, id: int) {
+    send(ch, id * id)
+}
+
+fn main() {
+    p := Point{x: 1, y: 2}
+    println(itoa(p.x + p.y))
+
+    [v, err] = fail(false)
+    if err != nil {
+        println("unexpected error")
+    }
+    println(itoa(v))
+
+    [_, err2] = fail(true)
+    if err2 != nil {
+        println("got expected error")
+    }
+
+    op := new(Point)
+    op.x = 10
+    bump(op)
+    println(itoa(op.x))
+
+    i := 0
+    for i < 3 {
+        i = i + 1
+    }
+    println(itoa(i))
+
+    n := strlen("hello")
+    println(itoa(n))
+
+    ch := mkchan()
+    scope {
+        spawn worker(ch, 5)
+        spawn worker(ch, 7)
+        println(itoa(recv(ch)))
+        println(itoa(recv(ch)))
+    }
+    close(ch)
+
+    println("done")
+}

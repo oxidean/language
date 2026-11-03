@@ -1,0 +1,42 @@
+// simple CLI pilot: greets by name, counts args — exercises argv,
+// string ops, [v, err], and the toolchain end to end.
+//
+//   lang run examples/cli/main.lang -- Jesse extra
+//   → "hello, Jesse" / "2 args after name"
+
+fn greet(name: str) -> str {
+    return "hello, " + name
+}
+
+fn parse_count(s: str) -> [int, err] {
+    if len(s) == 0 {
+        return 0, 1
+    }
+    n := atoi(s)
+    if n <= 0 {
+        return 0, 2
+    }
+    return n, nil
+}
+
+fn main() {
+    n := argc()
+    if n < 2 {
+        println("usage: cli <name> [count]")
+        return
+    }
+    println(greet(argv(1)))
+
+    if n >= 3 {
+        [c, err] = parse_count(argv(2))
+        if err != nil {
+            println("bad count arg")
+            return
+        }
+        i := 0
+        for i < c {
+            println(itoa(i))
+            i = i + 1
+        }
+    }
+}

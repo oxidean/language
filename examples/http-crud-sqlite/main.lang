@@ -1,0 +1,93 @@
+// HTTP CRUD + SQLite pilot — the v0.0.1 success bar for services.
+//
+// Exercises: C FFI (libc sockets + sqlite3 via rt shims), scope/spawn
+// per-connection handlers, string ops, [v, err]-style error paths.
+//
+//   lang run examples/http-crud-sqlite/main.lang
+//   curl localhost:8080/items           → list rows
+//   curl -d 'widget' localhost:8080/items → insert row
+//
+// sockaddr_in is poked bytewise (v0 has no packed structs); sqlite3's
+// T** out-params go through rt_sqlite_* shims until address-of lands.
+
+extern fn socket(domain: int, ty: int, proto: int) -> int
+extern fn bind(fd: int, addr: own sockaddr, len: int) -> int
+extern fn listen(fd: int, backlog: int) -> int
+extern fn accept(fd: int, addr: own sockaddr, len: own intp) -> int
+extern fn read(fd: int, buf: own void, n: int) -> int
+extern fn write(fd: int, buf: cstr, n: int) -> int
+extern fn close(fd: int) -> int
+extern fn setsockopt(fd: int, lvl: int, opt: int, v: own intp, n: int) -> int
+
+struct sockaddr { a: int, b: int }   // 16 bytes: sockaddr_in fits
+struct intp { v: int }
+
+fn http_ok(body: str) -> str {
+    return "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: "
+        + itoa(len(body)) + "\r\n\r\n" + body
+}
+
+fn handle_conn(fd: int) {
+    buf := mkbuf(4096)
+    n := read(fd, buf, 4095)
+    if n <= 0 {
+        close(fd)
+        return
+    }
+    req := bufstr(buf, n)
+
+    // "METHOD PATH HTTP/1.x" — split on the first two spaces
+    sp1 := find(req, " ")
+    rest := substr(req, sp1 + 1, len(req))
+    sp2 := find(rest, " ")
+    path := substr(rest, 0, sp2)
+    method := substr(req, 0, sp1)
+
+    body := ""
+    db := sqlite_open(cstr("pilot.db"))
+    if find(path, "/items") == 0 {
+        if find(method, "POST") == 0 {
+            // body = everything after the blank line
+            hdr_end := find(req, "\r\n\r\n")
+            item := substr(req, hdr_end + 4, len(req))
+            sqlite_exec(db, cstr("CREATE TABLE IF NOT EXISTS items(name TEXT)"))
+            sqlite_exec(db, cstr("INSERT INTO items VALUES('" + item + "')"))
+            body = "created: " + item + "\n"
+        } else {
+            body = sqlite_query(db, cstr("SELECT rowid, name FROM items"))
+        }
+    } else {
+        body = "lang http server — try /items\n"
+    }
+    sqlite_close(db)
+
+    resp := http_ok(body)
+    write(fd, cstr(resp), len(resp))
+    close(fd)
+}
+
+fn main() {
+    srv := socket(2, 1, 0)            // AF_INET, SOCK_STREAM
+    one := new(intp)
+    one.v = 1
+    setsockopt(srv, 1, 2, one, 4)     // SOL_SOCKET, SO_REUSEADDR
+
+    addr := new(sockaddr)
+    // sockaddr_in: family (host order) | port (network order) | addr | zero
+    poke8(addr, 0, 2)                 // sin_family = AF_INET (LE pair 02 00)
+    poke8(addr, 1, 0)
+    poke16(addr, 2, 8080)             // sin_port = htons(8080)
+    poke32(addr, 4, 0)                // sin_addr = INADDR_ANY
+    bind(srv, addr, 16)
+    listen(srv, 16)
+    println("listening on :8080")
+
+    scope {
+        for true {
+            cfd := accept(srv, addr, one)
+            if cfd >= 0 {
+                spawn handle_conn(cfd)
+            }
+        }
+    }
+}

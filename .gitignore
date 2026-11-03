@@ -1,0 +1,5 @@
+target/
+a.out
+out.c
+pilot.db
+*.o
