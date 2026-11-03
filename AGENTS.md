@@ -15,3 +15,6 @@ This file is the single source of truth for agent instructions in this repo.
 - Planning flows through Agent OS: after a brainstorming skill session
   produces an approved design doc, hand off to `agent-os` planning —
   see the `agent-os-planning` skill.
+- Always commit with the repo's configured git identity (the local
+  user's). Never use `-c user.name`/`-c user.email` overrides or an
+  agent identity.
