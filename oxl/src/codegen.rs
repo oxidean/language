@@ -73,6 +73,8 @@ struct Gen<'a> {
     in_frame: bool,
     /// scoped map: local name -> frame field (parallel to env)
     fslots: Vec<HashMap<String, String>>,
+    /// match-pattern bind scopes for &self type lookups (expr_ty)
+    bind_env: std::cell::RefCell<Vec<HashMap<String, Ty>>>,
     /// collected local field decls for the frame struct
     frame_decls: Vec<String>,
     /// RtScope fields (one per `scope {}` site in this fn)
@@ -126,6 +128,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         susp: susp.clone(),
         in_frame: false,
         fslots: Vec::new(),
+        bind_env: std::cell::RefCell::new(Vec::new()),
         frame_decls: Vec::new(),
         scope_decls: Vec::new(),
         state_labels: Vec::new(),
@@ -591,6 +594,9 @@ impl<'a> Gen<'a> {
     }
 
     fn lookup(&self, n: &str) -> Ty {
+        if let Some(t) = self.bind_env.borrow().iter().rev().find_map(|s| s.get(n)) {
+            return t.clone();
+        }
         self.env.iter().rev().find_map(|s| s.get(n).cloned()).unwrap_or(Ty::Unknown)
     }
 
@@ -710,6 +716,21 @@ impl<'a> Gen<'a> {
                 TyKind::Named(n) if self.enum_variant(n).is_some() => Ty::Struct(n.clone()),
                 _ => Ty::Unknown,
             },
+            ExprKind::Match { e: scrut, arms } => {
+                let st = self.expr_ty(scrut);
+                arms.iter()
+                    .find_map(|a| match &a.body {
+                        MatchBody::Expr(be) => {
+                            self.bind_env.borrow_mut()
+                                .push(self.pat_binds(&a.pat, &st).into_iter().collect());
+                            let t = self.expr_ty(be);
+                            self.bind_env.borrow_mut().pop();
+                            Some(t)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(Ty::Void)
+            }
             ExprKind::Bin { op, l, r } => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                 | BinOp::And | BinOp::Or => Ty::Bool,
@@ -1069,6 +1090,156 @@ impl<'a> Gen<'a> {
                     UnOp::Not => format!("(!{v})"),
                 }
             }
+            ExprKind::Match { e: scrut, arms } => self.match_expr(e, scrut, arms),
+        }
+    }
+
+    /// `match` → C statement-expression:
+    /// `({ T _ms = s; T _mr; if (_ms.tag==i){ binds; _mr = body; } else … _mr; })`
+    /// Void (all-block) matches drop `_mr`. Block arms emit via stmt().
+    fn match_expr(&mut self, e: &Expr, scrut: &Expr, arms: &[MatchArm]) -> String {
+        let st = self.expr_ty(scrut);
+        let sct = self.cty(&st);
+        let rt = self.expr_ty(e);
+        let valued = rt != Ty::Void && rt != Ty::Unknown;
+        let acc = match st {
+            Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) => "(*_ms)".to_string(),
+            _ => "_ms".to_string(),
+        };
+        let sv = self.expr(scrut);
+        let mut o = format!("({{ {sct} _ms = {sv}; ");
+        if valued {
+            o.push_str(&format!("{} _mr; ", self.cty(&rt)));
+        }
+        let mut first = true;
+        for arm in arms {
+            let (cond, binds) = self.arm_cond(&arm.pat, &acc, &st);
+            match &cond {
+                Some(c) => {
+                    o.push_str(if first { "if " } else { "else if " });
+                    o.push_str(&format!("({c}) {{ "));
+                }
+                None => o.push_str("else { "),
+            }
+            first = false;
+            self.env.push(HashMap::new());
+            for (bn, bv, bt) in &binds {
+                o.push_str(&format!("{} {bn} = {bv}; ", self.cty(bt)));
+                self.env.last_mut().unwrap().insert(bn.clone(), bt.clone());
+            }
+            match &arm.body {
+                MatchBody::Expr(be) => {
+                    let bv = self.expr(be);
+                    if valued {
+                        o.push_str(&format!("_mr = {bv}; "));
+                    } else {
+                        o.push_str(&format!("({bv}); "));
+                    }
+                }
+                MatchBody::Block(b) => {
+                    let saved = std::mem::take(&mut self.out);
+                    for s in &b.stmts {
+                        self.stmt(s);
+                    }
+                    let inner = std::mem::take(&mut self.out);
+                    self.out = saved;
+                    o.push_str(&inner);
+                }
+            }
+            self.env.pop();
+            o.push_str("} ");
+        }
+        if valued {
+            o.push_str("_mr; ");
+        }
+        o.push_str("})");
+        o
+    }
+
+    /// pattern binds as (name, ty) — pure lookup for `expr_ty`/env-free use
+    fn pat_binds(&self, pat: &Pattern, st: &Ty) -> Vec<(String, Ty)> {
+        match pat {
+            Pattern::Wild | Pattern::Lit(_) | Pattern::VarUnit { .. } => vec![],
+            Pattern::Bind(n) => vec![(n.clone(), st.clone())],
+            Pattern::VarPos { path, binds } => {
+                let fields = self.structs.get(path).cloned().unwrap_or_default();
+                binds.iter().enumerate()
+                    .filter(|(_, b)| b.as_str() != "_")
+                    .map(|(j, b)| {
+                        (b.clone(), fields.get(j)
+                            .map(|(_, t)| t.clone())
+                            .unwrap_or(Ty::Unknown))
+                    })
+                    .collect()
+            }
+            Pattern::VarNamed { path, binds } => {
+                let fields = self.structs.get(path).cloned().unwrap_or_default();
+                binds.iter()
+                    .map(|b| {
+                        (b.clone(), fields.iter().find(|(n, _)| n == b)
+                            .map(|(_, t)| t.clone())
+                            .unwrap_or(Ty::Unknown))
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// pattern → (C condition over `acc`, binds as (name, init-expr, ty))
+    /// `acc` is the scrutinee access: `_ms` or `(*_ms)` for owned handles
+    fn arm_cond(
+        &mut self, pat: &Pattern, acc: &str, st: &Ty,
+    ) -> (Option<String>, Vec<(String, String, Ty)>) {
+        match pat {
+            Pattern::Wild => (None, vec![]),
+            Pattern::Bind(n) => (None, vec![(n.clone(), "_ms".into(), st.clone())]),
+            Pattern::Lit(le) => {
+                let lv = self.expr(le);
+                let c = if self.dt(st) == Ty::Str {
+                    format!("rt_streq({acc}, {lv})")
+                } else {
+                    format!("({acc} == {lv})")
+                };
+                (Some(c), vec![])
+            }
+            Pattern::VarUnit { path } => match self.enum_variant(path) {
+                Some((_, _, i)) => (Some(format!("{acc}.tag == {i}")), vec![]),
+                None => (Some("0".into()), vec![]),
+            },
+            Pattern::VarPos { path, binds } => match self.enum_variant(path) {
+                Some((_, _, i)) => {
+                    let fields = self.structs.get(path).cloned().unwrap_or_default();
+                    let bs = binds
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, b)| b.as_str() != "_")
+                        .map(|(j, b)| {
+                            let (fn_, ft) = fields.get(j)
+                                .map(|(n, t)| (n.clone(), t.clone()))
+                                .unwrap_or_else(|| (format!("f{j}"), Ty::Unknown));
+                            (b.clone(), format!("{acc}.u.v{i}.f_{fn_}"), ft)
+                        })
+                        .collect();
+                    (Some(format!("{acc}.tag == {i}")), bs)
+                }
+                None => (Some("0".into()), vec![]),
+            },
+            Pattern::VarNamed { path, binds } => match self.enum_variant(path) {
+                Some((_, _, i)) => {
+                    let fields = self.structs.get(path).cloned().unwrap_or_default();
+                    let bs = binds
+                        .iter()
+                        .map(|b| {
+                            let ft = fields.iter().find(|(n, _)| n == b)
+                                .map(|(_, t)| t.clone())
+                                .unwrap_or(Ty::Unknown);
+                            (b.clone(), format!("{acc}.u.v{i}.f_{b}"), ft)
+                        })
+                        .collect();
+                    (Some(format!("{acc}.tag == {i}")), bs)
+                }
+                None => (Some("0".into()), vec![]),
+            },
         }
     }
 
@@ -1406,6 +1577,27 @@ impl<'a> Gen<'a> {
                 },
                 span: e.span,
             },
+            ExprKind::Match { e: scrut, arms } => {
+                // arm bodies are conditional — their susp calls must NOT
+                // hoist to `pre` (checker restricts them to stmt-level
+                // matches); block arms hoist within their own block
+                let scrut2 = self.hoist_expr(scrut, pre);
+                let arms2 = arms
+                    .iter()
+                    .map(|a| MatchArm {
+                        pat: a.pat.clone(),
+                        body: match &a.body {
+                            MatchBody::Expr(be) => MatchBody::Expr(be.clone()),
+                            MatchBody::Block(b) => MatchBody::Block(self.hoist_block(b)),
+                        },
+                        span: a.span,
+                    })
+                    .collect();
+                Expr {
+                    kind: ExprKind::Match { e: Box::new(scrut2), arms: arms2 },
+                    span: e.span,
+                }
+            }
             _ => e.clone(),
         }
     }
@@ -1728,6 +1920,52 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// statement-level `match` in a suspendable fn — real if-chain so
+    /// block arms can suspend; payload binds live in frame slots
+    fn fstmt_match(&mut self, scrut: &Expr, arms: &[MatchArm]) {
+        let st = self.expr_ty(scrut);
+        let sct = self.cty(&st);
+        let acc = match st {
+            Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) => "(*_ms)".to_string(),
+            _ => "_ms".to_string(),
+        };
+        let sv = self.expr(scrut);
+        let _ = writeln!(self.out, "    {{ {sct} _ms = {sv};");
+        let mut first = true;
+        for arm in arms {
+            let (cond, binds) = self.arm_cond(&arm.pat, &acc, &st);
+            match &cond {
+                Some(c) if first => {
+                    let _ = writeln!(self.out, "    if ({c}) {{");
+                }
+                Some(c) => {
+                    let _ = writeln!(self.out, "    else if ({c}) {{");
+                }
+                None => {
+                    let _ = writeln!(self.out, "    else {{");
+                }
+            }
+            first = false;
+            self.env.push(HashMap::new());
+            self.fslots.push(HashMap::new());
+            for (bn, bv, bt) in &binds {
+                let fd = self.fslot(bn, &self.cty(bt));
+                self.env.last_mut().unwrap().insert(bn.clone(), bt.clone());
+                let _ = writeln!(self.out, "      fr->{fd} = {bv};");
+            }
+            match &arm.body {
+                MatchBody::Expr(be) => {
+                    self.fstmt(&Stmt::Expr(be.clone()));
+                }
+                MatchBody::Block(b) => self.fstmts(&b.stmts),
+            }
+            self.fslots.pop();
+            self.env.pop();
+            let _ = writeln!(self.out, "    }}");
+        }
+        let _ = writeln!(self.out, "    }}");
+    }
+
     fn fstmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let { name, ty, init, .. } => {
@@ -1863,6 +2101,12 @@ impl<'a> Gen<'a> {
                 }
             }
             Stmt::Expr(e) => {
+                // stmt-level match emits as a real if-chain so block arms
+                // can suspend through the frame machinery
+                if let ExprKind::Match { e: scrut, arms } = &e.kind {
+                    self.fstmt_match(scrut, arms);
+                    return;
+                }
                 if self.call_is_susp(e) {
                     if let ExprKind::Call { f, args } = &e.kind {
                         if let ExprKind::Ident(n) = &f.kind {

@@ -30,7 +30,8 @@ n := ExprKind.Nil                       // unit variant
 
 ## Reading a value
 
-Until `match` lands (B2), two escape hatches:
+`match` (B2) is the primary reader — see `match.md`. The raw escape
+hatches remain available:
 
 ```oxl
 k := e.kind()            // int tag, works on `own E` too
@@ -54,6 +55,5 @@ allocates a zero-initialized `own T` struct.
 
 ## Not yet
 
-- `match` (B2) — exhaustive pattern dispatch.
 - Generic enums (`enum Opt[T] { Some(T), None }`) — spec allows a
   fast-follow; tracked separately.

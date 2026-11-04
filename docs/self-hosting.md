@@ -9,9 +9,10 @@ The goal: the compiler, written in the language, compiled by itself.
 - `bootstrap/lexer.oxl` — thin driver over lexlib (token dump)
 - `bootstrap/parser.oxl` — a recursive-descent parser for `.oxl`,
   written in `.oxl`, emitting the AST as JSON via `std/json`.
-  Internals are a typed `Node` enum (B1) — `to_json` maps variants
-  back to the same `{tag: ...}` shape, so output is unchanged.
-  **It parses itself with zero skipped tokens** — full round-trip.
+  Internals are a typed `Node` enum (B1) — `to_json` dispatches on
+  variants with `match` (B2), including `match` itself in the
+  grammar. **It parses itself with zero skipped tokens** — full
+  round-trip.
 
 Both components are compiled by the Rust bootstrap compiler and run in
 CI (`tests/run.sh`), so the self-host claim can't rot.
@@ -34,8 +35,8 @@ Ordered by what the checker/codegen port actually needs:
    unit/positional/named payloads, `E.V(...)`/`E.V{...}`/`E.V`
    construction, `.kind()` tag access, tag-checked `as` payload casts.
    `bootstrap/parser.oxl` already uses it for its AST.
-2. **`match`** — the parser's kind-dispatch uses `kind()` + `as`
-   chains (to_json); the checker's port will want match badly.
+2. ~~**`match`**~~ — **done (B2).** `to_json` now pattern-dispatches
+   with `match`; the grammar parses `match` too (self-parse round-trips).
 3. **Slices `[]T`** — token streams want contiguous arrays, not linked
    lists. `mkbuf`/`poke8` is the escape hatch today.
 4. **Function values** — recursive descent doesn't need them, but

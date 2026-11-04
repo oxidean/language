@@ -42,6 +42,21 @@ echo "== enum (b1) =="
 out=$("$OXL" run tests/enum_test.oxl)
 [ "$(tail -1 <<<"$out")" = "enum fns ok" ] || { echo "FAIL enum: $out"; exit 1; }
 
+echo "== match (b2) =="
+out=$("$OXL" run tests/match.oxl)
+[ "$(tail -1 <<<"$out")" = "match ok" ] || { echo "FAIL match: $out"; exit 1; }
+# non-exhaustive match must name the missing variant
+cat > /tmp/matchnex.oxl <<'EOF'
+enum E { A(int), B, }
+fn f(e: E) -> int { return match e { E.A(v) => v } }
+fn main() { }
+EOF
+if "$OXL" build /tmp/matchnex.oxl -o /tmp/matchnex 2>/dev/null; then
+    echo "FAIL: non-exhaustive match compiled"; exit 1
+fi
+diag=$("$OXL" build /tmp/matchnex.oxl -o /tmp/matchnex 2>&1 || true)
+grep -q "missing B" <<<"$diag" || { echo "FAIL: missing-variant diagnostic: $diag"; exit 1; }
+
 echo "== defer (b5) =="
 out=$("$OXL" run tests/defer_test.oxl)
 [ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }

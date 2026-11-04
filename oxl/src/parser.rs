@@ -739,8 +739,89 @@ impl<'a> Parser<'a> {
                 self.expect_p(P::RParen, "`)`");
                 Some(e)
             }
+            // match e { pat => expr, pat => { stmts }, _ => ... }
+            Tok::Kw(Kw::Match) => {
+                self.bump();
+                let e = self.cond_expr()?;
+                self.expect_p(P::LBrace, "`{`");
+                let mut arms = Vec::new();
+                while !self.eat_p(P::RBrace) && !self.at_eof() {
+                    let asp = self.span();
+                    let pat = self.pattern()?;
+                    self.expect_p(P::FatArrow, "`=>`");
+                    let body = if self.cur().tok == Tok::P(P::LBrace) {
+                        MatchBody::Block(self.block()?)
+                    } else {
+                        MatchBody::Expr(self.expr(0, false)?)
+                    };
+                    arms.push(MatchArm { pat, body, span: asp });
+                    self.eat_p(P::Comma);
+                }
+                Some(Expr { kind: ExprKind::Match { e: Box::new(e), arms }, span: sp })
+            }
             _ => {
                 self.diags.push(Diag::err(sp, "parse", format!("expected expression, found {}", self.show_at(t))));
+                self.bump();
+                None
+            }
+        }
+    }
+
+    /// match pattern: `E.V`, `E.V(x, ..)`, `E.V{a, ..}`, `_`, literal, `x`
+    fn pattern(&mut self) -> Option<Pattern> {
+        let t = self.cur().clone();
+        match t.tok {
+            Tok::P(P::Underscore) => {
+                self.bump();
+                Some(Pattern::Wild)
+            }
+            Tok::Ident(mut path) => {
+                self.bump();
+                // dotted variant path: E.V (possibly qualified a.b.E.V)
+                while self.cur().tok == Tok::P(P::Dot) {
+                    self.bump();
+                    let (n, _) = self.ident()?;
+                    path.push('.');
+                    path.push_str(&n);
+                }
+                if self.eat_p(P::LParen) {
+                    let mut binds = Vec::new();
+                    while !self.eat_p(P::RParen) && !self.at_eof() {
+                        if self.eat_p(P::Underscore) {
+                            binds.push("_".into());
+                        } else {
+                            let (b, _) = self.ident()?;
+                            binds.push(b);
+                        }
+                        if !self.eat_p(P::Comma) {
+                            self.expect_p(P::RParen, "`)`");
+                            break;
+                        }
+                    }
+                    Some(Pattern::VarPos { path, binds })
+                } else if self.eat_p(P::LBrace) {
+                    let mut binds = Vec::new();
+                    while !self.eat_p(P::RBrace) && !self.at_eof() {
+                        let (b, _) = self.ident()?;
+                        binds.push(b);
+                        if !self.eat_p(P::Comma) {
+                            self.expect_p(P::RBrace, "`}`");
+                            break;
+                        }
+                    }
+                    Some(Pattern::VarNamed { path, binds })
+                } else if path.contains('.') {
+                    Some(Pattern::VarUnit { path })
+                } else {
+                    Some(Pattern::Bind(path))
+                }
+            }
+            Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Kw(Kw::True) | Tok::Kw(Kw::False) => {
+                let lit = self.primary()?;
+                Some(Pattern::Lit(lit))
+            }
+            _ => {
+                self.diags.push(Diag::err(t.span, "parse", format!("expected pattern, found {}", self.show_at(t))));
                 self.bump();
                 None
             }

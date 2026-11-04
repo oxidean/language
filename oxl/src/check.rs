@@ -812,6 +812,153 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            ExprKind::Match { e: scrut, arms } => {
+                let st = self.expr(scrut, env);
+                let en = match &st {
+                    Ty::Enum(n) => Some(n.clone()),
+                    Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
+                        Ty::Enum(n) => Some(n.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let all_vars: Vec<String> = en.as_ref()
+                    .map(|n| self.enums.get(n).cloned().unwrap_or_default()
+                        .iter().map(|(v, _)| v.clone()).collect())
+                    .unwrap_or_default();
+                let mut covered: HashSet<String> = HashSet::new();
+                let mut wild = false;
+                let (mut saw_t, mut saw_f) = (false, false);
+                let mut result: Option<Ty> = None;
+                let (mut n_expr, mut n_block) = (0usize, 0usize);
+                for arm in arms {
+                    env.push();
+                    match &arm.pat {
+                        Pattern::Wild => wild = true,
+                        Pattern::Bind(n) => {
+                            wild = true;
+                            env.set(n.clone(), st.clone());
+                        }
+                        Pattern::Lit(le) => {
+                            let lt = self.expr(le, env);
+                            match (&st, &lt) {
+                                (Ty::Bool, Ty::Bool) => {
+                                    if let ExprKind::Bool(v) = &le.kind {
+                                        if *v { saw_t = true } else { saw_f = true }
+                                    }
+                                }
+                                (Ty::Unknown, _) | (_, Ty::Unknown) => {}
+                                _ => self.assignable(&st, &lt, arm.span),
+                            }
+                        }
+                        Pattern::VarUnit { path } => match self.enum_variant(path) {
+                            Some((en2, vn, fields)) => {
+                                if en.as_deref() != Some(en2.as_str()) {
+                                    self.diags.push(Diag::err(arm.span, "check",
+                                        format!("`{path}` is a variant of `{en2}` — scrutinee is `{}`",
+                                            en.as_deref().unwrap_or("non-enum"))));
+                                } else if !fields.is_empty() {
+                                    self.diags.push(Diag::err(arm.span, "check",
+                                        format!("`{path}` has a payload — bind it `{path}(...)` or `{path}{{...}}`")));
+                                } else {
+                                    covered.insert(vn);
+                                }
+                            }
+                            None => self.diags.push(Diag::err(arm.span, "check",
+                                format!("unknown variant `{path}`"))),
+                        },
+                        Pattern::VarPos { path, binds } => match self.enum_variant(path) {
+                            Some((en2, vn, fields)) => {
+                                if en.as_deref() != Some(en2.as_str()) {
+                                    self.diags.push(Diag::err(arm.span, "check",
+                                        format!("`{path}` is a variant of `{en2}` — scrutinee is `{}`",
+                                            en.as_deref().unwrap_or("non-enum"))));
+                                } else {
+                                    covered.insert(vn);
+                                    if binds.len() != fields.len() {
+                                        self.diags.push(Diag::err(arm.span, "check",
+                                            format!("`{path}` takes {} binds, got {}",
+                                                fields.len(), binds.len())));
+                                    }
+                                    for (b, (_, ft)) in binds.iter().zip(fields.iter()) {
+                                        if b != "_" {
+                                            env.set(b.clone(), ft.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            None => self.diags.push(Diag::err(arm.span, "check",
+                                format!("unknown variant `{path}`"))),
+                        },
+                        Pattern::VarNamed { path, binds } => match self.enum_variant(path) {
+                            Some((en2, vn, fields)) => {
+                                if en.as_deref() != Some(en2.as_str()) {
+                                    self.diags.push(Diag::err(arm.span, "check",
+                                        format!("`{path}` is a variant of `{en2}` — scrutinee is `{}`",
+                                            en.as_deref().unwrap_or("non-enum"))));
+                                } else {
+                                    covered.insert(vn);
+                                    for b in binds {
+                                        match fields.iter().find(|(n, _)| n == b) {
+                                            Some((_, ft)) => env.set(b.clone(), ft.clone()),
+                                            None => self.diags.push(Diag::err(arm.span, "check",
+                                                format!("`{path}` has no field `{b}`"))),
+                                        }
+                                    }
+                                }
+                            }
+                            None => self.diags.push(Diag::err(arm.span, "check",
+                                format!("unknown variant `{path}`"))),
+                        },
+                    }
+                    match &arm.body {
+                        MatchBody::Expr(be) => {
+                            n_expr += 1;
+                            let bt = self.expr(be, env);
+                            match &result {
+                                None => result = Some(bt),
+                                Some(rt) => self.assignable(rt, &bt, arm.span),
+                            }
+                        }
+                        MatchBody::Block(b) => {
+                            n_block += 1;
+                            self.block(b, env);
+                        }
+                    }
+                    env.pop();
+                }
+                if n_expr > 0 && n_block > 0 {
+                    self.diags.push(Diag::err(e.span, "check",
+                        "match arms must be all expressions or all blocks — not mixed"));
+                }
+                match &en {
+                    Some(en) if !wild && st != Ty::Unknown => {
+                        let missing: Vec<&String> = all_vars.iter()
+                            .filter(|v| !covered.contains(*v)).collect();
+                        if !missing.is_empty() {
+                            self.diags.push(Diag::err(e.span, "check",
+                                format!("non-exhaustive match on `{en}` — missing {}",
+                                    missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))));
+                        }
+                    }
+                    None if !wild && st == Ty::Bool => {
+                        if !(saw_t && saw_f) {
+                            self.diags.push(Diag::err(e.span, "check",
+                                "non-exhaustive match on `bool` — cover `true`/`false` or add `_`"));
+                        }
+                    }
+                    None if !wild && st != Ty::Unknown && st != Ty::Bool => {
+                        self.diags.push(Diag::err(e.span, "check",
+                            format!("`match` on `{}` needs a `_` arm", st.name())));
+                    }
+                    _ => {}
+                }
+                if n_expr > 0 {
+                    result.unwrap_or(Ty::Void)
+                } else {
+                    Ty::Void
+                }
+            }
         }
     }
 
@@ -1155,6 +1302,17 @@ impl<'a> Checker<'a> {
                 ExprKind::Field { obj, .. } => expr_susp(obj),
                 ExprKind::As { e, .. } => expr_susp(e),
                 ExprKind::StructLit { fields, .. } => fields.iter().any(|(_, e)| expr_susp(e)),
+                ExprKind::Match { e, arms } => {
+                    expr_susp(e)
+                        || arms.iter().any(|a| match &a.body {
+                            MatchBody::Expr(be) => expr_susp(be),
+                            MatchBody::Block(b) => block_has(b),
+                        })
+                        || arms.iter().any(|a| match &a.pat {
+                            Pattern::Lit(le) => expr_susp(le),
+                            _ => false,
+                        })
+                }
                 _ => false,
             }
         }
@@ -1205,7 +1363,98 @@ impl<'a> Checker<'a> {
                 ExprKind::StructLit { fields, .. } => {
                     fields.iter().any(|(_, e)| expr_has_susp(e, susp))
                 }
+                ExprKind::Match { e, arms } => {
+                    expr_has_susp(e, susp)
+                        || arms.iter().any(|a| match &a.body {
+                            MatchBody::Expr(be) => expr_has_susp(be, susp),
+                            MatchBody::Block(b) => blk_susp(b, susp),
+                        })
+                        || arms.iter().any(|a| match &a.pat {
+                            Pattern::Lit(le) => expr_has_susp(le, susp),
+                            _ => false,
+                        })
+                }
                 _ => false,
+            }
+        }
+        fn blk_susp(b: &Block, susp: &HashSet<String>) -> bool {
+            b.stmts.iter().any(|s| match s {
+                Stmt::Scope { .. } | Stmt::Select { .. } => true,
+                Stmt::Expr(e) | Stmt::Assign { val: e, .. } | Stmt::Let { init: e, .. }
+                | Stmt::Defer { call: e, .. } | Stmt::Spawn { call: e, .. } => {
+                    expr_has_susp(e, susp)
+                }
+                Stmt::Let2 { call, .. } => expr_has_susp(call, susp),
+                Stmt::Return { vals, .. } => vals.iter().any(|v| expr_has_susp(v, susp)),
+                Stmt::If { cond, then, els, .. } => {
+                    expr_has_susp(cond, susp)
+                        || blk_susp(then, susp)
+                        || els.as_ref().map(|b| blk_susp(b, susp)).unwrap_or(false)
+                }
+                Stmt::For { cond, body, .. } => {
+                    expr_has_susp(cond, susp) || blk_susp(body, susp)
+                }
+                Stmt::Unsafe { body, .. } => blk_susp(body, susp),
+                Stmt::Break { .. } | Stmt::Continue { .. } => false,
+            })
+        }
+        // `match` arm bodies emit as C stmt-exprs except when the whole match
+        // is a bare Stmt::Expr — only there can suspending calls live inside
+        // arms (block arms run through the frame stmt machinery)
+        fn scan_match(e: &Expr, susp: &HashSet<String>, diags: &mut Diags, stmt_pos: bool) {
+            if let ExprKind::Match { e: scrut, arms } = &e.kind {
+                scan_match(scrut, susp, diags, false);
+                for a in arms {
+                    match &a.body {
+                        MatchBody::Expr(be) => {
+                            if expr_has_susp(be, susp) {
+                                let top_call = matches!(&be.kind,
+                                    ExprKind::Call { f, .. }
+                                        if matches!(&f.kind, ExprKind::Ident(n)
+                                            if susp.contains(n)
+                                                || n == "recv" || n == "send" || n == "sleep"));
+                                if !(stmt_pos && top_call) {
+                                    diags.push(Diag::err(a.span, "check",
+                                        "suspending call inside a match arm must be the whole arm body \
+                                         of a statement-level match — use a block arm or hoist the call"));
+                                }
+                            }
+                            scan_match(be, susp, diags,
+                                stmt_pos && matches!(&be.kind, ExprKind::Match { .. }));
+                        }
+                        MatchBody::Block(b) => {
+                            if !stmt_pos && blk_susp(b, susp) {
+                                diags.push(Diag::err(a.span, "check",
+                                    "suspending call inside a value-position match — \
+                                     use `match` as a statement or hoist the call"));
+                            }
+                            walk_block(b, susp, diags);
+                        }
+                    }
+                }
+                return;
+            }
+            match &e.kind {
+                ExprKind::Call { f, args } => {
+                    scan_match(f, susp, diags, false);
+                    for a in args {
+                        scan_match(a, susp, diags, false);
+                    }
+                }
+                ExprKind::Bin { l, r, .. } => {
+                    scan_match(l, susp, diags, false);
+                    scan_match(r, susp, diags, false);
+                }
+                ExprKind::Un { e, .. } | ExprKind::As { e, .. } => {
+                    scan_match(e, susp, diags, false)
+                }
+                ExprKind::Field { obj, .. } => scan_match(obj, susp, diags, false),
+                ExprKind::StructLit { fields, .. } => {
+                    for (_, fe) in fields {
+                        scan_match(fe, susp, diags, false);
+                    }
+                }
+                _ => {}
             }
         }
         fn walk_block(b: &Block, susp: &HashSet<String>, diags: &mut Diags) {
@@ -1216,21 +1465,49 @@ impl<'a> Checker<'a> {
                             diags.push(Diag::err(*span, "check",
                                 "`defer` cannot capture a suspending call — it runs during unwind"));
                         }
+                        scan_match(call, susp, diags, false);
                     }
-                    Stmt::If { then, els, .. } => {
+                    Stmt::Expr(e) => scan_match(e, susp, diags, true),
+                    Stmt::Let { init, .. } | Stmt::Assign { val: init, .. } => {
+                        scan_match(init, susp, diags, false)
+                    }
+                    Stmt::Let2 { call, .. } | Stmt::Spawn { call, .. } => {
+                        scan_match(call, susp, diags, false)
+                    }
+                    Stmt::Return { vals, .. } => {
+                        for v in vals {
+                            scan_match(v, susp, diags, false);
+                        }
+                    }
+                    Stmt::If { cond, then, els, .. } => {
+                        scan_match(cond, susp, diags, false);
                         walk_block(then, susp, diags);
                         if let Some(e) = els {
                             walk_block(e, susp, diags);
                         }
                     }
-                    Stmt::For { body, .. } | Stmt::Scope { body, .. }
-                    | Stmt::Unsafe { body, .. } => walk_block(body, susp, diags),
+                    Stmt::For { cond, body, .. } => {
+                        scan_match(cond, susp, diags, false);
+                        walk_block(body, susp, diags);
+                    }
+                    Stmt::Scope { body, .. } | Stmt::Unsafe { body, .. } => {
+                        walk_block(body, susp, diags)
+                    }
                     Stmt::Select { arms, .. } => {
                         for a in arms {
+                            match &a.kind {
+                                SelKind::Recv { chan, .. } => {
+                                    scan_match(chan, susp, diags, false)
+                                }
+                                SelKind::Timeout { ms, .. } => {
+                                    scan_match(ms, susp, diags, false)
+                                }
+                                SelKind::Else { .. } => {}
+                            }
                             walk_block(&a.body, susp, diags);
                         }
                     }
-                    _ => {}
+                    Stmt::Break { .. } | Stmt::Continue { .. } => {}
                 }
             }
         }

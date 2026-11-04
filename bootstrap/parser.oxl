@@ -59,6 +59,11 @@ enum Node {
     Enum{name: str, vars: own NList},       // {"enum": s, "variants": [...]}
     Variant{name: str, args: own NList},    // {"variant": s, "args": [...]}
     As{e: own Node, ty: own Node},          // {"as": <e>, "ty": <t>}
+    Match{e: own Node, arms: own NList},    // {"match": <e>, "arms": [...]}
+    MArm{pat: own Node, body: own Node},    // {"pat": <p>, "body": <b>}
+    Pat{path: str, binds: own NList},       // {"pat": s} (+"binds")
+    PatWild,                                // {"pat": "_"}
+    PatLit{v: own Node},                    // {"patlit": <v>}
 }
 
 fn ncons(v: own Node, next: own NList) -> own NList {
@@ -101,155 +106,150 @@ fn to_json(n: own Node) -> own json.Json {
         return jl_items(p.items)
     }
     o := json.jobj()
-    k := n.kind()
-    if k == 0 {
-        p := n as Node.JInt
-        json.jadd(o, "int", json.jint(p.f0))
-    }
-    if k == 1 {
-        p := n as Node.JStr
-        json.jadd(o, "str", json.jstr(p.f0))
-    }
-    if k == 2 {
-        p := n as Node.Name
-        json.jadd(o, "name", json.jstr(p.f0))
-    }
-    if k == 3 {
-        p := n as Node.Ty
-        json.jadd(o, "ty", json.jstr(p.f0))
-    }
-    if k == 4 {
-        p := n as Node.NamedField
-        json.jadd(o, "name", json.jstr(p.name))
-        json.jadd(o, "val", to_json(p.val))
-    }
-    if k == 5 {
-        p := n as Node.Param
-        json.jadd(o, "name", json.jstr(p.name))
-        if p.ty != nil { json.jadd(o, "ty", to_json(p.ty)) }
-    }
-    if k == 6 {
-        p := n as Node.FieldDef
-        json.jadd(o, "name", json.jstr(p.name))
-        if p.ty != nil { json.jadd(o, "ty", to_json(p.ty)) }
-    }
-    if k == 7 {
-        p := n as Node.Lit
-        json.jadd(o, "lit", to_json(p.obj))
-        json.jadd(o, "fields", jl_items(p.fields))
-    }
-    if k == 8 {
-        p := n as Node.Call
-        json.jadd(o, "call", to_json(p.f))
-        json.jadd(o, "args", jl_items(p.args))
-    }
-    if k == 9 {
-        p := n as Node.Field
-        json.jadd(o, "field", to_json(p.obj))
-        json.jadd(o, "name", json.jstr(p.name))
-    }
-    if k == 10 {
-        p := n as Node.Un
-        json.jadd(o, "un", json.jstr(p.op))
-        json.jadd(o, "e", to_json(p.e))
-    }
-    if k == 11 {
-        p := n as Node.Bin
-        json.jadd(o, "bin", json.jstr(p.op))
-        json.jadd(o, "l", to_json(p.l))
-        json.jadd(o, "r", to_json(p.r))
-    }
-    if k == 12 {
-        p := n as Node.Let
-        json.jadd(o, "let", json.jstr(p.name))
-        if p.init != nil { json.jadd(o, "init", to_json(p.init)) }
-    }
-    if k == 13 {
-        p := n as Node.Ret
-        json.jadd(o, "return", jl_items(p.vals))
-    }
-    if k == 14 { json.jadd(o, "break", json.jnull()) }
-    if k == 15 { json.jadd(o, "continue", json.jnull()) }
-    if k == 16 {
-        p := n as Node.Scope
-        json.jadd(o, "scope", to_json(p.body))
-    }
-    if k == 17 {
-        p := n as Node.Spawn
-        json.jadd(o, "spawn", to_json(p.e))
-    }
-    if k == 18 {
-        p := n as Node.SpawnBlocking
-        json.jadd(o, "spawnBlocking", to_json(p.e))
-    }
-    if k == 19 {
-        p := n as Node.Go
-        json.jadd(o, "go", to_json(p.e))
-    }
-    if k == 20 {
-        p := n as Node.Let2
-        json.jadd(o, "let2", json.jstr(p.names))
-        if p.call != nil { json.jadd(o, "call", to_json(p.call)) }
-    }
-    if k == 21 {
-        p := n as Node.Bind
-        json.jadd(o, "bind", json.jstr(p.name))
-        json.jadd(o, "init", to_json(p.init))
-    }
-    if k == 22 {
-        p := n as Node.ExprStmt
-        json.jadd(o, "expr", to_json(p.e))
-    }
-    if k == 23 {
-        p := n as Node.If
-        json.jadd(o, "if", to_json(p.cond))
-        json.jadd(o, "then", to_json(p.then))
-        if p.els != nil { json.jadd(o, "else", to_json(p.els)) }
-    }
-    if k == 24 {
-        p := n as Node.For
-        json.jadd(o, "for", to_json(p.cond))
-        json.jadd(o, "body", to_json(p.body))
-    }
-    if k == 26 {
-        p := n as Node.Fn
-        if p.ex { json.jadd(o, "extern", json.jbool(true)) }
-        json.jadd(o, "fn", json.jstr(p.name))
-        json.jadd(o, "params", jl_items(p.params))
-        if p.ret != nil { json.jadd(o, "ret", to_json(p.ret)) }
-        if p.body != nil { json.jadd(o, "body", to_json(p.body)) }
-    }
-    if k == 27 {
-        p := n as Node.Import
-        json.jadd(o, "import", json.jstr(p.path))
-    }
-    if k == 28 {
-        p := n as Node.Struct
-        json.jadd(o, "struct", json.jstr(p.name))
-        json.jadd(o, "fields", jl_items(p.fields))
-    }
-    if k == 29 {
-        p := n as Node.Skip
-        json.jadd(o, "skip", json.jstr(p.text))
-    }
-    if k == 30 {
-        p := n as Node.Root
-        json.jadd(o, "items", jl_items(p.items))
-    }
-    if k == 31 {
-        p := n as Node.Enum
-        json.jadd(o, "enum", json.jstr(p.name))
-        json.jadd(o, "variants", jl_items(p.vars))
-    }
-    if k == 32 {
-        p := n as Node.Variant
-        json.jadd(o, "variant", json.jstr(p.name))
-        json.jadd(o, "args", jl_items(p.args))
-    }
-    if k == 33 {
-        p := n as Node.As
-        json.jadd(o, "as", to_json(p.e))
-        json.jadd(o, "ty", to_json(p.ty))
+    match n {
+        Node.JInt(v) => {
+            json.jadd(o, "int", json.jint(v))
+        }
+        Node.JStr(s) => {
+            json.jadd(o, "str", json.jstr(s))
+        }
+        Node.Name(s) => {
+            json.jadd(o, "name", json.jstr(s))
+        }
+        Node.Ty(s) => {
+            json.jadd(o, "ty", json.jstr(s))
+        }
+        Node.NamedField{name, val} => {
+            json.jadd(o, "name", json.jstr(name))
+            json.jadd(o, "val", to_json(val))
+        }
+        Node.Param{name, ty} => {
+            json.jadd(o, "name", json.jstr(name))
+            if ty != nil { json.jadd(o, "ty", to_json(ty)) }
+        }
+        Node.FieldDef{name, ty} => {
+            json.jadd(o, "name", json.jstr(name))
+            if ty != nil { json.jadd(o, "ty", to_json(ty)) }
+        }
+        Node.Lit{obj, fields} => {
+            json.jadd(o, "lit", to_json(obj))
+            json.jadd(o, "fields", jl_items(fields))
+        }
+        Node.Call{f, args} => {
+            json.jadd(o, "call", to_json(f))
+            json.jadd(o, "args", jl_items(args))
+        }
+        Node.Field{obj, name} => {
+            json.jadd(o, "field", to_json(obj))
+            json.jadd(o, "name", json.jstr(name))
+        }
+        Node.Un{op, e} => {
+            json.jadd(o, "un", json.jstr(op))
+            json.jadd(o, "e", to_json(e))
+        }
+        Node.Bin{op, l, r} => {
+            json.jadd(o, "bin", json.jstr(op))
+            json.jadd(o, "l", to_json(l))
+            json.jadd(o, "r", to_json(r))
+        }
+        Node.Let{name, init} => {
+            json.jadd(o, "let", json.jstr(name))
+            if init != nil { json.jadd(o, "init", to_json(init)) }
+        }
+        Node.Ret{vals} => {
+            json.jadd(o, "return", jl_items(vals))
+        }
+        Node.Break => {
+            json.jadd(o, "break", json.jnull())
+        }
+        Node.Continue => {
+            json.jadd(o, "continue", json.jnull())
+        }
+        Node.Scope{body} => {
+            json.jadd(o, "scope", to_json(body))
+        }
+        Node.Spawn{e} => {
+            json.jadd(o, "spawn", to_json(e))
+        }
+        Node.SpawnBlocking{e} => {
+            json.jadd(o, "spawnBlocking", to_json(e))
+        }
+        Node.Go{e} => {
+            json.jadd(o, "go", to_json(e))
+        }
+        Node.Let2{names, call} => {
+            json.jadd(o, "let2", json.jstr(names))
+            if call != nil { json.jadd(o, "call", to_json(call)) }
+        }
+        Node.Bind{name, init} => {
+            json.jadd(o, "bind", json.jstr(name))
+            json.jadd(o, "init", to_json(init))
+        }
+        Node.ExprStmt{e} => {
+            json.jadd(o, "expr", to_json(e))
+        }
+        Node.If{cond, then, els} => {
+            json.jadd(o, "if", to_json(cond))
+            json.jadd(o, "then", to_json(then))
+            if els != nil { json.jadd(o, "else", to_json(els)) }
+        }
+        Node.For{cond, body} => {
+            json.jadd(o, "for", to_json(cond))
+            json.jadd(o, "body", to_json(body))
+        }
+        Node.List{items} => {
+            json.jadd(o, "items", jl_items(items))
+        }
+        Node.Fn{ex, name, params, ret, body} => {
+            if ex { json.jadd(o, "extern", json.jbool(true)) }
+            json.jadd(o, "fn", json.jstr(name))
+            json.jadd(o, "params", jl_items(params))
+            if ret != nil { json.jadd(o, "ret", to_json(ret)) }
+            if body != nil { json.jadd(o, "body", to_json(body)) }
+        }
+        Node.Import{path} => {
+            json.jadd(o, "import", json.jstr(path))
+        }
+        Node.Struct{name, fields} => {
+            json.jadd(o, "struct", json.jstr(name))
+            json.jadd(o, "fields", jl_items(fields))
+        }
+        Node.Skip{text} => {
+            json.jadd(o, "skip", json.jstr(text))
+        }
+        Node.Root{items} => {
+            json.jadd(o, "items", jl_items(items))
+        }
+        Node.Enum{name, vars} => {
+            json.jadd(o, "enum", json.jstr(name))
+            json.jadd(o, "variants", jl_items(vars))
+        }
+        Node.Variant{name, args} => {
+            json.jadd(o, "variant", json.jstr(name))
+            json.jadd(o, "args", jl_items(args))
+        }
+        Node.As{e, ty} => {
+            json.jadd(o, "as", to_json(e))
+            json.jadd(o, "ty", to_json(ty))
+        }
+        Node.Match{e, arms} => {
+            json.jadd(o, "match", to_json(e))
+            json.jadd(o, "arms", jl_items(arms))
+        }
+        Node.MArm{pat, body} => {
+            json.jadd(o, "pat", to_json(pat))
+            json.jadd(o, "body", to_json(body))
+        }
+        Node.Pat{path, binds} => {
+            json.jadd(o, "pat", json.jstr(path))
+            if binds != nil { json.jadd(o, "binds", jl_items(binds)) }
+        }
+        Node.PatWild => {
+            json.jadd(o, "pat", json.jstr("_"))
+        }
+        Node.PatLit{v} => {
+            json.jadd(o, "patlit", to_json(v))
+        }
     }
     return o
 }
@@ -290,6 +290,9 @@ fn eat(c: mut PCur, w: str) -> bool {
 // ---------- expressions ----------
 
 fn p_primary(c: mut PCur) -> own Node {
+    if at(c, "match") {
+        return p_match(c)
+    }
     k := pkind(c)
     if k == 3 {
         e := b(Node.JInt(atoi(peek(c))))
@@ -324,6 +327,62 @@ fn p_primary(c: mut PCur) -> own Node {
         return b(Node.Lit{obj: e, fields: nrev(fields)})
     }
     return e
+}
+
+// match e { pat => body, ... } — `=>` lexes as `=` `>` in the bootstrap lexer
+fn p_match(c: mut PCur) -> own Node {
+    next(c)
+    c.nolit = 1
+    e := p_expr(c)
+    c.nolit = 0
+    eat(c, "{")
+    let arms: own NList = nil
+    for !at(c, "}") && !eof(c) {
+        pat := p_pat(c)
+        eat(c, "=")
+        eat(c, ">")
+        let body: own Node = nil
+        if at(c, "{") {
+            body = p_block(c)
+        } else {
+            body = p_expr(c)
+        }
+        arms = ncons(b(Node.MArm{pat: pat, body: body}), arms)
+    }
+    eat(c, "}")
+    return b(Node.Match{e: e, arms: nrev(arms)})
+}
+
+fn p_pat(c: mut PCur) -> own Node {
+    if eat(c, "_") {
+        return b(Node.PatWild)
+    }
+    k := pkind(c)
+    if k == 3 || k == 4 {
+        return b(Node.PatLit{v: p_primary(c)})
+    }
+    path := peek(c)
+    next(c)
+    for at(c, ".") {
+        next(c)
+        path = path + "." + peek(c)
+        next(c)
+    }
+    if at(c, "(") || at(c, "{") {
+        open := peek(c)
+        close := ")"
+        if open == "{" { close = "}" }
+        next(c)
+        let binds: own NList = nil
+        for !at(c, close) && !eof(c) {
+            binds = ncons(b(Node.Name(peek(c))), binds)
+            next(c)
+            eat(c, ",")
+        }
+        eat(c, close)
+        return b(Node.Pat{path: path, binds: nrev(binds)})
+    }
+    return b(Node.Pat{path: path, binds: nil})
 }
 
 fn p_postfix(c: mut PCur) -> own Node {

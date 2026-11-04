@@ -117,6 +117,24 @@ fn qualify_expr(
             qualify_expr(e, renames, aliases);
             qualify_ty(ty, renames, aliases);
         }
+        ast::ExprKind::Match { e, arms } => {
+            qualify_expr(e, renames, aliases);
+            for a in arms {
+                match &mut a.pat {
+                    ast::Pattern::VarUnit { path }
+                    | ast::Pattern::VarPos { path, .. }
+                    | ast::Pattern::VarNamed { path, .. } => {
+                        *path = map_name(path, renames, aliases);
+                    }
+                    ast::Pattern::Lit(le) => qualify_expr(le, renames, aliases),
+                    _ => {}
+                }
+                match &mut a.body {
+                    ast::MatchBody::Expr(be) => qualify_expr(be, renames, aliases),
+                    ast::MatchBody::Block(b) => qualify_block(b, renames, aliases),
+                }
+            }
+        }
         _ => {}
     }
 }

@@ -171,6 +171,37 @@ pub enum SelKind {
 }
 
 #[derive(Clone, Debug)]
+pub struct MatchArm {
+    pub pat: Pattern,
+    pub body: MatchBody,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum Pattern {
+    /// `_` — covers the rest
+    Wild,
+    /// `E.V` unit variant — no bindings
+    VarUnit { path: String },
+    /// `E.V(x, ..)` — positional payload binds
+    VarPos { path: String, binds: Vec<String> },
+    /// `E.V{a, ..}` — named payload binds
+    VarNamed { path: String, binds: Vec<String> },
+    /// literal constant — int/float/str/bool (non-enum scrutinee)
+    Lit(Expr),
+    /// bare ident — binds the scrutinee itself
+    Bind(String),
+}
+
+#[derive(Clone, Debug)]
+pub enum MatchBody {
+    /// `=> expr` — value arm
+    Expr(Expr),
+    /// `=> { stmts }` — statement arm
+    Block(Block),
+}
+
+#[derive(Clone, Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
@@ -191,6 +222,8 @@ pub enum ExprKind {
     Un { op: UnOp, e: Box<Expr> },
     /// `e as T` — v0.2 only `E.V` (enum variant payload extraction)
     As { e: Box<Expr>, ty: TyRef },
+    /// `match e { arms }` — stmt-position when any arm is a block
+    Match { e: Box<Expr>, arms: Vec<MatchArm> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
