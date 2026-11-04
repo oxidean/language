@@ -72,9 +72,11 @@ dropped-error-as-compile-error; `extern fn` C FFI; `scope`/`spawn`/`go`
 pool (the state-machine transform lands behind the same semantics, see
 `docs/semantics/concurrency.md`); `break`/`continue`; `interface` op
 constraints; generics `fn f[T ordered](a: T, b: T)` monomorphized per
-call site; `import "std/strings"` modules; builtin surface: `print`,
+call site; `import "std/strings"` modules; top-level `let` globals
+(process-wide state, initialized before `main`); builtin surface: `print`,
 `itoa`, string ops, `mkbuf`/`poke*`, `argc`/`argv`, `readfile`/
-`writefile`, `exit`, `mkshared`/`sget`/`sset`, sqlite3 shims, `assert`.
+`writefile`, `exit`, `mkshared`/`sget`/`sset`/`scas`/`sadd`,
+`now`/`now_ms`/`usleep`, sqlite3 shims, `assert`.
 
 ## Examples
 
@@ -86,14 +88,15 @@ call site; `import "std/strings"` modules; builtin surface: `print`,
 | `examples/http-crud-sqlite/main.lang` | the flagship pilot: HTTP server + SQLite + per-connection tasks |
 | `examples/smoke_test.lang` | `lang test` scoped test harness |
 | `tests/stdlib_test.lang` | stdlib + break/continue coverage |
+| `tests/stdmods_test.lang` | `std/json`, `std/sync`, `std/time` end-to-end |
 | `bootstrap/lexer.lang` | **self-host component**: the language's lexer written in the language |
 
 Try it:
 
 ```sh
 lang run examples/http-crud-sqlite/main.lang &
-curl -d 'widget' localhost:8080/items
-curl localhost:8080/items        # → 1|widget
+curl -d 'widget' localhost:8080/items          # → {"created":"widget"}
+curl localhost:8080/items                      # → {"items":[{"id":1,"name":"widget"}]}
 ```
 
 ## Repo layout
@@ -102,7 +105,7 @@ curl localhost:8080/items        # → 1|widget
 lang/          the compiler (Rust): lexer → parser → check → codegen → C → cc
 runtime/       rt.c/rt.h — arenas, ObjHdr checks, scopes/traps, executor, channels
 docs/          design doc, semantics annex, prototype report
-stdlib/        the standard library, written in the language (strings, testing, http)
+stdlib/        the standard library, written in the language (strings, testing, http, json, sync, time)
 bootstrap/     self-host components — lexer done, parser next (docs/self-hosting.md)
 examples/      pilot programs (see above)
 tests/         tests/run.sh end-to-end suite (runs in CI)

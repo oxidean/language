@@ -1,0 +1,35 @@
+// std/sync — mutual exclusion built on Shared atomics.
+//
+// A Mutex is an own Shared cell: 0 = unlocked, 1 = locked. mlock spins on
+// CAS until it claims the cell. This is a spinlock, not a blocking lock —
+// keep critical sections short; a waiter burns a pool worker while held.
+
+/// new unlocked mutex
+fn mutex() -> own {
+    return mkshared(0)
+}
+
+/// acquire — spins until the cell CASes 0 → 1
+fn mlock(m: own) {
+    for scas(m, 0, 1) != 0 {
+    }
+}
+
+/// release
+fn munlock(m: own) {
+    sset(m, 0)
+}
+
+/// atomic counter — sget/sset on a cell is already atomic; these are the
+/// read-friendly names so call sites don't need the raw primitives
+fn counter() -> own {
+    return mkshared(0)
+}
+
+fn cinc(c: own) {
+    sadd(c, 1)
+}
+
+fn cval(c: own) -> int {
+    return sget(c)
+}

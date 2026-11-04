@@ -14,9 +14,15 @@ pub fn parse(toks: &[Token], diags: &mut Diags) -> Crate {
     let mut p = Parser { toks, i: 0, diags, no_lit: false };
     let mut items = Vec::new();
     while !p.at_eof() {
+        let before = p.i;
         match p.item() {
             Some(it) => items.push(it),
-            None => p.skip_to_item_boundary(),
+            None => {
+                p.skip_to_item_boundary();
+                if p.i == before {
+                    p.bump(); // guaranteed progress — never spin on a bad token
+                }
+            }
         }
     }
     Crate { items }
@@ -125,6 +131,13 @@ impl<'a> Parser<'a> {
             }
             return Some(Item::Interface(Interface { name, ops, span: sp }));
         }
+        if self.eat_kw(Kw::Let) {
+            let (name, sp) = self.ident()?;
+            let ty = if self.eat_p(P::Colon) { Some(self.ty()?) } else { None };
+            self.expect_p(P::Assign, "`=`");
+            let init = self.expr(0, false)?;
+            return Some(Item::Global(Global { name, ty, init, span: sp }));
+        }
         if self.eat_kw(Kw::Extern) {
             if !self.eat_kw(Kw::Fn) {
                 let sp = self.span();
@@ -227,17 +240,21 @@ impl<'a> Parser<'a> {
 
     fn ty(&mut self) -> Option<TyRef> {
         let sp = self.span();
+        // bare `own`/`ref`/`mut` = pointer to unknown (Shared cells, FFI handles)
+        let void = || TyRef { kind: TyKind::Named("void".into()), span: sp };
+        let starts_ty = |p: &Self| matches!(p.cur().tok, Tok::Ident(_)
+            | Tok::Kw(Kw::Own) | Tok::Kw(Kw::Ref) | Tok::Kw(Kw::Mut) | Tok::Kw(Kw::Chan));
         if self.eat_kw(Kw::Own) {
-            let t = self.ty()?;
-            return Some(TyRef { kind: TyKind::Own(Box::new(t)), span: sp });
+            let inner = if starts_ty(self) { self.ty()? } else { void() };
+            return Some(TyRef { kind: TyKind::Own(Box::new(inner)), span: sp });
         }
         if self.eat_kw(Kw::Ref) {
-            let t = self.ty()?;
-            return Some(TyRef { kind: TyKind::Ref(Box::new(t)), span: sp });
+            let inner = if starts_ty(self) { self.ty()? } else { void() };
+            return Some(TyRef { kind: TyKind::Ref(Box::new(inner)), span: sp });
         }
         if self.eat_kw(Kw::Mut) {
-            let t = self.ty()?;
-            return Some(TyRef { kind: TyKind::Mut(Box::new(t)), span: sp });
+            let inner = if starts_ty(self) { self.ty()? } else { void() };
+            return Some(TyRef { kind: TyKind::Mut(Box::new(inner)), span: sp });
         }
         if self.eat_kw(Kw::Chan) {
             return Some(TyRef { kind: TyKind::Chan, span: sp });

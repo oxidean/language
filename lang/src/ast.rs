@@ -12,6 +12,17 @@ pub enum Item {
     Extern(Fn),
     Interface(Interface),
     Import(String, Span),
+    Global(Global),
+}
+
+/// top-level `let name[: ty] = init` — process-wide state, initialized
+/// in lang_main prologue (order: before user main runs)
+#[derive(Debug)]
+pub struct Global {
+    pub name: String,
+    pub ty: Option<TyRef>,
+    pub init: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug)]

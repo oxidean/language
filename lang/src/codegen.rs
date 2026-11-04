@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::check::Ty;
+use crate::check::{subst_ty, Ty, Ret};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -43,6 +43,7 @@ struct Gen<'a> {
     subst: HashMap<String, Ty>,
     cur_tyvars: std::collections::HashSet<String>,
     externs: std::collections::HashSet<String>,
+    globals: HashMap<String, Ty>,
     cur_ret_pair: bool,
     cur_fn: String,
     test_mode: bool,
@@ -73,6 +74,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
         subst: HashMap::new(),
         cur_tyvars: std::collections::HashSet::new(),
         externs: std::collections::HashSet::new(),
+        globals: HashMap::new(),
         cur_ret_pair: false,
         cur_fn: String::new(),
         test_mode,
@@ -104,6 +106,14 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
                 }
                 g.fns.insert(f.name.clone(), (params, ret));
             }
+            Item::Global(gl) => {
+                let t = match &gl.ty {
+                    Some(tr) => g.ty_of_ref(tr),
+                    None => g.expr_ty(&gl.init),
+                };
+                g.globals.insert(gl.name.clone(), t.clone());
+                g.env[0].insert(gl.name.clone(), t);
+            }
             _ => {}
         }
     }
@@ -132,6 +142,14 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
                     );
                 }
             }
+        }
+    }
+
+    // file-scope globals (initialized in lang_main prologue)
+    for it in &c.items {
+        if let Item::Global(gl) = it {
+            let t = g.globals.get(&gl.name).cloned().unwrap_or(Ty::Int);
+            let _ = writeln!(out, "static {} l_g_{};", g.cty(&t), gl.name);
         }
     }
 
@@ -169,8 +187,17 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
             g.func_inst(f, &mangled, &bind);
         }
     }
+    // global initializers run first inside lang_main (base scope exists)
+    let mut global_inits = String::new();
+    for it in &c.items {
+        if let Item::Global(gl) = it {
+            let v = g.expr(&gl.init);
+            let _ = writeln!(global_inits, "    l_g_{} = {v};", gl.name);
+        }
+    }
     if test_mode {
         let _ = writeln!(g.out, "void lang_main(void) {{");
+        g.out.push_str(&global_inits);
         let mut id = 0usize;
         for it in &c.items {
             if let Item::Fn(f) = it {
@@ -186,6 +213,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
     }
 
     // trampolines must precede the fn bodies that reference them
+    g.out = g.out.replace("/*GLOBALS*/", &global_inits);
     let mut final_out = g.out[..body_start].to_string();
     final_out.push_str(&g.trampolines);
     final_out.push_str(&g.inst_out);
@@ -340,7 +368,7 @@ impl<'a> Gen<'a> {
         self.env.pop();
         let _ = writeln!(self.out, "}}\n");
         if f.name == "main" && !self.test_mode {
-            let _ = writeln!(self.out, "void lang_main(void) {{ l_f_main(); }}\n");
+            let _ = writeln!(self.out, "void lang_main(void) {{ /*GLOBALS*/ l_f_main(); }}\n");
         }
     }
 
@@ -459,7 +487,8 @@ impl<'a> Gen<'a> {
                     match n.as_str() {
                         "mkchan" => return Ty::Chan,
                         "recv" | "argc" | "len" | "byteat" | "find" | "atoi"
-                        | "htons" | "htonl" | "sqlite_exec" | "writefile" | "sget" => {
+                        | "htons" | "htonl" | "sqlite_exec" | "writefile" | "sget" | "scas"
+                        | "sadd" | "now" | "now_ms" => {
                             return Ty::Int
                         }
                         "argv" | "itoa" | "substr" | "bufstr" | "sqlite_query" | "readfile" => {
@@ -694,7 +723,15 @@ impl<'a> Gen<'a> {
             ExprKind::Str(s) => format!("rt_str_lit(\"{}\")", c_escape(s)),
             ExprKind::Bool(b) => format!("{b}"),
             ExprKind::Nil => "0".into(),
-            ExprKind::Ident(n) => n.clone(),
+            ExprKind::Ident(n) => {
+                // locals shadow globals; a bare global emits l_g_name
+                let local = self.env.iter().skip(1).any(|s| s.contains_key(n));
+                if !local && self.globals.contains_key(n) {
+                    format!("l_g_{n}")
+                } else {
+                    n.clone()
+                }
+            }
             ExprKind::Call { f, args } => self.call(f, args),
             ExprKind::Field { obj, name } => {
                 let o = self.expr(obj);
@@ -761,7 +798,8 @@ impl<'a> Gen<'a> {
             "byteat" | "substr" | "find" | "bufstr" | "poke8" | "poke16" | "poke32"
             | "sqlite_exec" | "sqlite_query" => format!("rt_{name}({})", j(argvs)),
             "atoi" | "mkbuf" | "htons" | "htonl" | "cstr" | "sqlite_open" | "sqlite_close"
-            | "readfile" | "writefile" | "exit" | "mkshared" | "sget" | "sset" => {
+            | "readfile" | "writefile" | "exit" | "mkshared" | "sget" | "sset" | "scas"
+            | "sadd" | "now" | "now_ms" | "usleep" => {
                 format!("rt_{name}({})", j(argvs))
             }
             _ => return None,
@@ -812,11 +850,12 @@ impl<'a> Gen<'a> {
                         name.clone()
                     };
                     // str -> cstr coercion + borrow checks for ref/mut params
-                    if let Some((params, _)) = self.fns.get(name).cloned() {
+                    if let Some((params, ret)) = self.fns.get(name).cloned() {
                         let smap: HashMap<String, Ty> = call_bindings(self, name, args)
                             .map(|b| b.into_iter().collect())
                             .unwrap_or_default();
                         let mut pre = String::new();
+                        let mut post = String::new();
                         let mut coerced: Vec<String> = Vec::new();
                         for (a, pt) in args.iter().zip(params.iter()) {
                             let pt = if smap.is_empty() {
@@ -825,19 +864,48 @@ impl<'a> Gen<'a> {
                                 crate::check::subst_ty(pt, &smap)
                             };
                             let mut v = self.expr(a);
-                            if pt == Ty::CStr && self.dt(&self.expr_ty(a)) == Ty::Str {
+                            let raw_at = self.expr_ty(a);
+                            if pt == Ty::CStr && self.dt(&raw_at) == Ty::Str {
                                 v = format!("rt_cstr({v})");
                             }
-                            match &pt {
-                                Ty::Mut(_) => pre.push_str(&format!("rt_borrow_mut({v}); ")),
-                                Ty::Ref(_) => pre.push_str(&format!("rt_borrow_read({v}); ")),
-                                _ => {}
+                            // only `own` args start a fresh borrow — mut/ref args
+                            // are reborrows inside the caller's existing region
+                            if matches!(raw_at, Ty::Own(_)) {
+                                match &pt {
+                                    Ty::Mut(_) => {
+                                        pre.push_str(&format!("rt_borrow_mut({v}); "));
+                                        post.push_str(&format!("rt_unborrow({v}); "));
+                                    }
+                                    Ty::Ref(_) => {
+                                        pre.push_str(&format!("rt_borrow_read({v}); "));
+                                        post.push_str(&format!("rt_unborrow({v}); "));
+                                    }
+                                    _ => {}
+                                }
                             }
                             coerced.push(v);
                         }
                         let inner = format!("{callee}({})", coerced.join(", "));
                         if !pre.is_empty() {
-                            return format!("({{ {pre}{inner}; }})");
+                            // borrows are lexical to the call — release on the way out
+                            match &ret {
+                                Ret::Void => {
+                                    return format!("({{ {pre}{inner}; {post}}})");
+                                }
+                                Ret::One(rt) => {
+                                    let rty = if smap.is_empty() { rt.clone() } else { subst_ty(rt, &smap) };
+                                    return format!(
+                                        "({{ {} __rc; {pre}__rc = {inner}; {post}__rc; }})",
+                                        self.cty(&rty)
+                                    );
+                                }
+                                Ret::Pair(_) => {
+                                    return format!(
+                                        "({{ struct l_ret_{} __rc; {pre}__rc = {inner}; {post}__rc; }})",
+                                        callee.trim_start_matches("l_f_")
+                                    );
+                                }
+                            }
                         }
                         return inner;
                     }

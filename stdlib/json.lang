@@ -1,0 +1,301 @@
+// std/json — a minimal JSON value tree, serializer, and parser.
+//
+// One node type carries everything:
+//   kind: 0 null · 1 bool · 2 int · 3 str · 4 obj · 5 arr
+//   key:  member name when this node sits inside an object
+//   s/i/b: payload for str/int/bool nodes
+//   child: first member (obj) or element (arr) — a linked list via next
+//
+// Numbers are ints only; string escapes handle \" \\ \n \t. That covers
+// the pilot and config-file cases; floats/unicode escapes are v1 work.
+
+struct Json {
+    kind: int,
+    key: str,
+    s: str,
+    i: int,
+    b: bool,
+    child: own Json,
+    next: own Json
+}
+
+fn jnull() -> own Json {
+    j := new(Json)
+    j.kind = 0
+    return j
+}
+
+fn jbool(v: bool) -> own Json {
+    j := new(Json)
+    j.kind = 1
+    j.b = v
+    return j
+}
+
+fn jint(v: int) -> own Json {
+    j := new(Json)
+    j.kind = 2
+    j.i = v
+    return j
+}
+
+fn jstr(v: str) -> own Json {
+    j := new(Json)
+    j.kind = 3
+    j.s = v
+    return j
+}
+
+fn jobj() -> own Json {
+    j := new(Json)
+    j.kind = 4
+    return j
+}
+
+fn jarr() -> own Json {
+    j := new(Json)
+    j.kind = 5
+    return j
+}
+
+/// append member/element; key is ignored for arrays
+fn jadd(parent: own Json, key: str, val: own Json) {
+    val.key = key
+    if parent.child == nil {
+        parent.child = val
+        return
+    }
+    last := parent.child
+    for last.next != nil {
+        last = last.next
+    }
+    last.next = val
+}
+
+/// first member with this key, or nil
+fn jget(obj: own Json, key: str) -> own Json {
+    m := obj.child
+    for m != nil {
+        if m.key == key {
+            return m
+        }
+        m = m.next
+    }
+    return m
+}
+
+// ---------- serialize ----------
+
+fn jescape(s: str) -> str {
+    out := ""
+    i := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if c == 34 {
+            out = out + "\\\""
+        }
+        if c == 92 {
+            out = out + "\\\\"
+        }
+        if c == 10 {
+            out = out + "\\n"
+        }
+        if c == 9 {
+            out = out + "\\t"
+        }
+        if c != 34 && c != 92 && c != 10 && c != 9 {
+            out = out + substr(s, i, i + 1)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn tojson(j: own Json) -> str {
+    if j == nil {
+        return "null"
+    }
+    if j.kind == 0 {
+        return "null"
+    }
+    if j.kind == 1 {
+        if j.b {
+            return "true"
+        }
+        return "false"
+    }
+    if j.kind == 2 {
+        return itoa(j.i)
+    }
+    if j.kind == 3 {
+        return "\"" + jescape(j.s) + "\""
+    }
+    out := ""
+    if j.kind == 4 {
+        out = "{"
+    } else {
+        out = "["
+    }
+    m := j.child
+    first := true
+    for m != nil {
+        if first {
+            first = false
+        } else {
+            out = out + ","
+        }
+        if j.kind == 4 {
+            out = out + "\"" + jescape(m.key) + "\":" + tojson(m)
+        } else {
+            out = out + tojson(m)
+        }
+        m = m.next
+    }
+    if j.kind == 4 {
+        out = out + "}"
+    } else {
+        out = out + "]"
+    }
+    return out
+}
+
+// ---------- parse ----------
+
+struct JCur {
+    src: str,
+    pos: int
+}
+
+fn jskipws(p: mut JCur) {
+    for p.pos < len(p.src) {
+        c := byteat(p.src, p.pos)
+        if c != 32 && c != 9 && c != 10 && c != 13 {
+            return
+        }
+        p.pos = p.pos + 1
+    }
+}
+
+fn jparse_str(p: mut JCur) -> str {
+    p.pos = p.pos + 1 // opening quote
+    out := ""
+    for p.pos < len(p.src) {
+        c := byteat(p.src, p.pos)
+        if c == 34 {
+            p.pos = p.pos + 1
+            return out
+        }
+        if c == 92 {
+            p.pos = p.pos + 1
+            e := byteat(p.src, p.pos)
+            if e == 110 {
+                out = out + "\n"
+            }
+            if e == 116 {
+                out = out + "\t"
+            }
+            if e == 34 {
+                out = out + "\""
+            }
+            if e == 92 {
+                out = out + "\\"
+            }
+            p.pos = p.pos + 1
+        } else {
+            out = out + substr(p.src, p.pos, p.pos + 1)
+            p.pos = p.pos + 1
+        }
+    }
+    return out
+}
+
+fn jparse_num(p: mut JCur) -> int {
+    start := p.pos
+    neg := 0
+    if byteat(p.src, p.pos) == 45 {
+        neg = 1
+        p.pos = p.pos + 1
+    }
+    digits := start + neg
+    for p.pos < len(p.src) {
+        c := byteat(p.src, p.pos)
+        if c < 48 || c > 57 {
+            break
+        }
+        p.pos = p.pos + 1
+    }
+    v := atoi(substr(p.src, digits, p.pos))
+    if neg == 1 {
+        return 0 - v
+    }
+    return v
+}
+
+fn jparse_val(p: mut JCur) -> own Json {
+    jskipws(p)
+    if p.pos >= len(p.src) {
+        return jnull()
+    }
+    c := byteat(p.src, p.pos)
+    if c == 34 {
+        return jstr(jparse_str(p))
+    }
+    if c == 123 { // {
+        o := jobj()
+        p.pos = p.pos + 1
+        for p.pos < len(p.src) {
+            jskipws(p)
+            if byteat(p.src, p.pos) == 125 { // }
+                p.pos = p.pos + 1
+                return o
+            }
+            k := jparse_str(p)
+            jskipws(p)
+            p.pos = p.pos + 1 // :
+            jadd(o, k, jparse_val(p))
+            jskipws(p)
+            if byteat(p.src, p.pos) == 44 { // ,
+                p.pos = p.pos + 1
+            }
+        }
+        return o
+    }
+    if c == 91 { // [
+        a := jarr()
+        p.pos = p.pos + 1
+        for p.pos < len(p.src) {
+            jskipws(p)
+            if byteat(p.src, p.pos) == 93 { // ]
+                p.pos = p.pos + 1
+                return a
+            }
+            jadd(a, "", jparse_val(p))
+            jskipws(p)
+            if byteat(p.src, p.pos) == 44 {
+                p.pos = p.pos + 1
+            }
+        }
+        return a
+    }
+    if c == 116 { // true
+        p.pos = p.pos + 4
+        return jbool(true)
+    }
+    if c == 102 { // false
+        p.pos = p.pos + 5
+        return jbool(false)
+    }
+    if c == 110 { // null
+        p.pos = p.pos + 4
+        return jnull()
+    }
+    return jint(jparse_num(p))
+}
+
+/// parse text into a Json tree (null node on malformed input)
+fn jparse(src: str) -> own Json {
+    p := new(JCur)
+    p.src = src
+    p.pos = 0
+    return jparse_val(p)
+}

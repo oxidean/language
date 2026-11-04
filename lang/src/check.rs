@@ -94,6 +94,7 @@ pub struct Checker<'a> {
     ty_scope: HashSet<String>, // type params in scope (current generic fn)
     cur_ty_params: Vec<(String, String)>,
     loop_depth: i32,
+    globals: HashMap<String, Ty>,
 }
 
 const BUILTINS: &[&str] = &[
@@ -101,7 +102,8 @@ const BUILTINS: &[&str] = &[
     "assert", "itoa", "argc", "argv", "len", "byteat", "substr", "find", "atoi",
     "mkbuf", "bufstr", "poke8", "poke16", "poke32", "htons", "htonl",
     "cstr", "sqlite_open", "sqlite_exec", "sqlite_query", "sqlite_close",
-    "readfile", "writefile", "exit", "mkshared", "sget", "sset",
+    "readfile", "writefile", "exit", "mkshared", "sget", "sset", "scas", "sadd",
+    "now", "now_ms", "usleep",
 ];
 
 pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
@@ -117,6 +119,7 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
         ty_scope: HashSet::new(),
         cur_ty_params: Vec::new(),
         loop_depth: 0,
+        globals: HashMap::new(),
     };
     ck.register(c);
     ck.check_items(c);
@@ -179,6 +182,18 @@ impl<'a> Checker<'a> {
                     );
                 }
                 Item::Import(_, _sp) => {} // resolved by the driver before checking
+                Item::Global(g) => {
+                    let mut env = Env::new();
+                    let it = self.expr(&g.init, &mut env);
+                    let t = if let Some(tr) = &g.ty {
+                        let want = self.resolve(tr);
+                        self.assignable(&want, &it, g.span);
+                        want
+                    } else {
+                        it
+                    };
+                    self.globals.insert(g.name.clone(), t);
+                }
                 Item::Struct(_) | Item::Interface(_) => {}
             }
         }
@@ -466,7 +481,7 @@ impl<'a> Checker<'a> {
             ExprKind::Str(_) => Ty::Str,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Nil => Ty::Err, // nil is the empty err
-            ExprKind::Ident(n) => match env.get(n) {
+            ExprKind::Ident(n) => match env.get(n).or_else(|| self.globals.get(n).cloned()) {
                 Some(t) => t,
                 None => {
                     if self.fns.contains_key(n) || BUILTINS.contains(&n.as_str()) {
@@ -743,11 +758,17 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::Str;
                 }
-                "sget" => {
+                "sget" | "scas" | "sadd" | "now" | "now_ms" => {
                     for a in args {
                         self.expr(a, env);
                     }
                     return Ty::Int;
+                }
+                "usleep" => {
+                    for a in args {
+                        self.expr(a, env);
+                    }
+                    return Ty::Void;
                 }
                 "mkshared" => {
                     for a in args {

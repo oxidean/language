@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ARENA_CAP (1 << 20)
@@ -102,9 +103,15 @@ static void scope_done(RtScope *s) {
     pthread_mutex_unlock(&s->mu);
 }
 
+/* the currently-running task — rt_trap must settle its pending count
+ * before pthread_exit, or the scope join waits forever */
+static _Thread_local Task *tls_task;
+
 static void run_task(Task *t) {
     tls_scope = t->scope;
+    tls_task = t;
     t->fn(t->arg);
+    tls_task = NULL;
     scope_done(t->scope);
     free(t);
 }
@@ -212,6 +219,12 @@ int rt_scope_try(RtScope *s) { return join_scope(s); }
 void rt_trap(int64_t code) {
     RtScope *s = tls_scope;
     if (!s) { fprintf(stderr, "trap %lld outside scope\n", (long long)code); abort(); }
+    if (!tls_task) {
+        /* trap on a non-task thread (main/foreign) — no joiner exists to
+         * consume it; fail loudly instead of pthread_exit's silent exit-0 */
+        fprintf(stderr, "trap %lld\n", (long long)code);
+        abort();
+    }
     pthread_mutex_lock(&s->mu);
     if (!s->trapped) { /* first trap wins */
         s->trapped = 1;
@@ -219,6 +232,12 @@ void rt_trap(int64_t code) {
     }
     s->cancel = 1; /* siblings observe + unwind */
     pthread_mutex_unlock(&s->mu);
+    if (tls_task) { /* settle this task's pending slot before dying */
+        Task *t = tls_task;
+        tls_task = NULL;
+        scope_done(t->scope);
+        free(t);
+    }
     pthread_exit(0);
 }
 
@@ -239,6 +258,25 @@ void rt_sset(RtShared *s, int64_t v) {
     __sync_lock_test_and_set(&s->val, v);
     __sync_synchronize();
 }
+
+/* CAS — returns the value the cell held before */
+int64_t rt_scas(RtShared *s, int64_t expected, int64_t v) {
+    return __sync_val_compare_and_swap(&s->val, expected, v);
+}
+
+/* atomic add — returns the value before the add */
+int64_t rt_sadd(RtShared *s, int64_t delta) {
+    return __sync_fetch_and_add(&s->val, delta);
+}
+
+/* ---------------- time ---------------- */
+int64_t rt_now(void) { return (int64_t)time(NULL); }
+int64_t rt_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+void rt_usleep(int64_t usecs) { usleep((useconds_t)usecs); }
 
 /* ---------------- channels (unbuffered, word payload) ---------------- */
 

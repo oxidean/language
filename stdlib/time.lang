@@ -1,0 +1,17 @@
+// std/time — wall clock and sleeps, backed by the rt builtins.
+// (named fns, not bare builtins, so user code can shadow builtins safely)
+
+/// unix seconds
+fn unix() -> int {
+    return now()
+}
+
+/// unix milliseconds — finer-grained clock for measuring work
+fn unix_ms() -> int {
+    return now_ms()
+}
+
+/// sleep the calling task for `ms` milliseconds
+fn sleep_ms(ms: int) {
+    usleep(ms * 1000)
+}

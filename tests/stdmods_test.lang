@@ -1,0 +1,39 @@
+import "std/json"
+import "std/sync"
+import "std/time"
+
+fn main() {
+    o := jobj()
+    jadd(o, "name", jstr("widget"))
+    jadd(o, "id", jint(7))
+    a := jarr()
+    jadd(a, "", jint(1))
+    jadd(a, "", jbool(true))
+    jadd(o, "tags", a)
+    println(tojson(o))
+
+    p := jparse("{\"n\":42,\"s\":\"hi\"}")
+    println(itoa(jget(p, "n").i))
+    println(jget(p, "s").s)
+
+    c := counter()
+    scope {
+        spawn worker(c)
+        spawn worker(c)
+        spawn worker(c)
+        spawn worker(c)
+    }
+    println(itoa(cval(c)))
+
+    println(itoa(unix_ms()))
+    sleep_ms(1)
+    println("done")
+}
+
+fn worker(c: own) {
+    i := 0
+    for i < 1000 {
+        cinc(c)
+        i = i + 1
+    }
+}

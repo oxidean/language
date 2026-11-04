@@ -94,11 +94,19 @@ route()). Builtins added: `readfile`, `writefile`, `exit`, `mkshared`,
 `sget`, `sset`. Wave-1 `io`/`os` coverage comes via file builtins;
 dedicated `os` module still open.
 
-### Task 12: Stdlib wave 2 [partial]
+### Task 12: Stdlib wave 2 [done — v0 surface]
 
 `net/http` exists as `stdlib/http.lang` (socket externs, accept loop,
 `spawnBlocking` per conn, user `route()` callback) — pilot rewritten on
-it. `encoding/json`, `sync`, `time` still open.
+it. `stdlib/json.lang` — Json value tree, `tojson` serializer,
+`jparse` recursive-descent parser, `jget` member lookup (ints only,
+`\" \\ \n \t` escapes). `stdlib/sync.lang` — spin Mutex on `scas`,
+atomic `counter`/`cinc`/`cval` on `sadd`. `stdlib/time.lang` —
+`unix`/`unix_ms`/`sleep_ms`. Top-level `let` globals (process-wide
+state, initialized in `lang_main` before user main) — the pilot uses
+one shared sqlite conn across all request tasks. New builtins:
+`scas`, `sadd`, `now`, `now_ms`, `usleep`. Dedicated `os` module and
+float JSON numbers remain open.
 
 ### Task 13: Multithread executor + blocking pool [done]
 
@@ -134,12 +142,17 @@ LICENSE (MIT), README, CONTRIBUTING, `.github/workflows/ci.yml`
 ### Task 17: Pilot apps [done — load tested]
 
 `examples/cli`: works. `examples/http-crud-sqlite`: rewritten on
-`std/http` + `spawnBlocking` per conn. Load test: 300 concurrent GETs
-all 200s, RSS ~2.4 MB. Writes: 30/30 serial; ~78% under 20-way
-concurrent POSTs — residual is sqlite multi-connection write contention
-(per-request `sqlite_open`, no connection pooling in v0 surface);
-retry loop + WAL pragma added to rt shims. Channel lost-wakeup race
-found + fixed under load. `bootstrap/lexer.lang` — lexer in the
+`std/http` + `std/json` + `std/strings`, serves real JSON
+(`{"items":[...]}`), one shared sqlite conn via a `let` global —
+sqlite's serialized mode does the locking. Load test: 300 concurrent
+GETs all 200s, RSS ~2.4 MB; writes: 30/30 serial **and 100/100 at
+20-way concurrency** (the earlier ~78% was multi-connection contention,
+now gone). Bugs found and fixed under this hardening: channel
+lost-wakeup race, task-trap never decrementing scope pending (join
+hang), borrows never released (`rt_unborrow` now emitted post-call),
+reborrow-vs-fresh-borrow distinction, main-thread traps silently
+exiting 0 (now loud abort), parser spinning on unrecoverable items
+(guaranteed-progress skip). `bootstrap/lexer.lang` — lexer in the
 language — is a pilot too: lexes itself (955 tokens) + runs in CI.
 
 ### Task 18: v0.0.1 tag [not started]

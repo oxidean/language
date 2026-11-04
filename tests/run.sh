@@ -22,6 +22,12 @@ echo "== lang test: smoke =="
 echo "== lang test: stdlib =="
 "$LANG" test tests/stdlib_test.lang | grep -q "test_loops ... ok"
 
+echo "== stdmods (json/sync/time) =="
+out=$("$LANG" run tests/stdmods_test.lang)
+grep -q '"name":"widget"' <<<"$out" || { echo "FAIL stdmods json: $out"; exit 1; }
+grep -q "^4000$" <<<"$out" || { echo "FAIL stdmods sync counter: $out"; exit 1; }
+[ "$(tail -1 <<<"$out")" = "done" ] || { echo "FAIL stdmods time: $out"; exit 1; }
+
 echo "== bootstrap lexer =="
 out=$("$LANG" run bootstrap/lexer.lang -- examples/hello.lang)
 grep -q "11 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }
@@ -36,9 +42,9 @@ sleep 1
 srv_pid=$(cat "$work/srv.pid")
 grep -q "listening" "$work/srv.log" || { echo "FAIL: server did not bind"; cat "$work/srv.log"; kill $srv_pid 2>/dev/null; exit 1; }
 got=$(curl -s -d widget localhost:8080/items)
-[ "$got" = "created: widget" ] || { echo "FAIL post: $got"; kill $srv_pid 2>/dev/null; exit 1; }
+[ "$got" = '{"created":"widget"}' ] || { echo "FAIL post: $got"; kill $srv_pid 2>/dev/null; exit 1; }
 got=$(curl -s localhost:8080/items)
-grep -q "1|widget" <<<"$got" || { echo "FAIL get: $got"; kill $srv_pid 2>/dev/null; exit 1; }
+grep -q '"name":"widget"' <<<"$got" || { echo "FAIL get: $got"; kill $srv_pid 2>/dev/null; exit 1; }
 kill $srv_pid 2>/dev/null || true
 
 echo "ALL TESTS PASSED"
