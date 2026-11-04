@@ -165,6 +165,20 @@ fn qualify_block(
             }
             ast::Stmt::Spawn { call, .. } => qualify_expr(call, renames, aliases),
             ast::Stmt::Defer { call, .. } => qualify_expr(call, renames, aliases),
+            ast::Stmt::Select { arms, .. } => {
+                for a in arms {
+                    match &mut a.kind {
+                        ast::SelKind::Recv { chan, .. } => {
+                            qualify_expr(chan, renames, aliases)
+                        }
+                        ast::SelKind::Timeout { ms, .. } => {
+                            qualify_expr(ms, renames, aliases)
+                        }
+                        ast::SelKind::Else { .. } => {}
+                    }
+                    qualify_block(&mut a.body, renames, aliases);
+                }
+            }
             ast::Stmt::Break { .. } | ast::Stmt::Continue { .. } => {}
         }
     }

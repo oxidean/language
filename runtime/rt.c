@@ -107,7 +107,72 @@ struct RtTask {
     int external;         /* driven by rt_run_root / blocking thread */
     RtWake *wk;           /* external wakeup, driver-stack-owned */
     int64_t chan_res;     /* channel delivery slot */
+    /* parked-on-a-waitqueue bookkeeping: scope cancel enumerates the
+     * scope's parked tasks and force-wakes them so the join can settle.
+     * Wake ownership = CAS parked 1->0; queue unlink is hygiene. */
+    volatile int parked;
+    RtScope *park_scope;      /* scope whose `parked` list holds us */
+    struct RtTask *pnext;     /* parked-list link */
+    void *waitobj;            /* RtChan* | RtScope* | RtSel* */
+    int waitkind;             /* WK_* below */
+    struct RtSel *sel;        /* live select wait, if any */
+    int sel_arm;              /* winning select arm */
+    /* wake-vs-park protocol (goready/Gopark): ONSTACK while poll runs;
+     * a waker swaps PARKED->WAKE_REQ or plants WAKE_REQ for the driver
+     * to self-enqueue when it actually leaves the C stack */
+    volatile int wstate;
 };
+#define WK_RECV 1
+#define WK_SEND 2
+#define WK_SEL 3
+#define WK_JOIN 4
+#define WK_TRECV 5
+#define WK_TSEND 6
+
+/* register `t` as parked on `obj` in scope `s` — callers hold the wait
+ * queue's own lock when the enqueue must be atomic with registration */
+static void park_add(RtTask *t, RtScope *s, void *obj, int kind) {
+    if (!t) return;
+    if (!s) { t->parked = 1; t->waitobj = obj; t->waitkind = kind; return; }
+    pthread_mutex_lock(&s->mu);
+    t->parked = 1;
+    t->park_scope = s;
+    t->waitobj = obj;
+    t->waitkind = kind;
+    t->pnext = s->parked;
+    s->parked = t;
+    pthread_mutex_unlock(&s->mu);
+}
+
+/* drop `t` from its scope's parked list (idempotent hygiene; the claim
+ * itself is the CAS on `parked`) */
+static void park_del(RtTask *t) {
+    RtScope *s = t->park_scope;
+    if (!s) return;
+    pthread_mutex_lock(&s->mu);
+    if (t->pnext != t) { /* parked-list sentinel: self-link = not listed */
+        RtTask **pp = &s->parked;
+        while (*pp) {
+            if (*pp == t) { *pp = t->pnext; break; }
+            pp = &(*pp)->pnext;
+        }
+        t->pnext = t;
+    }
+    pthread_mutex_unlock(&s->mu);
+}
+
+/* the wake claim: whoever flips parked 1->0 owns the wake */
+static int park_claim(RtTask *t) {
+    return __sync_bool_compare_and_swap(&t->parked, 1, 0);
+}
+
+#define WS_ONSTACK 0
+#define WS_PARKED 1
+#define WS_WAKEREQ 2
+
+int64_t rt_select_arm(RtTask *t); /* defined with the channel internals */
+static void scope_cancel_wake(RtScope *s);
+static void pool_push(RtTask *t);
 
 static struct {
     pthread_mutex_t mu;
@@ -126,7 +191,8 @@ static void scope_done(RtScope *s) {
         else pthread_cond_signal(&s->cv);
     }
     pthread_mutex_unlock(&s->mu);
-    if (wake) rt_task_wake(wake); /* outside s->mu: avoids s->mu/pool.mu inversion */
+    /* outside s->mu: avoids s->mu/pool.mu inversion */
+    if (wake && park_claim(wake)) { park_del(wake); rt_task_wake(wake); }
 }
 
 /* the currently-running task — rt_trap must settle its pending count
@@ -137,10 +203,18 @@ static void run_task(RtTask *t) {
     tls_scope = t->scope;
     tls_task = t;
     if (t->is_frame) {
+        t->wstate = WS_ONSTACK;
         if (setjmp(tls_jb) == 0) {
             if (t->poll(t->frame, t) == RT_PENDING) {
-                tls_task = NULL;
-                return; /* parked on a wait queue; waker re-enqueues */
+                /* leaving the C stack: a waker that already fired
+                 * planted WAKE_REQ — self-enqueue instead of parking */
+                if (__sync_lock_test_and_set(&t->wstate, WS_PARKED) == WS_WAKEREQ) {
+                    tls_task = NULL;
+                    pool_push(t);
+                } else {
+                    tls_task = NULL;
+                }
+                return;
             }
         }
         /* READY / CANCEL / trapped(longjmp) all land here */
@@ -148,6 +222,7 @@ static void run_task(RtTask *t) {
         t->fn(t->arg);
     }
     tls_task = NULL;
+    if (t->sel) rt_select_arm(t); /* dropped select wait: reclaim it */
     scope_done(t->scope);
     free(t);
 }
@@ -162,7 +237,7 @@ static void *worker(void *_p) {
         if (!pool.head) pool.tail = NULL;
         pthread_mutex_unlock(&pool.mu);
         if (!t->scope || !t->scope->cancel) run_task(t);
-        else { scope_done(t->scope); free(t); }
+        else { if (t->sel) rt_select_arm(t); scope_done(t->scope); free(t); }
     }
     return 0;
 }
@@ -193,16 +268,20 @@ static void pool_push(RtTask *t) {
 }
 
 /* re-enqueue a suspended frame task: external drivers wait on their own
- * cond; pool tasks go back on the shared queue */
+ * cond; pool tasks go back on the shared queue. The swap serializes
+ * against the driver's just-leaving-stack window. */
 void rt_task_wake(RtTask *t) {
     if (t->external) {
-        RtWake *w = t->wk;
-        pthread_mutex_lock(&w->mu);
-        w->ready = 1;
-        pthread_cond_signal(&w->cv);
-        pthread_mutex_unlock(&w->mu);
+        if (__sync_lock_test_and_set(&t->wstate, WS_WAKEREQ) == WS_PARKED) {
+            RtWake *w = t->wk;
+            pthread_mutex_lock(&w->mu);
+            w->ready = 1;
+            pthread_cond_signal(&w->cv);
+            pthread_mutex_unlock(&w->mu);
+        }
     } else {
-        pool_push(t);
+        if (__sync_lock_test_and_set(&t->wstate, WS_WAKEREQ) == WS_PARKED)
+            pool_push(t);
     }
 }
 
@@ -224,7 +303,11 @@ static void *task_wrap_frame(void *p) {
     tls_scope = t->scope;
     tls_task = t;
     if (setjmp(tls_jb) == 0) {
-        while (t->poll(t->frame, t) == RT_PENDING) {
+        while (1) {
+            t->wstate = WS_ONSTACK;
+            if (t->poll(t->frame, t) != RT_PENDING) break;
+            if (__sync_lock_test_and_set(&t->wstate, WS_PARKED) == WS_WAKEREQ)
+                continue; /* wake already landed */
             pthread_mutex_lock(&wk.mu);
             while (!wk.ready) pthread_cond_wait(&wk.cv, &wk.mu);
             wk.ready = 0;
@@ -232,6 +315,7 @@ static void *task_wrap_frame(void *p) {
         }
     }
     tls_task = NULL;
+    if (t->sel) rt_select_arm(t);
     scope_done(t->scope);
     t->wk = NULL;
     pthread_mutex_destroy(&wk.mu);
@@ -323,7 +407,11 @@ int rt_run_root(RtFrame *fr) {
     tls_scope = t->scope;
     int trapped = 0;
     if (setjmp(tls_jb) == 0) {
-        while (t->poll(fr, t) == RT_PENDING) {
+        while (1) {
+            t->wstate = WS_ONSTACK;
+            if (t->poll(fr, t) != RT_PENDING) break;
+            if (__sync_lock_test_and_set(&t->wstate, WS_PARKED) == WS_WAKEREQ)
+                continue;
             pthread_mutex_lock(&wk.mu);
             while (!wk.ready) pthread_cond_wait(&wk.cv, &wk.mu);
             wk.ready = 0;
@@ -333,6 +421,7 @@ int rt_run_root(RtFrame *fr) {
         trapped = 1;
     }
     tls_task = prev;
+    if (t->sel) rt_select_arm(t);
     t->wk = NULL;
     pthread_mutex_destroy(&wk.mu);
     pthread_cond_destroy(&wk.cv);
@@ -359,6 +448,7 @@ static int join_scope(RtScope *s) {
 
 /* frame-task join: register as the scope's joiner, or READY if drained */
 int rt_scope_join_poll(RtScope *s, RtTask *t) {
+    park_add(t, t->scope, s, WK_JOIN);
     pthread_mutex_lock(&s->mu);
     if (s->pending > 0) {
         s->join_task = t;
@@ -366,6 +456,7 @@ int rt_scope_join_poll(RtScope *s, RtTask *t) {
         return RT_PENDING;
     }
     pthread_mutex_unlock(&s->mu);
+    if (park_claim(t)) park_del(t); /* self-unpark on the no-wait path */
     return RT_READY;
 }
 
@@ -413,6 +504,12 @@ void rt_trap(int64_t code) {
             pthread_mutex_unlock(&x->mu);
             if (x == t->scope) break;
         }
+        /* wake parked tasks so they observe cancel at resume instead
+         * of parking forever on a chan nobody will serve */
+        for (RtScope *x = s; x; x = x->parent) {
+            scope_cancel_wake(x);
+            if (x == t->scope) break;
+        }
         tls_task = NULL;
         longjmp(tls_jb, 1); /* run_task settles the pending slot */
     }
@@ -429,6 +526,7 @@ void rt_trap(int64_t code) {
     }
     s->cancel = 1; /* siblings observe + unwind */
     pthread_mutex_unlock(&s->mu);
+    scope_cancel_wake(s);
     tls_task = NULL;
     scope_done(t->scope);
     free(t);
@@ -483,6 +581,23 @@ typedef struct SendReq {
     struct SendReq *next;
 } SendReq;
 
+/* select waiters: one node per arm chan, all owned by the RtSel */
+typedef struct SelW {
+    struct RtSel *sel;
+    RtChan *ch;            /* back-link for later unlink */
+    struct SelW *next;     /* same-chan selq link */
+    int slot;
+} SelW;
+
+struct RtSel {
+    volatile int winner;   /* slot index once claimed; -1 while parked */
+    volatile int refs;     /* task + (optional) timer hold refs */
+    int n;
+    int64_t tmo;           /* ms; timer armed when >= 0 */
+    RtTask *t;
+    SelW w[];
+};
+
 struct RtChan {
     pthread_mutex_t mu;
     pthread_cond_t cv_send, cv_recv;
@@ -491,7 +606,60 @@ struct RtChan {
     int trecv;          /* thread receivers inside cv_recv wait */
     RtTask *recvq;      /* parked frame receivers (task->next chain) */
     SendReq *sendq;     /* parked frame sends */
+    SelW *selq;         /* parked select waiters */
 };
+
+/* under ch->mu: hand `v` to the first live select waiter. returns 1 when
+ * a waiter claimed the fire (ch->mu released + task woken). */
+static int sel_fire(RtChan *ch, int64_t v) {
+    while (ch->selq) {
+        SelW *w = ch->selq;
+        ch->selq = w->next;
+        struct RtSel *s = w->sel;
+        if (!park_claim(s->t)) continue; /* dead waiter — drop it */
+        s->winner = w->slot;
+        s->t->chan_res = v;
+        s->t->sel_arm = w->slot;
+        RtTask *t = s->t;
+        pthread_mutex_unlock(&ch->mu);
+        rt_task_wake(t);
+        return 1;
+    }
+    return 0;
+}
+
+/* park a frame receiver: node = the task itself on recvq */
+static void chan_park_recv(RtChan *ch, RtTask *t) {
+    park_add(t, t->scope, ch, WK_RECV);
+    t->next = ch->recvq;
+    ch->recvq = t;
+}
+
+/* pop the first claimable parked receiver. ch->mu held; on success the
+ * claim is ours (ch->mu still held — caller fills + unlocks + wakes). */
+static RtTask *chan_pop_recv(RtChan *ch) {
+    while (ch->recvq) {
+        RtTask *r = ch->recvq;
+        ch->recvq = r->next;
+        if (!park_claim(r)) continue; /* dead node (cancel claimed it) */
+        park_del(r);
+        return r;
+    }
+    return NULL;
+}
+
+/* pop the first claimable parked sender. Same contract: caller takes the
+ * value and wakes the task after unlock. */
+static SendReq *chan_pop_send(RtChan *ch) {
+    while (ch->sendq) {
+        SendReq *r = ch->sendq;
+        ch->sendq = r->next;
+        if (!park_claim(r->t)) { free(r); continue; }
+        park_del(r->t);
+        return r;
+    }
+    return NULL;
+}
 
 RtChan *rt_mkchan(void) {
     RtChan *c = calloc(1, sizeof *c);
@@ -503,51 +671,65 @@ RtChan *rt_mkchan(void) {
 
 void rt_send(RtChan *ch, int64_t v) {
     if (rt_cancelled()) pthread_exit(0);
+    RtTask *me = tls_task;
     pthread_mutex_lock(&ch->mu);
-    while (ch->has && !ch->closed) pthread_cond_wait(&ch->cv_send, &ch->mu);
-    if (!ch->closed) {
-        if (ch->recvq) { /* hand directly to a parked frame receiver */
-            RtTask *r = ch->recvq;
-            ch->recvq = r->next;
+    park_add(me, me ? me->scope : NULL, ch, WK_TSEND);
+    for (;;) {
+        while (ch->has && !ch->closed) pthread_cond_wait(&ch->cv_send, &ch->mu);
+        if (ch->closed) break;
+        RtTask *r = chan_pop_recv(ch);
+        if (r) { /* hand directly to a parked frame receiver */
             r->chan_res = v;
             pthread_mutex_unlock(&ch->mu);
             rt_task_wake(r);
-            return;
+            goto done;
         }
+        if (sel_fire(ch, v)) goto done; /* sel_fire releases ch->mu */
         ch->val = v;
         ch->has = 1;
         pthread_cond_broadcast(&ch->cv_recv);
         while (ch->has && !ch->closed) pthread_cond_wait(&ch->cv_send, &ch->mu);
+        if (!ch->closed) break;
+        /* closed mid-wait: the deposited slot may have been taken — either
+         * way this send is complete under the v0 send-on-closed rule */
+        break;
     }
     pthread_mutex_unlock(&ch->mu);
+done:
+    if (me && park_claim(me)) park_del(me);
 }
 
 int64_t rt_recv(RtChan *ch) {
     if (rt_cancelled()) pthread_exit(0);
+    RtTask *me = tls_task;
+    int64_t v = 0;
+    park_add(me, me ? me->scope : NULL, ch, WK_TRECV);
     for (;;) {
         pthread_mutex_lock(&ch->mu);
-        if (ch->sendq) { /* a parked frame sender delivers + gets woken */
-            SendReq *r = ch->sendq;
-            ch->sendq = r->next;
-            int64_t v = r->v;
+        SendReq *r = chan_pop_send(ch); /* parked frame sender delivers */
+        if (r) {
+            v = r->v;
             RtTask *st = r->t;
             free(r);
             pthread_mutex_unlock(&ch->mu);
             rt_task_wake(st);
-            return v;
+            goto done;
         }
         if (ch->has || ch->closed) break;
         ch->trecv++;
         pthread_cond_wait(&ch->cv_recv, &ch->mu);
         ch->trecv--;
         pthread_mutex_unlock(&ch->mu);
+        if (rt_cancelled()) pthread_exit(0);
     }
-    int64_t v = ch->val;
+    v = ch->val;
     ch->has = 0;
     /* broadcast, not signal: with racing senders a lone wakeup can land
      * on the *completing* send instead of the queued one and strand it */
     pthread_cond_broadcast(&ch->cv_send);
     pthread_mutex_unlock(&ch->mu);
+done:
+    if (me && park_claim(me)) park_del(me);
     return v;
 }
 
@@ -555,9 +737,8 @@ int64_t rt_recv(RtChan *ch) {
  * immediate and the woken paths); PENDING parks on recvq */
 int rt_recv_poll(RtChan *ch, RtTask *t) {
     pthread_mutex_lock(&ch->mu);
-    if (ch->sendq) {
-        SendReq *r = ch->sendq;
-        ch->sendq = r->next;
+    SendReq *r = chan_pop_send(ch);
+    if (r) {
         t->chan_res = r->v;
         RtTask *st = r->t;
         free(r);
@@ -572,22 +753,21 @@ int rt_recv_poll(RtChan *ch, RtTask *t) {
         pthread_mutex_unlock(&ch->mu);
         return RT_READY;
     }
-    t->next = ch->recvq;
-    ch->recvq = t;
+    chan_park_recv(ch, t);
     pthread_mutex_unlock(&ch->mu);
     return RT_PENDING;
 }
 
 int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
     pthread_mutex_lock(&ch->mu);
-    if (ch->recvq) {
-        RtTask *r = ch->recvq;
-        ch->recvq = r->next;
+    RtTask *r = chan_pop_recv(ch);
+    if (r) {
         r->chan_res = v;
         pthread_mutex_unlock(&ch->mu);
         rt_task_wake(r);
         return RT_READY;
     }
+    if (sel_fire(ch, v)) return RT_READY; /* sel_fire releases ch->mu */
     if (ch->closed) {
         pthread_mutex_unlock(&ch->mu);
         return RT_READY; /* send on closed completes silently (v0 rule) */
@@ -599,11 +779,12 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
         pthread_mutex_unlock(&ch->mu);
         return RT_READY;
     }
-    SendReq *r = malloc(sizeof *r);
-    r->t = t;
-    r->v = v;
-    r->next = ch->sendq;
-    ch->sendq = r;
+    SendReq *sr = malloc(sizeof *sr);
+    sr->t = t;
+    sr->v = v;
+    sr->next = ch->sendq;
+    ch->sendq = sr;
+    park_add(t, t->scope, ch, WK_SEND);
     pthread_mutex_unlock(&ch->mu);
     return RT_PENDING;
 }
@@ -614,23 +795,44 @@ void rt_close(RtChan *ch) {
     pthread_cond_broadcast(&ch->cv_send);
     pthread_cond_broadcast(&ch->cv_recv);
     /* drain parked frame tasks: receivers complete with the slot value
-     * (matching the thread path); senders complete silently */
+     * (matching the thread path); senders complete silently. Each wake
+     * still races the parked claim — dead nodes are skipped. */
     RtTask *r = ch->recvq;
     ch->recvq = NULL;
     SendReq *sq = ch->sendq;
     ch->sendq = NULL;
+    SelW *sw = ch->selq;
+    ch->selq = NULL;
+    int64_t val = ch->val;
     pthread_mutex_unlock(&ch->mu);
     while (r) {
         RtTask *n = r->next;
-        r->chan_res = ch->val;
-        rt_task_wake(r);
+        if (park_claim(r)) {
+            park_del(r);
+            r->chan_res = val;
+            rt_task_wake(r);
+        }
         r = n;
     }
     while (sq) {
         SendReq *n = sq->next;
-        rt_task_wake(sq->t);
+        if (park_claim(sq->t)) {
+            park_del(sq->t);
+            rt_task_wake(sq->t);
+        }
         free(sq);
         sq = n;
+    }
+    while (sw) {
+        SelW *n = sw->next;
+        struct RtSel *s = sw->sel;
+        if (park_claim(s->t)) {
+            s->winner = sw->slot;
+            s->t->chan_res = val;
+            s->t->sel_arm = sw->slot;
+            rt_task_wake(s->t);
+        }
+        sw = n;
     }
 }
 
@@ -656,7 +858,230 @@ int rt_sleep_poll(int64_t secs, RtTask *t) {
     return RT_PENDING;
 }
 
-/* ---------------- strings / misc ---------------- */
+/* ---------------- select ----------------
+ * A parked select owns one SelW node per recv arm, linked on each chan's
+ * selq. The first fire claims the task's parked flag (park_claim) so a
+ * loser arm's node can never double-wake: nodes that lose the CAS are
+ * dead and get skipped by later senders. The woken task unlinks whatever
+ * is still linked in rt_select_arm. */
+
+/* under ch->mu (all arm chans locked): can this chan deliver now? */
+static int sel_ready(RtChan *ch, int64_t *v, RtTask **wake_me) {
+    if (ch->sendq) {
+        SendReq *r = ch->sendq;
+        ch->sendq = r->next;
+        *v = r->v;
+        if (park_claim(r->t)) {
+            park_del(r->t);
+            *wake_me = r->t;
+        }
+        free(r);
+        return 1;
+    }
+    if (ch->has || ch->closed) {
+        *v = ch->val;
+        ch->has = 0;
+        pthread_cond_broadcast(&ch->cv_send);
+        return 1;
+    }
+    return 0;
+}
+
+static void *sel_timer(void *p) {
+    struct RtSel *s = p;
+    usleep((useconds_t)(s->tmo * 1000));
+    if (__sync_bool_compare_and_swap(&s->winner, -1, RT_SEL_TMO)
+        && park_claim(s->t)) {
+        s->t->sel_arm = RT_SEL_TMO;
+        rt_task_wake(s->t);
+    }
+    if (__sync_sub_and_fetch(&s->refs, 1) == 0) free(s);
+    return 0;
+}
+
+static int addr_cmp(const void *a, const void *b) {
+    RtChan *x = *(RtChan *const *)a, *y = *(RtChan *const *)b;
+    return (x > y) - (x < y);
+}
+
+int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t) {
+    /* fast path: single-lock sweep, random start keeps it fair */
+    int start = n > 1 ? (int)(rand() % (unsigned)n) : 0;
+    for (int k = 0; k < n; k++) {
+        int i = (start + k) % n;
+        pthread_mutex_lock(&chs[i]->mu);
+        int64_t v = 0;
+        RtTask *wm = NULL;
+        if (sel_ready(chs[i], &v, &wm)) {
+            pthread_mutex_unlock(&chs[i]->mu);
+            if (wm) rt_task_wake(wm);
+            t->chan_res = v;
+            t->sel_arm = i;
+            return RT_READY;
+        }
+        pthread_mutex_unlock(&chs[i]->mu);
+    }
+    if (has_else) {
+        t->sel_arm = RT_SEL_ELSE;
+        return RT_READY;
+    }
+
+    /* slow path: lock every arm chan in address order, re-check under
+     * all locks, then push a waiter node on each still-unready chan */
+    RtChan **sorted = malloc(sizeof *sorted * (size_t)n);
+    memcpy(sorted, chs, sizeof *sorted * (size_t)n);
+    qsort(sorted, (size_t)n, sizeof *sorted, addr_cmp);
+    for (int i = 0; i < n; i++) pthread_mutex_lock(&sorted[i]->mu);
+
+    /* re-check: a send may have landed between the sweep and the lock */
+    int nready = 0, last = -1;
+    for (int i = 0; i < n; i++) {
+        int64_t v; RtTask *wm;
+        if (sel_ready(chs[i], &v, &wm)) { nready++; last = i; }
+    }
+    if (nready) {
+        int pick = nready > 1 ? (int)(rand() % (unsigned)nready) : 0;
+        int64_t v = 0;
+        RtTask *wm = NULL;
+        int seen = 0;
+        for (int i = 0; i < n; i++) {
+            int64_t vv; RtTask *w2;
+            if (sel_ready(chs[i], &vv, &w2)) {
+                if (seen++ == pick) { v = vv; wm = w2; last = i; }
+            }
+        }
+        for (int i = 0; i < n; i++) pthread_mutex_unlock(&sorted[i]->mu);
+        free(sorted);
+        if (wm) rt_task_wake(wm);
+        t->chan_res = v;
+        t->sel_arm = last;
+        return RT_READY;
+    }
+
+    /* park: claim a pending flag first, then hang a node on every arm */
+    struct RtSel *s = malloc(sizeof *s + sizeof(SelW) * (size_t)n);
+    s->winner = -1;
+    s->refs = 1 + (tmo_ms >= 0 ? 1 : 0);
+    s->n = n;
+    s->tmo = tmo_ms;
+    s->t = t;
+    t->sel = s;
+    park_add(t, t->scope, s, WK_SEL);
+    for (int i = 0; i < n; i++) {
+        s->w[i].sel = s;
+        s->w[i].slot = i;
+        RtChan *ch = chs[i];
+        s->w[i].ch = ch;
+        s->w[i].next = ch->selq;
+        ch->selq = &s->w[i];
+    }
+    for (int i = 0; i < n; i++) pthread_mutex_unlock(&sorted[i]->mu);
+    free(sorted);
+    if (tmo_ms >= 0) {
+        pthread_t th;
+        if (pthread_create(&th, NULL, sel_timer, s) == 0) pthread_detach(th);
+    }
+    return RT_PENDING;
+}
+
+/* resume path: unlink the parked waiters, free the RtSel (ref-shared
+ * with an armed timer), and report which arm fired. */
+int64_t rt_select_arm(RtTask *t) {
+    int64_t arm = t->sel_arm;
+    struct RtSel *s = t->sel;
+    t->sel = NULL;
+    if (!s) return arm;
+    for (int i = 0; i < s->n; i++) {
+        RtChan *ch = s->w[i].ch;
+        pthread_mutex_lock(&ch->mu);
+        SelW **pp = &ch->selq;
+        while (*pp) {
+            if (*pp == &s->w[i]) { *pp = s->w[i].next; break; }
+            pp = &(*pp)->next;
+        }
+        pthread_mutex_unlock(&ch->mu);
+    }
+    if (__sync_sub_and_fetch(&s->refs, 1) == 0) free(s);
+    return arm;
+}
+
+/* scope cancel: force-wake every task parked inside `s` so suspended
+ * tasks observe cancel at their resume point instead of hanging the
+ * join. Claims the parked flag first — whoever won the CAS owns the
+ * wake; queue unlink is hygiene. Thread waits get a cv broadcast and
+ * unwind on their own cancel check. */
+static void scope_cancel_wake(RtScope *s) {
+    for (;;) {
+        pthread_mutex_lock(&s->mu);
+        RtTask *t = s->parked;
+        if (t) s->parked = t->pnext;
+        pthread_mutex_unlock(&s->mu);
+        if (!t) return;
+        /* joiners stay parked: they wake via scope_done when pending
+         * drains — a premature finish would consume a live scope */
+        if (t->waitkind == WK_JOIN) continue;
+        if (!park_claim(t)) continue; /* a normal waker owns the wake */
+        switch (t->waitkind) {
+            case WK_RECV: {
+                RtChan *ch = t->waitobj;
+                pthread_mutex_lock(&ch->mu);
+                RtTask **pp = &ch->recvq;
+                while (*pp) {
+                    if (*pp == t) { *pp = t->next; break; }
+                    pp = &(*pp)->next;
+                }
+                pthread_mutex_unlock(&ch->mu);
+                break;
+            }
+            case WK_SEND: {
+                RtChan *ch = t->waitobj;
+                pthread_mutex_lock(&ch->mu);
+                SendReq **pp = &ch->sendq;
+                while (*pp) {
+                    if ((*pp)->t == t) {
+                        SendReq *d = *pp;
+                        *pp = d->next;
+                        free(d);
+                        break;
+                    }
+                    pp = &(*pp)->next;
+                }
+                pthread_mutex_unlock(&ch->mu);
+                break;
+            }
+            case WK_SEL: {
+                struct RtSel *sel = t->waitobj;
+                for (int i = 0; i < sel->n; i++) {
+                    RtChan *ch = sel->w[i].ch;
+                    pthread_mutex_lock(&ch->mu);
+                    SelW **pp = &ch->selq;
+                    while (*pp) {
+                        if (*pp == &sel->w[i]) { *pp = sel->w[i].next; break; }
+                        pp = &(*pp)->next;
+                    }
+                    pthread_mutex_unlock(&ch->mu);
+                }
+                break;
+            }
+            case WK_JOIN: {
+                RtScope *js = t->waitobj;
+                pthread_mutex_lock(&js->mu);
+                if (js->join_task == t) js->join_task = NULL;
+                pthread_mutex_unlock(&js->mu);
+                break;
+            }
+            case WK_TRECV: case WK_TSEND: {
+                RtChan *ch = t->waitobj;
+                pthread_mutex_lock(&ch->mu);
+                pthread_cond_broadcast(&ch->cv_recv);
+                pthread_cond_broadcast(&ch->cv_send);
+                pthread_mutex_unlock(&ch->mu);
+                continue; /* thread wakes on its cv, exits on cancel check */
+            }
+        }
+        rt_task_wake(t);
+    }
+}
 
 OxlStr rt_str(const char *s) { return (OxlStr){ s, (int64_t)strlen(s) }; }
 OxlStr rt_str_lit(const char *s) { return rt_str(s); }

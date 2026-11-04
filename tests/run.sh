@@ -69,6 +69,14 @@ out=$("$OXL" run tests/conc_scale.oxl -- 2000 2 50)
 out=$("$OXL" run tests/conc_ping.oxl -- 5000)
 grep -q "bounces=5000" <<<"$out" || { echo "FAIL ping: $out"; exit 1; }
 
+echo "== a2 select =="
+out=$("$OXL" run tests/select.oxl)
+[ "$(tail -1 <<<"$out")" = "select done" ] || { echo "FAIL select: $out"; exit 1; }
+# parked select must unwedge on sibling trap — exits nonzero, not a hang
+if timeout 10 "$OXL" run tests/select_cancel.oxl >/dev/null 2>&1; then
+    echo "FAIL select_cancel: expected nonzero exit"; exit 1
+fi
+
 echo "== http pilot =="
 work=$(mktemp -d)
 "$OXL" build examples/http-crud-sqlite/main.oxl -o "$work/httpsrv"

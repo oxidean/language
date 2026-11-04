@@ -70,6 +70,25 @@ close(ch)
 - Sending `ref`/`mut` handles or arena references is a compile error
   (ownership.md §arena).
 
+## Select
+
+```oxl
+select {
+    v := recv(a) => { println(v) }   // bind optional
+    recv(b)      => { ... }          // fire-and-discard
+    timeout(ms)  => { ... }          // at most one
+    else         => { ... }          // non-blocking default
+}
+```
+
+- recv arms only; send arms are rejected (cut for v0.2).
+- Multiple ready arms: uniform-random pick. `else` fires when no arm
+  is ready. `timeout` fires once after `ms` and never with `else`.
+- A parked `select` holds one waiter node per arm chan; the first
+  delivery wins via an atomic claim — losers unlink on resume.
+- Scope cancellation force-wakes parked `select`/`recv`/`send` waiters;
+  they die at their resume point rather than hanging the join.
+
 ## Executors
 
 - `Executor` is a library type, not mandatory runtime: a program that

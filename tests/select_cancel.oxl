@@ -1,0 +1,26 @@
+// A2 cancel: a task parked in `select` must be force-woken when a
+// sibling traps — before the parked-wake registry this hung the join
+// forever. run.sh asserts this exits nonzero (the trap) *quickly*
+// rather than timing out.
+import "std/time"
+
+fn parker(c: chan) {
+    select {
+        v := recv(c) => { println(v) }
+    }
+}
+
+fn trapper() {
+    time.sleep_ms(20)
+    assert(false) // dies → scope cancel → parked select must unwedge
+}
+
+fn main() {
+    scope {
+        c := mkchan()
+        spawn parker(c)
+        spawn trapper()
+        // main joins here; the join must not hang on parker's select
+    }
+    println("unreachable")
+}

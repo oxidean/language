@@ -33,6 +33,9 @@ impl<'a> Parser<'a> {
     fn cur(&self) -> &Token {
         &self.toks[self.i.min(self.toks.len() - 1)]
     }
+    fn peek(&self) -> &Token {
+        &self.toks[(self.i + 1).min(self.toks.len() - 1)]
+    }
     fn span(&self) -> Span {
         self.cur().span
     }
@@ -375,6 +378,7 @@ impl<'a> Parser<'a> {
                 let call = self.expr(0, true)?;
                 Some(Stmt::Spawn { call, pinned: false, blocking: true, span: sp })
             }
+            Tok::Kw(Kw::Select) => self.select_stmt(sp),
             Tok::Kw(Kw::Unsafe) => {
                 self.bump();
                 let body = self.block()?;
@@ -427,6 +431,81 @@ impl<'a> Parser<'a> {
                 Some(Stmt::Expr(e))
             }
         }
+    }
+
+    /// select { v := recv(ch) => body  recv(ch) => body
+    ///          timeout(ms) => body   else => body }
+    fn select_stmt(&mut self, sp: Span) -> Option<Stmt> {
+        self.bump(); // select
+        self.expect_p(P::LBrace, "`{`");
+        let mut arms = Vec::new();
+        while self.cur().tok != Tok::P(P::RBrace) && !self.at_eof() {
+            let asp = self.span();
+            let kind = if self.eat_kw(Kw::Else) {
+                SelKind::Else { span: asp }
+            } else {
+                let mut bind = None;
+                if let Tok::Ident(n) = self.cur().tok.clone() {
+                    if self.peek().tok == Tok::P(P::ColonEq) {
+                        self.bump();
+                        self.bump();
+                        bind = Some(n);
+                    }
+                }
+                let e = self.expr(0, true)?;
+                match e.kind {
+                    ExprKind::Call { f, mut args } => {
+                        let head = match &f.kind {
+                            ExprKind::Ident(n) => n.clone(),
+                            _ => String::new(),
+                        };
+                        match head.as_str() {
+                            "recv" if args.len() == 1 => SelKind::Recv {
+                                chan: args.remove(0),
+                                bind,
+                                span: asp,
+                            },
+                            "timeout" if args.len() == 1 => SelKind::Timeout {
+                                ms: args.remove(0),
+                                span: asp,
+                            },
+                            "send" => {
+                                self.diags.push(Diag::err(asp, "parse",
+                                    "select `send` arms are not in v0.2"));
+                                continue;
+                            }
+                            _ => {
+                                self.diags.push(Diag::err(asp, "parse",
+                                    "select arm must be `recv(ch)`, `timeout(ms)`, or `else`"));
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {
+                        self.diags.push(Diag::err(asp, "parse",
+                            "select arm must be `recv(ch)`, `timeout(ms)`, or `else`"));
+                        continue;
+                    }
+                }
+            };
+            if !self.expect_p(P::FatArrow, "`=>`") {
+                break;
+            }
+            let bsp = self.span();
+            let body = if self.cur().tok == Tok::P(P::LBrace) {
+                self.block()?
+            } else {
+                let s = self.stmt()?;
+                Block { stmts: vec![s], span: bsp }
+            };
+            arms.push(SelectArm { kind, body });
+        }
+        self.expect_p(P::RBrace, "`}`");
+        if arms.is_empty() {
+            self.diags.push(Diag::err(sp, "parse", "select needs at least one arm"));
+            return None;
+        }
+        Some(Stmt::Select { arms, span: sp })
     }
 
     fn bind(&mut self) -> Option<Bind> {

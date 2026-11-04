@@ -4,13 +4,13 @@ use crate::diag::{Diag, Diags, Span};
 pub enum Kw {
     Fn, Struct, Extern, Return, If, Else, For, Let, Scope, Spawn, Go,
     Own, Ref, Mut, Unsafe, Nil, True, False, Import, Chan,
-    Break, Continue, Interface, SpawnB, Defer,
+    Break, Continue, Interface, SpawnB, Defer, Select,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum P {
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Comma, Colon, Semi, Dot, Arrow,
+    Comma, Colon, Semi, Dot, Arrow, FatArrow,
     Assign, ColonEq, Underscore,
     Plus, Minus, Star, Slash, Percent,
     Eq, Ne, Lt, Le, Gt, Ge,
@@ -156,6 +156,7 @@ pub fn lex(src: &str, diags: &mut Diags) -> Vec<Token> {
                     "continue" => Some(Kw::Continue),
                     "interface" => Some(Kw::Interface),
                     "spawnBlocking" => Some(Kw::SpawnB),
+                    "select" => Some(Kw::Select),
                     _ => None,
                 };
                 // `_` alone is the blank punct, not an identifier
@@ -184,6 +185,8 @@ pub fn lex(src: &str, diags: &mut Diags) -> Vec<Token> {
                     (P::Or, 2)
                 } else if c == b'-' && two(b'-', b'>', i) {
                     (P::Arrow, 2)
+                } else if c == b'=' && two(b'=', b'>', i) {
+                    (P::FatArrow, 2)
                 } else {
                     let p = match c {
                         b'(' => P::LParen,

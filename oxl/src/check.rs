@@ -394,6 +394,44 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Unsafe { body, .. } => self.block(body, env),
+            Stmt::Select { arms, span } => {
+                if arms.is_empty() {
+                    self.diags.push(Diag::err(*span, "check", "`select` needs at least one arm"));
+                }
+                let mut has_else = false;
+                let mut tmo_count = 0;
+                for arm in arms {
+                    env.push();
+                    match &arm.kind {
+                        SelKind::Recv { chan, bind, .. } => {
+                            let ct = self.expr(chan, env);
+                            self.assignable(&Ty::Chan, &ct, chan.span);
+                            if let Some(n) = bind {
+                                env.set(n.clone(), Ty::Int); // word payload (v0)
+                            }
+                        }
+                        SelKind::Timeout { ms, .. } => {
+                            tmo_count += 1;
+                            let t = self.expr(ms, env);
+                            self.assignable(&Ty::Int, &t, ms.span);
+                        }
+                        SelKind::Else { .. } => {
+                            has_else = true;
+                        }
+                    }
+                    for s in &arm.body.stmts {
+                        self.stmt(s, env);
+                    }
+                    env.pop();
+                }
+                if has_else && tmo_count > 0 {
+                    self.diags.push(Diag::err(*span, "check",
+                        "`else` makes `timeout` unreachable — drop one"));
+                }
+                if tmo_count > 1 {
+                    self.diags.push(Diag::err(*span, "check", "at most one `timeout` arm"));
+                }
+            }
         }
     }
 
@@ -907,6 +945,7 @@ impl<'a> Checker<'a> {
                     expr_susp(e)
                 }
                 Stmt::Let2 { call, .. } => expr_susp(call),
+                Stmt::Select { .. } => true, // always a suspend point
                 Stmt::Return { vals, .. } => vals.iter().any(expr_susp),
                 Stmt::If { cond, then, els, .. } => {
                     expr_susp(cond) || block_has(then) || els.as_ref().map(block_has).unwrap_or(false)
@@ -1000,6 +1039,11 @@ impl<'a> Checker<'a> {
                     }
                     Stmt::For { body, .. } | Stmt::Scope { body, .. }
                     | Stmt::Unsafe { body, .. } => walk_block(body, susp, diags),
+                    Stmt::Select { arms, .. } => {
+                        for a in arms {
+                            walk_block(&a.body, susp, diags);
+                        }
+                    }
                     _ => {}
                 }
             }

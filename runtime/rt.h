@@ -49,6 +49,7 @@ typedef struct RtScope {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     RtTask *join_task; /* frame suspended at join, if any */
+    RtTask *parked;    /* tasks suspended inside this scope (pnext chain) */
     /* arena: bump allocator freed on leave */
     char *arena_buf;
     int64_t arena_off, arena_cap;
@@ -108,6 +109,13 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t);
 int rt_recv_poll(RtChan *ch, RtTask *t);
 void rt_close(RtChan *ch);
 int rt_sleep_poll(int64_t secs, RtTask *t);
+
+/* --- select: park on N chans at once; first ready arm wins ---
+ * sel_arm values: 0..n-1 = chan slot, RT_SEL_TMO = timeout, RT_SEL_ELSE */
+#define RT_SEL_TMO (-2)
+#define RT_SEL_ELSE (-3)
+int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t);
+int64_t rt_select_arm(RtTask *t); /* cleanup parked waiters; returns arm */
 
 /* --- misc builtins --- */
 void rt_sleep(int64_t secs);

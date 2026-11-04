@@ -123,10 +123,27 @@ pub enum Stmt {
     For { cond: Expr, body: Block, span: Span },
     Scope { body: Block, span: Span },
     Spawn { call: Expr, pinned: bool, blocking: bool, span: Span },
+    Select { arms: Vec<SelectArm>, span: Span },
     Defer { call: Expr, span: Span },
     Unsafe { body: Block, span: Span },
     Break { span: Span },
     Continue { span: Span },
+}
+
+#[derive(Clone, Debug)]
+pub struct SelectArm {
+    pub kind: SelKind,
+    pub body: Block,
+}
+
+#[derive(Clone, Debug)]
+pub enum SelKind {
+    /// `v := recv(ch)` / `recv(ch)` — parked receiver
+    Recv { chan: Expr, bind: Option<String>, span: Span },
+    /// `timeout(ms)` — fires once after ms via a runtime timer
+    Timeout { ms: Expr, span: Span },
+    /// `else` — non-blocking default
+    Else { span: Span },
 }
 
 #[derive(Clone, Debug)]

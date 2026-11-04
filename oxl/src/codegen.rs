@@ -763,6 +763,13 @@ impl<'a> Gen<'a> {
                 let _ = writeln!(self.out, "      rt_scope_leave(&_sc{id}); }}");
             }
             Stmt::Spawn { call, blocking, .. } => self.spawn(call, *blocking),
+            Stmt::Select { .. } => {
+                // select is only reachable inside suspendable fns (checker
+                // seeds the susp set) — those take the frame path (fstmt),
+                // so a plain-stmt Select means the checker missed it.
+                let _ = writeln!(self.out,
+                    "    fprintf(stderr, \"select in non-suspendable fn\\n\"); abort();");
+            }
             Stmt::Unsafe { body, .. } => {
                 self.env.push(HashMap::new());
                 for s in &body.stmts {
@@ -1352,6 +1359,29 @@ impl<'a> Gen<'a> {
                 out.append(&mut pre);
                 out.push(Stmt::Defer { call: c2, span: *span });
             }
+            Stmt::Select { arms, span } => {
+                let mut arms2 = Vec::new();
+                for arm in arms {
+                    let kind = match &arm.kind {
+                        SelKind::Recv { chan, bind, span: asp } => {
+                            let mut pre = Vec::new();
+                            let c2 = self.hoist_expr(chan, &mut pre);
+                            out.append(&mut pre);
+                            SelKind::Recv { chan: c2, bind: bind.clone(), span: *asp }
+                        }
+                        SelKind::Timeout { ms, span: asp } => {
+                            let mut pre = Vec::new();
+                            let m2 = self.hoist_expr(ms, &mut pre);
+                            out.append(&mut pre);
+                            SelKind::Timeout { ms: m2, span: *asp }
+                        }
+                        SelKind::Else { span: asp } => SelKind::Else { span: *asp },
+                    };
+                    let body = self.hoist_block(&arm.body);
+                    arms2.push(SelectArm { kind, body });
+                }
+                out.push(Stmt::Select { arms: arms2, span: *span });
+            }
             Stmt::Break { span } => out.push(Stmt::Break { span: *span }),
             Stmt::Continue { span } => out.push(Stmt::Continue { span: *span }),
         }
@@ -1461,6 +1491,9 @@ impl<'a> Gen<'a> {
         let _ = writeln!(self.out,
             "    if ({poll} == RT_PENDING) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }}");
         let _ = writeln!(self.out, "    s{k}: ;");
+        // a cancel-driven wake delivers no value — die at the resume point
+        let _ = writeln!(self.out,
+            "    if (rt_cancelled()) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_CANCEL; }}");
         match dest {
             FDest::Field(fd) => {
                 let _ = writeln!(self.out, "    fr->{fd} = rt_task_data(task);");
@@ -1733,6 +1766,7 @@ impl<'a> Gen<'a> {
                     "    fr->state = {k};\n    if (rt_scope_join_poll(&fr->sc{i}, task) == RT_PENDING) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }}\n    s{k}: ;\n    {{ int64_t _e = rt_scope_finish(&fr->sc{i});\n      if (_e) {{ if (fr->sc{i}.parent) {{ fr->sc{i}.parent->trapped = 1; fr->sc{i}.parent->err = _e; }} else {{ fprintf(stderr, \"trap %lld escaped top scope\\n\", (long long)_e); abort(); }} }} }}");
             }
             Stmt::Spawn { call, blocking, .. } => self.spawn(call, *blocking),
+            Stmt::Select { arms, .. } => self.fselect(arms),
             Stmt::Unsafe { body, .. } => {
                 self.env.push(HashMap::new());
                 self.fslots.push(HashMap::new());
@@ -1741,6 +1775,90 @@ impl<'a> Gen<'a> {
                 self.env.pop();
             }
         }
+    }
+
+    /// select { v := recv(ch) => .. timeout(ms) => .. else => .. }
+    /// — parks on all arm chans; the first fire wins (uniform random
+    /// among ready arms); resume dispatches to the winning arm's body.
+    fn fselect(&mut self, arms: &[SelectArm]) {
+        // evaluate arm chans / timeout ms once, before the suspend
+        let mut chs: Vec<usize> = Vec::new(); // arm index per chs[] slot
+        let mut cvs: Vec<String> = Vec::new();
+        let mut tmo = "-1".to_string();
+        let mut has_else = false;
+        for (i, arm) in arms.iter().enumerate() {
+            match &arm.kind {
+                SelKind::Recv { chan, .. } => {
+                    cvs.push(self.expr(chan));
+                    chs.push(i);
+                }
+                SelKind::Timeout { ms, .. } => tmo = self.expr(ms),
+                SelKind::Else { .. } => has_else = true,
+            }
+        }
+        let n = cvs.len();
+        let k = self.state_ctr;
+        self.state_ctr += 1;
+        self.state_labels.push(k);
+        let _ = writeln!(self.out,
+            "    if (rt_cancelled()) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_CANCEL; }}");
+        let _ = writeln!(self.out, "    fr->state = {k};");
+        let _ = writeln!(self.out, "    {{ RtChan *_sc[{n}];");
+        for (j, c) in cvs.iter().enumerate() {
+            let _ = writeln!(self.out, "      _sc[{j}] = {c};");
+        }
+        let _ = writeln!(self.out,
+            "      if (rt_select_poll(_sc, {n}, {tmo}, {}, task) == RT_PENDING) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }} }}",
+            if has_else { 1 } else { 0 });
+        let _ = writeln!(self.out, "    s{k}: ;");
+        // resume: observe cancel before consuming the delivered value
+        let _ = writeln!(self.out,
+            "    if (rt_cancelled()) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_CANCEL; }}");
+        // dispatch: recv slot j → arm chs[j]; RT_SEL_TMO → timeout arm;
+        // RT_SEL_ELSE → else arm
+        let lend = self.new_label();
+        let mut arm_labels: Vec<String> = Vec::new();
+        let mut cases: Vec<(i64, usize)> = Vec::new();
+        let mut tmo_arm = None;
+        let mut else_arm = None;
+        for (i, arm) in arms.iter().enumerate() {
+            let l = self.new_label();
+            arm_labels.push(l.clone());
+            match &arm.kind {
+                SelKind::Recv { .. } => {
+                    let slot = chs.iter().position(|&x| x == i).unwrap();
+                    cases.push((slot as i64, i));
+                }
+                SelKind::Timeout { .. } => tmo_arm = Some(i),
+                SelKind::Else { .. } => else_arm = Some(i),
+            }
+        }
+        let _ = writeln!(self.out, "    switch ((int)rt_select_arm(task)) {{");
+        for (slot, i) in &cases {
+            let _ = writeln!(self.out, "      case {slot}: goto {};", arm_labels[*i]);
+        }
+        if let Some(i) = tmo_arm {
+            let _ = writeln!(self.out, "      case RT_SEL_TMO: goto {};", arm_labels[i]);
+        }
+        if let Some(i) = else_arm {
+            let _ = writeln!(self.out, "      case RT_SEL_ELSE: goto {};", arm_labels[i]);
+        }
+        let _ = writeln!(self.out, "      default: goto {lend};\n    }}");
+        for (i, arm) in arms.iter().enumerate() {
+            let _ = writeln!(self.out, "    {}: ;", arm_labels[i]);
+            if let SelKind::Recv { bind: Some(name), .. } = &arm.kind {
+                let fd = self.fslot(name, "int64_t");
+                self.env.last_mut().unwrap().insert(name.clone(), Ty::Int);
+                let _ = writeln!(self.out, "    fr->{fd} = rt_task_data(task);");
+            }
+            self.env.push(HashMap::new());
+            self.fslots.push(HashMap::new());
+            self.fstmts(&arm.body.stmts);
+            self.fslots.pop();
+            self.env.pop();
+            let _ = writeln!(self.out, "    goto {lend};");
+        }
+        let _ = writeln!(self.out, "    {lend}: ;");
     }
 
     /// emit `struct o_frm_<e>` + `int o_poll_<e>` driver for a susp fn
