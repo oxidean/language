@@ -82,5 +82,6 @@ declared signature implies.
   aren't generic, so only *method* ty params pin through a vtab slot.
 - A fn-valued struct field `x.m` shadows a method `m` — `x.m()` calls
   the field.
-- The bootstrap components (`bootstrap/*.oxl`) do not parse or check
-  the method syntax — same documented-subset status as generics.
+- The bootstrap codegen (`bootstrap/codegen.oxl`) does not lower
+  method dispatch — parser and checker handle `fn (r T) m` receivers
+  and interface sigs; lowering stays on the Rust pipeline.

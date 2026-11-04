@@ -318,7 +318,10 @@ static void task_unwind(void) {
  * torn down inline. The self-hold makes the frees last-dropper-wins:
  * whoever drops holds to 0 frees the frame. */
 static void task_release_frame(RtTask *t, int trapped) {
-    if (!trapped) {
+    /* thread tasks never enter rt_trap's frame branch — `trapped` for
+     * one means cancel-unwound, no self-hold exists to skip, so they
+     * always settle on the normal path or the free never runs */
+    if (!trapped || !t->is_frame) {
         __sync_add_and_fetch(&t->holds, 1);
         if (t->is_frame) {
             for (RtScope *x = t->frame->cur_scope;
@@ -340,7 +343,7 @@ static void task_release_frame(RtTask *t, int trapped) {
 static void run_task(RtTask *t) {
     tls_scope = t->scope;
     tls_task = t;
-    int trapped = 0;
+    volatile int trapped = 0;
     if (t->is_frame) {
         t->wstate = WS_ONSTACK;
         if (setjmp(tls_jb) == 0) {
@@ -464,7 +467,7 @@ static void *task_wrap_frame(void *p) {
     t->wk = &wk;
     tls_scope = t->scope;
     tls_task = t;
-    int trapped = 0;
+    volatile int trapped = 0;
     if (setjmp(tls_jb) == 0) {
         while (1) {
             t->wstate = WS_ONSTACK;
@@ -574,7 +577,7 @@ int rt_run_root(RtFrame *fr) {
     RtTask *prev = tls_task;
     tls_task = t;
     tls_scope = t->scope;
-    int trapped = 0;
+    volatile int trapped = 0;
     if (setjmp(tls_jb) == 0) {
         while (1) {
             t->wstate = WS_ONSTACK;
@@ -686,23 +689,40 @@ void rt_trap(int64_t code) {
          * drops; already-drained ones tear down now, here on the live
          * stack, since no joiner is coming */
         for (RtScope *x = s; x; x = x->parent) {
-            int dead = 0;
             pthread_mutex_lock(&x->mu);
             if (!x->trapped) { x->trapped = 1; x->err = code; }
             x->cancel = 1;
             if (x != t->scope) {
+                /* orphan + a temp pending ref: the scope's mutex and
+                 * parked list must stay alive through the whole wake
+                 * pass — teardown waits for the temp drop below. One
+                 * frame hold per orphan; whoever drains the scope (the
+                 * last child's scope_done, or the temp drop itself)
+                 * releases it via scope_orphan_free. */
                 x->orphan = 1;
-                if (x->pending > 0) __sync_add_and_fetch(&t->holds, 1);
-                else dead = 1;
+                x->pending++;
+                __sync_add_and_fetch(&t->holds, 1);
             }
             pthread_mutex_unlock(&x->mu);
-            if (dead) scope_teardown(x);
             if (x == t->scope) break;
         }
         /* wake parked tasks so they observe cancel at resume instead
          * of parking forever on a chan nobody will serve */
         for (RtScope *x = s; x; x = x->parent) {
             scope_cancel_wake(x);
+            if (x == t->scope) break;
+        }
+        /* drop the temp refs: a drained orphan tears down here (its
+         * owner hold drops with it); live ones drain later under their
+         * last child's scope_done */
+        for (RtScope *x = s; x; x = x->parent) {
+            if (x != t->scope) {
+                int drain = 0;
+                pthread_mutex_lock(&x->mu);
+                if (--x->pending <= 0) drain = 1;
+                pthread_mutex_unlock(&x->mu);
+                if (drain) scope_orphan_free(x);
+            }
             if (x == t->scope) break;
         }
         tls_task = NULL;
@@ -1219,7 +1239,11 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
     RtChan **sorted = malloc(sizeof *sorted * (size_t)n);
     memcpy(sorted, chs, sizeof *sorted * (size_t)n);
     qsort(sorted, (size_t)n, sizeof *sorted, addr_cmp);
-    for (int i = 0; i < n; i++) pthread_mutex_lock(&sorted[i]->mu);
+    /* two arms may name the same chan — it sorts adjacent, so lock
+     * each distinct address once or the re-lock self-deadlocks */
+    for (int i = 0; i < n; i++)
+        if (i == 0 || sorted[i] != sorted[i - 1])
+            pthread_mutex_lock(&sorted[i]->mu);
 
     /* re-check: a send may have landed between the sweep and the lock.
      * Peek the ready set — sel_ready consumes (pops ring/sendq, claims
@@ -1240,7 +1264,9 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
                 if (seen++ == pick) { sel_ready(chs[i], &v, &wm); arm = i; break; }
             }
         }
-        for (int i = 0; i < n; i++) pthread_mutex_unlock(&sorted[i]->mu);
+        for (int i = 0; i < n; i++)
+            if (i == 0 || sorted[i] != sorted[i - 1])
+                pthread_mutex_unlock(&sorted[i]->mu);
         free(sorted);
         if (wm) rt_task_wake(wm);
         t->chan_res = v;
@@ -1265,7 +1291,9 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
         s->w[i].next = ch->selq;
         ch->selq = &s->w[i];
     }
-    for (int i = 0; i < n; i++) pthread_mutex_unlock(&sorted[i]->mu);
+    for (int i = 0; i < n; i++)
+        if (i == 0 || sorted[i] != sorted[i - 1])
+            pthread_mutex_unlock(&sorted[i]->mu);
     free(sorted);
     if (tmo_ms >= 0) {
         pthread_t th;

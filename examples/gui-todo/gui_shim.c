@@ -137,15 +137,50 @@ static void tramp(GtkWidget *w, gpointer data) {
     RtFnv *cb = data;
     ((void (*)(void *, GtkWidget *))cb->fp)(cb->env, w);
 }
+
+/* one RtFnv env can back several registrations (the same fn value
+ * connected to two signals copies the env pointer) — refcount per env
+ * so the last destroy notify frees it exactly once. GTK objects are
+ * main-thread-confined, so no locking. */
+typedef struct CbEnv {
+    void *env;
+    int refs;
+    struct CbEnv *next;
+} CbEnv;
+static CbEnv *cb_envs;
+
 static void cb_destroy(gpointer data, GClosure *cl) {
     (void)cl;
     RtFnv *cb = data;
-    rt_free(cb->env);
+    for (CbEnv **pp = &cb_envs; *pp; pp = &(*pp)->next) {
+        if ((*pp)->env == cb->env) {
+            if (--(*pp)->refs == 0) {
+                CbEnv *d = *pp;
+                *pp = d->next;
+                rt_free(d->env);
+                free(d);
+            }
+            free(cb);
+            return;
+        }
+    }
+    rt_free(cb->env); /* connect failed before registering */
     free(cb);
 }
 void gui_connect(int64_t obj, const char *sig, RtFnv cb) {
     RtFnv *heap = malloc(sizeof(RtFnv));
     *heap = cb;
+    CbEnv *e = cb_envs;
+    for (; e; e = e->next)
+        if (e->env == cb.env) break;
+    if (!e) {
+        e = malloc(sizeof *e);
+        e->env = cb.env;
+        e->refs = 0;
+        e->next = cb_envs;
+        cb_envs = e;
+    }
+    e->refs++;
     g_signal_connect_data(G_OBJECT((gpointer)(intptr_t)obj), sig,
                           G_CALLBACK(tramp), heap, cb_destroy, 0);
 }

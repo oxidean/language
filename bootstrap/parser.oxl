@@ -408,7 +408,7 @@ fn eof(c: mut PCur) -> bool {
 }
 
 fn eat(c: mut PCur, w: str) -> bool {
-    if peek(c) == w {
+    if at(c, w) {
         next(c)
         return true
     }

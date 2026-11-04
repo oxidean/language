@@ -26,18 +26,21 @@ before codegen if any `Error` exists.
 ## Lexer → Token
 
 ```rust
-enum Tok { Ident, Int, Str, Kw(Kw), Punct(P), Eof }
-struct Token { tok: Tok, span: Span, text: Range<u32> } // text = byte range into src
+enum Tok { Ident(String), Int(i64), Float(f64), Str(String), Kw(Kw), P(P), Eof }
+struct Token { tok: Tok, span: Span }   // Span { lo, hi } — byte offsets (diag.rs)
 ```
 
-Keywords (v0): `fn struct extern return if else for let scope spawn go
-send recv chan own ref mut unsafe nil true false import`
+Keywords: `fn struct extern return if else for let scope spawn go own
+ref mut unsafe nil true false import chan break continue defer select
+enum match interface spawnBlocking` — `send`/`recv` are builtins, not
+keywords.
 
 ## AST (parser output)
 
-`Crate { items: Vec<Item> }` where `Item = Fn | Struct | Extern | Import`.
-Expressions/statements per `oxl/src/ast.rs` — the AST is deliberately
-syntactic (no desugaring in parser except `x := e` → `Let{infer:true}`).
+`Crate { items: Vec<Item> }` where `Item = Fn | Struct | Enum | Extern |
+Interface | Import | Global`. Expressions/statements per
+`oxl/src/ast.rs` — the AST is deliberately syntactic (no desugaring in
+parser; `x := e` parses to `Stmt::Let { ty: None, .. }`).
 
 ## TAST (typechecker output)
 

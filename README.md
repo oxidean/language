@@ -29,8 +29,9 @@ headers (runtime links `-lsqlite3`). Supported platforms: Linux
 runtime is POSIX/pthread — a portability layer is future work).
 
 ```sh
-cd oxl && cargo build --release
-# binary: oxl/target/release/oxl
+cd oxl && cargo build --release && cd ..
+# binary: oxl/target/release/oxl — put it on PATH for the commands below
+export PATH="$PWD/oxl/target/release:$PATH"
 ```
 
 `oxl build`/`run` invoke the system `cc` for the final link; set

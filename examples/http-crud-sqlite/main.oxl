@@ -35,8 +35,8 @@ fn has_ctl(s: str) -> bool {
 fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
     status := 404
     body := "oxl http server — try /items\n"
-    if find(path, "/items") == 0 {
-        if find(method, "POST") == 0 {
+    if path == "/items" {
+        if method == "POST" {
             status = 201
             if has_ctl(reqbody) {
                 // sqlite_query emits newline-delimited rows — a stored

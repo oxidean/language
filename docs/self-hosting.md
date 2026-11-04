@@ -19,12 +19,14 @@ The goal: the compiler, written in the language, compiled by itself.
   parser's AST (fns, structs, enums, globals, imports, bodies,
   patterns/match exhaustiveness, suspension analysis). **It checks
   itself clean** — `oxl run bootstrap/check.oxl -- file.oxl` prints
-  diagnostics or `ok`. Documented subset: the parser does not yet
-  produce generics (`fn f[T any]` parses but `T` reports unknown),
-  interface decls, or float-typed AST distinctions beyond literals.
-  The checker understands `shared` but does not port the Rust side's
-  `own` move tracking (D2) — it accepts the same sources without the
-  use-after-move diagnostics.
+  diagnostics or `ok`. The parser produces the full v0.2 surface —
+  generics (`fn f[T any]`), `interface` decls, and `fn (r T) m`
+  receivers — and the checker consumes them: ty-param registration,
+  interface tables, structural method coverage, and `own` move
+  tracking (D2) are all ported. Remaining subset: float-typed AST
+  distinctions beyond literals, and `codegen.oxl` does not yet lower
+  generics/interfaces/methods — those still emit through the Rust
+  pipeline.
 - `bootstrap/codegen.oxl` — a port of the Rust C emitter, written in
   `.oxl`, consuming the checker's tables over the parser's AST:
   `oxl run bootstrap/codegen.oxl -- file.oxl > out.c`, then
@@ -72,9 +74,9 @@ Ordered by what the checker/codegen port actually needs:
 5. ~~**Methods / `interface` dispatch**~~ — **done (D3).** `fn (r T) m`
    receivers, structural `interface` types as `{data, vtab}` pairs,
    `w.m()` vtab dispatch, method-constraint generics — see
-   `docs/semantics/methods.md`. The bootstrap components remain a
-   documented subset: they don't parse method syntax (same as
-   generics).
+   `docs/semantics/methods.md`. The bootstrap codegen remains a
+   documented subset: it doesn't lower method dispatch (same as
+   generics) — parser and checker handle the syntax.
 6. ~~**Maps/sets in stdlib**~~ — **done (B6).** `std/collections`:
    FNV-1a `map`/`set` over `[]Bucket` power-of-2 tables, `int` payloads
    (word-sized, covers env ids and counts). Needed `&`/`|`/`^` infix
