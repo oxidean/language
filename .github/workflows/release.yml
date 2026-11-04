@@ -28,17 +28,17 @@ jobs:
           # the repo README documents building from oxl/ and other paths
           # the archive doesn't ship — give it release-specific steps
           cat > dist/oxl-toolchain/README.md <<'EOF'
-# oxl toolchain
+          # oxl toolchain
 
-The `oxl` compiler plus `stdlib/` library sources and `examples/` pilots.
+          The `oxl` compiler plus `stdlib/` library sources and `examples/` pilots.
 
-```sh
-./oxl run examples/hello.oxl    # compile + run (needs cc on PATH)
-./oxl build examples/http-crud-sqlite/main.oxl   # sqlite pilots also need libsqlite3-dev
-```
+          ```sh
+          ./oxl run examples/hello.oxl    # compile + run (needs cc on PATH)
+          ./oxl build examples/http-crud-sqlite/main.oxl   # sqlite pilots also need libsqlite3-dev
+          ```
 
-`import "std/x"` resolves against `stdlib/` next to the binary.
-EOF
+          `import "std/x"` resolves against `stdlib/` next to the binary.
+          EOF
           cd dist && tar czf oxl-toolchain-linux-x86_64.tar.gz oxl-toolchain
       - name: github release
         uses: softprops/action-gh-release@v2
