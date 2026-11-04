@@ -8,9 +8,10 @@ and a Qt/GTK FFI bridge. Web target (JS/HTML/CSS) parked.
 
 ## Backend
 
-Compiler implementation: Zig (preferred) or Rust. Codegen: LLVM
-(preferred) or self-hosted. Runtime: C-compatible, arena-based, no tracing
-GC.
+Compiler implementation: Rust (`oxl/`). Codegen: C emission compiled
+through the system `cc` (`LANG_CC`/`LANG_LDFLAGS` knobs) — self-hosted.
+Runtime: C-compatible (`runtime/rt.c`), arena-based, no tracing GC.
+LLVM remains a possible future backend once codegen size justifies it.
 
 ## Database
 

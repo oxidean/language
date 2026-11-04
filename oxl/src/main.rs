@@ -556,21 +556,47 @@ fn compile(src_file: &str) -> Result<String, ()> {
     compile_mode(src_file, false)
 }
 
+/// private scratch dir under $TMPDIR: created exclusively (never a
+/// pre-existing dir someone else owns), 0700 on unix, retried a few
+/// times on a name collision before giving up.
+fn mk_scratch_dir(prefix: &str) -> Option<PathBuf> {
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    for attempt in 0..16u32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{nanos}-{attempt}",
+            std::process::id()
+        ));
+        match b.create(&dir) {
+            Ok(()) => return Some(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                eprintln!("cannot create build dir {}: {e}", dir.display());
+                return None;
+            }
+        }
+    }
+    eprintln!(
+        "cannot create a fresh {prefix} dir under {}",
+        std::env::temp_dir().display()
+    );
+    None
+}
+
 fn emit_and_cc(c_src: &str, out: &Path) -> bool {
     // intermediates go in a private scratch dir — never beside the
     // user's -o where they could clobber existing out.c/rt.c/rt.h
-    let dir = std::env::temp_dir().join(format!(
-        "oxl-build-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("cannot create build dir {}: {e}", dir.display());
+    let Some(dir) = mk_scratch_dir("oxl-build") else {
         return false;
-    }
+    };
     if let Some(od) = out.parent() {
         if let Err(e) = std::fs::create_dir_all(od) {
             eprintln!("cannot create output dir {}: {e}", od.display());
@@ -636,7 +662,9 @@ fn cmd_run(args: &[String]) {
     let file = &args[2];
     match compile(file) {
         Ok(c) => {
-            let dir = std::env::temp_dir().join(format!("oxl-{}", std::process::id()));
+            let Some(dir) = mk_scratch_dir("oxl-run") else {
+                exit(1);
+            };
             let out = dir.join("a.out");
             if !emit_and_cc(&c, &out) {
                 exit(1);
@@ -647,6 +675,7 @@ fn cmd_run(args: &[String]) {
                 &args[3..]
             };
             let st = Command::new(&out).args(child_args).status().unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
             exit(st.code().unwrap_or(1));
         }
         Err(()) => exit(1),
@@ -657,12 +686,15 @@ fn cmd_test(args: &[String]) {
     let file = &args[2];
     match compile_mode(file, true) {
         Ok(c) => {
-            let dir = std::env::temp_dir().join(format!("oxl-test-{}", std::process::id()));
+            let Some(dir) = mk_scratch_dir("oxl-test") else {
+                exit(1);
+            };
             let out = dir.join("a.out");
             if !emit_and_cc(&c, &out) {
                 exit(1);
             }
             let st = Command::new(&out).status().unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
             exit(st.code().unwrap_or(1));
         }
         Err(()) => exit(1),
@@ -829,26 +861,43 @@ fn json_str<'a>(body: &'a str, key: &str) -> Option<String> {
     let at = body.find(&pat)? + pat.len();
     let i = at + body[at..].find('"')? + 1;
     let mut out = String::new();
-    let mut esc = false;
-    for c in body[i..].chars() {
-        if esc {
-            out.push(match c {
-                'n' => '\n',
-                't' => '\t',
-                'r' => '\r',
-                'u' => continue, // \uXXXX passthrough is lossy in v0
-                c => c,
-            });
-            esc = false;
-        } else if c == '\\' {
-            esc = true;
-        } else if c == '"' {
-            return Some(out);
-        } else {
-            out.push(c);
+    let mut it = body[i..].chars();
+    while let Some(c) = it.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match it.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                'b' => out.push('\u{8}'),
+                'f' => out.push('\u{c}'),
+                'u' => {
+                    let mut cp = hex4(&mut it)?;
+                    if (0xD800..0xDC00).contains(&cp) {
+                        // high surrogate: pair with a following \uDC00..\uDFFF
+                        let mut peek = it.clone();
+                        if peek.next() == Some('\\') && peek.next() == Some('u') {
+                            let lo = hex4(&mut peek)?;
+                            if (0xDC00..0xE000).contains(&lo) {
+                                it = peek;
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                            }
+                        }
+                    }
+                    out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                }
+                other => out.push(other),
+            },
+            c => out.push(c),
         }
     }
     None
+}
+
+/// reads the four hex digits of a `\uXXXX` escape
+fn hex4(it: &mut std::str::Chars) -> Option<u32> {
+    let s: String = it.by_ref().take(4).collect();
+    u32::from_str_radix(&s, 16).ok()
 }
 
 fn publish_diags(stdout: &mut impl Write, uri: &str, list: &[(usize, usize, String)]) {

@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # build/test steps run dep code; publish uses github.token directly
       - uses: dtolnay/rust-toolchain@stable
       - name: build oxl
         run: cargo build --release --manifest-path oxl/Cargo.toml

@@ -17,6 +17,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # PR code runs here; don't leave a token in git config
 
       - uses: dtolnay/rust-toolchain@stable
 

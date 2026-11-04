@@ -28,10 +28,13 @@ out=$("$OXL" run examples/cli/main.oxl -- Jesse)
 grep -q "hello, Jesse" <<<"$out" || { echo "FAIL cli"; exit 1; }
 
 echo "== oxl test: smoke =="
-"$OXL" test examples/smoke_test.oxl | tee /dev/stderr | grep -q "test_chan ... ok"
+out=$("$OXL" test examples/smoke_test.oxl)
+printf '%s\n' "$out" >&2
+grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL smoke: $out"; exit 1; }
 
 echo "== oxl test: stdlib =="
-"$OXL" test tests/stdlib_test.oxl | grep -q "test_loops ... ok"
+out=$("$OXL" test tests/stdlib_test.oxl)
+grep -q "test_loops ... ok" <<<"$out" || { echo "FAIL stdlib: $out"; exit 1; }
 
 echo "== stdmods (json/sync/time) =="
 out=$("$OXL" run tests/stdmods_test.oxl)
@@ -40,7 +43,8 @@ grep -q "^4000$" <<<"$out" || { echo "FAIL stdmods sync counter: $out"; exit 1; 
 [ "$(tail -1 <<<"$out")" = "done" ] || { echo "FAIL stdmods time: $out"; exit 1; }
 
 echo "== float (d1) =="
-"$OXL" test tests/float_test.oxl | grep -q "test_json_float ... ok"
+out=$("$OXL" test tests/float_test.oxl)
+grep -q "test_json_float ... ok" <<<"$out" || { echo "FAIL float: $out"; exit 1; }
 # int/float mixing must be a compile error, not silent widening
 cat > /tmp/floatmix.oxl <<'EOF'
 fn main() { x := 1 + 2.5 }
@@ -245,7 +249,8 @@ done
 # --test mode: scope-wrapped runner like `oxl test`
 "$OXL" run bootstrap/codegen.oxl -- --test examples/smoke_test.oxl > "$cgen_dir/t.c"
 "${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/t.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/t" || { echo "FAIL codegen cc --test"; exit 1; }
-"$cgen_dir/t" | grep -q "test_chan ... ok" || { echo "FAIL codegen --test"; exit 1; }
+out=$("$cgen_dir/t")
+grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL codegen --test: $out"; exit 1; }
 # bootstrap chain: codegen compiled by itself emits identical C
 "$OXL" run bootstrap/codegen.oxl -- bootstrap/codegen.oxl > "$cgen_dir/self.c"
 "${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/self.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/self" || { echo "FAIL codegen self-cc"; exit 1; }
@@ -322,6 +327,12 @@ srv_pid=$(cat "$work/srv.pid")
 grep -q "listening" "$work/srv.log" || { echo "FAIL: server did not bind"; cat "$work/srv.log"; kill $srv_pid 2>/dev/null; exit 1; }
 got=$(curl -s -d widget localhost:8080/items)
 [ "$got" = '{"created":"widget"}' ] || { echo "FAIL post: $got"; kill $srv_pid 2>/dev/null; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' -d widget localhost:8080/items)
+[ "$code" = "201" ] || { echo "FAIL post status: $code"; kill $srv_pid 2>/dev/null; exit 1; }
+# newline in a name would split one stored row into two items on read —
+# the server must reject it with a 400 rather than corrupt the list
+code=$(curl -s -o /dev/null -w '%{http_code}' -d $'bad\nname' localhost:8080/items)
+[ "$code" = "400" ] || { echo "FAIL newline status: $code"; kill $srv_pid 2>/dev/null; exit 1; }
 got=$(curl -s localhost:8080/items)
 grep -q '"name":"widget"' <<<"$got" || { echo "FAIL get: $got"; kill $srv_pid 2>/dev/null; exit 1; }
 kill $srv_pid 2>/dev/null || true

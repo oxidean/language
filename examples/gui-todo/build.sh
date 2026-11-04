@@ -9,5 +9,7 @@ GTK_CFLAGS=$(pkg-config --cflags gtk4)
 GTK_LIBS=$(pkg-config --libs gtk4)
 
 ${LANG_CC:-cc} -O2 $GTK_CFLAGS -c gui_shim.c -o gui_shim.o
-LANG_LDFLAGS="$PWD/gui_shim.o $GTK_LIBS" "$OXL" build todo.oxl -o todo
+# relative shim path: LANG_LDFLAGS is whitespace-split by the driver, so an
+# absolute path breaks on checkouts whose directory contains spaces
+LANG_LDFLAGS="gui_shim.o $GTK_LIBS" "$OXL" build todo.oxl -o todo
 echo "built ./todo"

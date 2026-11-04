@@ -17,14 +17,24 @@ let db = sqlite_open(cstr("pilot.db"))
 
 struct App { d: int }
 
-fn (a App) route(method: str, path: str, reqbody: str) -> str {
-    body := ""
+fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
+    status := 404
+    body := "oxl http server — try /items\n"
     if find(path, "/items") == 0 {
         if find(method, "POST") == 0 {
-            if sqlite_exec(db, cstr("CREATE TABLE IF NOT EXISTS items(name TEXT)")) != 0 {
+            status = 201
+            if find(reqbody, "\n") >= 0 || find(reqbody, "\r") >= 0 {
+                // sqlite_query emits newline-delimited rows — a stored
+                // newline would split one row into two items on read.
+                // Reject it at the boundary rather than corrupt reads.
+                status = 400
+                body = "{\"error\":\"name must not contain a newline\"}\n"
+            } else if sqlite_exec(db, cstr("CREATE TABLE IF NOT EXISTS items(name TEXT)")) != 0 {
+                status = 500
                 body = "{\"error\":\"db init failed\"}\n"
             } else if sqlite_exec_bind(db, cstr("INSERT INTO items VALUES(?)"), reqbody) != 0 {
                 // ^ request body is bound, never concatenated into SQL
+                status = 500
                 body = "{\"error\":\"insert failed\"}\n"
             } else {
                 r := json.jobj()
@@ -32,6 +42,7 @@ fn (a App) route(method: str, path: str, reqbody: str) -> str {
                 body = json.tojson(r) + "\n"
             }
         } else {
+            status = 200
             // rows arrive as "id|name" lines — reshape into real JSON
             items := json.jarr()
             rows := strings.split(sqlite_query(db, cstr("SELECT rowid, name FROM items")), "\n")
@@ -56,10 +67,8 @@ fn (a App) route(method: str, path: str, reqbody: str) -> str {
             json.jadd(res, "items", items)
             body = json.tojson(res) + "\n"
         }
-    } else {
-        body = "oxl http server — try /items\n"
     }
-    return body
+    return http.Resp{status: status, body: body}
 }
 
 fn main() {

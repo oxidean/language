@@ -19,8 +19,9 @@ select {
 
 Semantics (Go-shaped, deliberately):
 
-- Arms are `recv`/`send` channel ops; exactly one fires; uniform random
-  pick when several are ready (no starvation by ordering).
+- Arms are `recv` channel ops in v0.2 (send arms are future work — see
+  the exclusion note below); exactly one fires; uniform random pick when
+  several are ready (no starvation by ordering).
 - No `else` and no ready arm → suspend until an arm is ready (the
   suspend point A1's transform already knows how to compile).
 - `timeout(ms)` arm = recv on a runtime-created timer channel — keeps

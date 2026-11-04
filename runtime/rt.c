@@ -322,7 +322,21 @@ static void *worker(void *_p) {
         if (!pool.head) pool.tail = NULL;
         pthread_mutex_unlock(&pool.mu);
         if (!t->scope || !t->scope->cancel) run_task(t);
-        else { if (t->sel) rt_select_arm(t); scope_done(t->scope); free(t); }
+        else {
+            /* cancelled before it ran: earlier poll rounds may still
+             * have registered defers — drain them under a live setjmp
+             * so a suspending defer unwinds back here (like the trap
+             * path) instead of into dead jump state, then settle
+             * exactly like run_task */
+            tls_scope = t->scope;
+            tls_task = t;
+            setjmp(tls_jb);
+            task_defers_drain(t);
+            tls_task = NULL;
+            if (t->sel) rt_select_arm(t);
+            scope_done(t->scope);
+            free(t);
+        }
     }
     return 0;
 }
@@ -957,9 +971,14 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
         pthread_mutex_unlock(&ch->mu);
         return RT_READY; /* send on closed completes silently (v0 rule) */
     }
-    if (ch->trecv > 0) { /* a thread receiver is committed inside cv_wait */
+    /* a thread receiver is committed inside cv_wait — but only plant
+     * the slot when it's empty: a `has` already set is another thread
+     * sender's deposit that receiver hasn't consumed yet; overwriting
+     * it would lose that value while both senders report success */
+    if (ch->trecv > 0 && !ch->has) {
         ch->val = v;
         ch->has = 1;
+        ch->slot_owner = NULL; /* frame deposit: no thread owner */
         pthread_cond_broadcast(&ch->cv_recv);
         pthread_mutex_unlock(&ch->mu);
         return RT_READY;

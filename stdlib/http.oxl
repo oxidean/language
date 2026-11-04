@@ -1,12 +1,13 @@
 // std/http — minimal HTTP/1.1 server written in the language over libc
 // sockets. Import with `import "std/http"` and hand `serve` a Handler:
 //
-//   interface Handler { route(method: str, path: str, body: str) -> str }
-//   fn (a App) route(method: str, path: str, body: str) -> str { ... }
+//   interface Handler { route(method: str, path: str, body: str) -> Resp }
+//   fn (a App) route(method: str, path: str, body: str) -> Resp { ... }
 //   fn main() { serve(8080, App{}) }
 //
-// `h.route` is dispatched per request on the blocking pool; whatever it
-// returns is sent as a text/plain 200 response.
+// `h.route` is dispatched per request on the blocking pool; it returns a
+// Resp — the status becomes the response's HTTP status line and the body
+// is sent as text/plain.
 extern fn socket(domain: int, ty: int, proto: int) -> int
 
 extern fn bind(fd: int, addr: ref sockaddr, len: int) -> int
@@ -27,28 +28,57 @@ struct sockaddr { a: int, b: int } // 16 bytes: sockaddr_in fits
 
 struct intp { v: int }
 
+/// handler result: the HTTP status code plus the text/plain body
+struct Resp { status: int, body: str }
+
 /// request handler — implement `route` on your app struct and pass it
 /// to `serve`; dispatched per connection on the blocking pool
-interface Handler { route(method: str, path: str, body: str) -> str }
+interface Handler { route(method: str, path: str, body: str) -> Resp }
 
-fn http_ok(body: str) -> str {
-    return "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: " + itoa(len(body)) + "\r\n\r\n" + body
+fn status_text(status: int) -> str {
+    if status == 200 {
+        return "OK"
+    }
+    if status == 201 {
+        return "Created"
+    }
+    if status == 400 {
+        return "Bad Request"
+    }
+    if status == 404 {
+        return "Not Found"
+    }
+    if status == 500 {
+        return "Internal Server Error"
+    }
+    return "Status"
+}
+
+fn http_resp(status: int, body: str) -> str {
+    return "HTTP/1.1 " + itoa(status) + " " + status_text(status) + "\r\ncontent-type: text/plain\r\ncontent-length: " + itoa(len(body)) + "\r\n\r\n" + body
 }
 
 /// in-flight connection cap — accept()s past it are closed at once so
 /// a flood can't pile up unbounded blocking-pool threads
 let MAX_CONN = 64
 
+/// release the conn slot and the fd on EVERY exit — normal return,
+/// early read failure, and handler trap (the runtime drains task
+/// defers on trap unwind, so a trapping route can't leak either)
+fn conn_cleanup(fd: int, inflight: shared) {
+    close(fd)
+    sadd(inflight, -1)
+}
+
 fn handle_conn(h: Handler, fd: int, inflight: shared) {
+    defer conn_cleanup(fd, inflight)
     // conn-scoped arena: the request buffer + parse garbage die when the
     // handler returns instead of accumulating in the serve scope
     scope {
         set_rcvtimo(fd, 10) // slowloris guard: reads give up after 10s
         buf := mkbuf(4096)
         n := read(fd, buf, 4095)
-        if n <= 0 {
-            close(fd)
-        } else {
+        if n > 0 {
             req := bufstr(buf, n)
 
             // "METHOD PATH HTTP/1.x" — split on the first two spaces
@@ -63,13 +93,11 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
                 body = substr(req, hdr_end + 4, len(req))
             }
 
-            resp_body := h.route(method, path, body)
-            resp := http_ok(resp_body)
+            r := h.route(method, path, body)
+            resp := http_resp(r.status, r.body)
             write(fd, cstr(resp), len(resp))
-            close(fd)
         }
     }
-    sadd(inflight, -1)
 }
 
 /// listen+serve on port; dispatches `h.route` per request
