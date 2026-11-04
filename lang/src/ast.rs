@@ -11,8 +11,28 @@ pub enum Item {
     Struct(Struct),
     Extern(Fn),
     Interface(Interface),
-    Import(String, Span),
+    Import(Import),
     Global(Global),
+}
+
+/// `import "path" [as alias] [.{name, ...}]`
+/// canonical module name = file stem of the resolved path; `alias` binds a
+/// different local name; `selective` names also bind unqualified.
+#[derive(Debug)]
+pub struct Import {
+    pub path: String,
+    pub alias: Option<String>,
+    pub selective: Vec<String>,
+    pub span: Span,
+}
+
+/// qualified call name: `f` / `mod.f` (Field{obj:Ident} flattens to "mod.f")
+pub fn callee_name(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Ident(n) => Some(n.clone()),
+        ExprKind::Field { obj, name } => Some(format!("{}.{}", callee_name(obj)?, name)),
+        _ => None,
+    }
 }
 
 /// top-level `let name[: ty] = init` — process-wide state, initialized

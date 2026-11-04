@@ -2,14 +2,14 @@ import "std/os"
 import "std/testing"
 
 fn test_args() {
-    expect(nargs() >= 1, "has args")
-    expect(len(args(0)) > 0, "argv0 nonempty")
+    testing.expect(os.nargs() >= 1, "has args")
+    testing.expect(len(os.args(0)) > 0, "argv0 nonempty")
 }
 
 fn test_file() {
-    n := writefile_("/tmp/lang-ostest.txt", "hello os")
-    expect(n == 0, "write ok")
-    expect_streq(readfile_("/tmp/lang-ostest.txt"), "hello os", "read back")
+    n := os.writefile_("/tmp/lang-ostest.txt", "hello os")
+    testing.expect(n == 0, "write ok")
+    testing.expect_streq(os.readfile_("/tmp/lang-ostest.txt"), "hello os", "read back")
 }
 
 fn main() {}

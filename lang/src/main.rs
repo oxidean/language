@@ -53,38 +53,264 @@ fn resolve_import(from_file: &Path, imp: &str) -> Option<PathBuf> {
     None
 }
 
+/// stem of a resolved path = its canonical module name
+fn mod_stem(path: &Path) -> String {
+    path.file_stem().unwrap_or_default().to_string_lossy().to_string()
+}
+
+/// rename a lang identifier through this module's maps:
+/// `a.b` -> alias-mapped `stem.b`; bare `n` -> own-decl `mod.n` / selective `s.n`
+fn map_name(
+    n: &str,
+    renames: &std::collections::HashMap<String, String>,
+    aliases: &std::collections::HashMap<String, String>,
+) -> String {
+    if let Some((head, rest)) = n.split_once('.') {
+        if let Some(stem) = aliases.get(head) {
+            return format!("{stem}.{rest}");
+        }
+        n.to_string()
+    } else {
+        renames.get(n).cloned().unwrap_or_else(|| n.to_string())
+    }
+}
+
+/// canonicalize `a.b(...)` calls to `Ident("a.b")` then map through the
+/// module's alias/rename tables; also maps type names and bare decl idents.
+fn qualify_expr(
+    e: &mut ast::Expr,
+    renames: &std::collections::HashMap<String, String>,
+    aliases: &std::collections::HashMap<String, String>,
+) {
+    match &mut e.kind {
+        ast::ExprKind::Call { f, args } => {
+            if let Some(n) = ast::callee_name(f) {
+                let mapped = map_name(&n, renames, aliases);
+                f.kind = ast::ExprKind::Ident(mapped);
+            } else {
+                qualify_expr(f, renames, aliases);
+            }
+            for a in args {
+                qualify_expr(a, renames, aliases);
+            }
+        }
+        ast::ExprKind::Ident(n) => *n = map_name(n, renames, aliases),
+        ast::ExprKind::StructLit { name, fields } => {
+            *name = map_name(name, renames, aliases);
+            for (_, v) in fields {
+                qualify_expr(v, renames, aliases);
+            }
+        }
+        ast::ExprKind::Field { obj, .. } => qualify_expr(obj, renames, aliases),
+        ast::ExprKind::Bin { l, r, .. } => {
+            qualify_expr(l, renames, aliases);
+            qualify_expr(r, renames, aliases);
+        }
+        ast::ExprKind::Un { e, .. } => qualify_expr(e, renames, aliases),
+        _ => {}
+    }
+}
+
+fn qualify_ty(
+    t: &mut ast::TyRef,
+    renames: &std::collections::HashMap<String, String>,
+    aliases: &std::collections::HashMap<String, String>,
+) {
+    match &mut t.kind {
+        ast::TyKind::Named(n) => *n = map_name(n, renames, aliases),
+        ast::TyKind::Own(i) | ast::TyKind::Ref(i) | ast::TyKind::Mut(i) => {
+            qualify_ty(i, renames, aliases)
+        }
+        ast::TyKind::Chan => {}
+    }
+}
+
+fn qualify_block(
+    b: &mut ast::Block,
+    renames: &std::collections::HashMap<String, String>,
+    aliases: &std::collections::HashMap<String, String>,
+) {
+    for s in &mut b.stmts {
+        match s {
+            ast::Stmt::Let { ty, init, .. } => {
+                if let Some(t) = ty {
+                    qualify_ty(t, renames, aliases);
+                }
+                qualify_expr(init, renames, aliases);
+            }
+            ast::Stmt::Let2 { call, .. } => qualify_expr(call, renames, aliases),
+            ast::Stmt::Assign { target, val, .. } => {
+                qualify_expr(target, renames, aliases);
+                qualify_expr(val, renames, aliases);
+            }
+            ast::Stmt::Expr(x) => qualify_expr(x, renames, aliases),
+            ast::Stmt::Return { vals, .. } => {
+                for v in vals {
+                    qualify_expr(v, renames, aliases);
+                }
+            }
+            ast::Stmt::If { cond, then, els, .. } => {
+                qualify_expr(cond, renames, aliases);
+                qualify_block(then, renames, aliases);
+                if let Some(e) = els {
+                    qualify_block(e, renames, aliases);
+                }
+            }
+            ast::Stmt::For { cond, body, .. } => {
+                qualify_expr(cond, renames, aliases);
+                qualify_block(body, renames, aliases);
+            }
+            ast::Stmt::Scope { body, .. } | ast::Stmt::Unsafe { body, .. } => {
+                qualify_block(body, renames, aliases)
+            }
+            ast::Stmt::Spawn { call, .. } => qualify_expr(call, renames, aliases),
+            ast::Stmt::Break { .. } | ast::Stmt::Continue { .. } => {}
+        }
+    }
+}
+
 fn load_crate(path: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> Option<ast::Crate> {
+    load_mod(path, "", seen, true)
+}
+
+/// parse a file, recursively qualify its imports under their module stems,
+/// then qualify this file's own decls as `mod.name` (root: modname "").
+fn load_mod(
+    path: &Path,
+    modname: &str,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    loud: bool,
+) -> Option<ast::Crate> {
     let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !seen.insert(canon) {
+    if !seen.insert(canon.clone()) {
         return Some(ast::Crate { items: Vec::new() });
     }
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{}: {e}", path.display());
+            if loud {
+                eprintln!("{}: {e}", path.display());
+            }
             return None;
         }
     };
     let mut diags = diag::Diags::new(path.to_string_lossy().to_string(), src.clone());
     let toks = lexer::lex(&src, &mut diags);
     let krate = parser::parse(&toks, &mut diags);
-    diags.report();
+    if loud {
+        diags.report();
+    }
+    // own decl names (externs keep C names) + per-import maps
+    let mut renames: std::collections::HashMap<String, String> = Default::default();
+    let mut aliases: std::collections::HashMap<String, String> = Default::default();
+    if !modname.is_empty() {
+        for it in &krate.items {
+            let n = match it {
+                ast::Item::Fn(f) => Some(&f.name),
+                ast::Item::Struct(s) => Some(&s.name),
+                ast::Item::Interface(i) => Some(&i.name),
+                ast::Item::Global(g) => Some(&g.name),
+                _ => None,
+            };
+            if let Some(n) = n {
+                renames.insert(n.clone(), format!("{modname}.{n}"));
+            }
+        }
+    }
     let mut items = Vec::new();
-    for it in krate.items {
-        if let ast::Item::Import(imp, _) = it {
-            match resolve_import(path, &imp) {
+    // pass 1: resolve every import first so its alias/selective bindings are
+    // visible to all decls regardless of source order
+    for it in &krate.items {
+        if let ast::Item::Import(imp) = it {
+            match resolve_import(path, &imp.path) {
                 Some(p) => {
-                    if let Some(sub) = load_crate(&p, seen) {
+                    let stem = mod_stem(&p);
+                    aliases.insert(imp.alias.clone().unwrap_or_else(|| stem.clone()), stem.clone());
+                    if imp.alias.is_none() {
+                        aliases.insert(stem.clone(), stem.clone());
+                    }
+                    for s in &imp.selective {
+                        renames.insert(s.clone(), format!("{stem}.{s}"));
+                    }
+                    if let Some(sub) = load_mod(&p, &stem, seen, loud) {
                         items.extend(sub.items);
                     }
                 }
-                None => eprintln!("{}: cannot resolve import `{imp}`", path.display()),
+                None if loud => {
+                    eprintln!("{}: cannot resolve import `{}`", path.display(), imp.path)
+                }
+                None => {}
             }
-        } else {
-            items.push(it);
+        }
+    }
+    // pass 2: qualify own decls against the complete maps
+    for it in krate.items {
+        match it {
+            ast::Item::Import(_) => {}
+            mut it => {
+                qualify_item(&mut it, &renames, &aliases);
+                items.push(it);
+            }
         }
     }
     Some(ast::Crate { items })
+}
+
+/// apply the module's rename/alias maps to one non-import item in place
+fn qualify_item(
+    it: &mut ast::Item,
+    renames: &std::collections::HashMap<String, String>,
+    aliases: &std::collections::HashMap<String, String>,
+) {
+    match it {
+        ast::Item::Fn(f) => {
+            if let Some(n) = renames.get(&f.name) {
+                f.name = n.clone();
+            }
+            for p in &mut f.params {
+                qualify_ty(&mut p.ty, renames, aliases);
+            }
+            match &mut f.ret {
+                ast::RetTy::One(t) | ast::RetTy::Pair(t) => qualify_ty(t, renames, aliases),
+                ast::RetTy::Void => {}
+            }
+            if let Some(b) = &mut f.body {
+                qualify_block(b, renames, aliases);
+            }
+        }
+        ast::Item::Struct(s) => {
+            if let Some(n) = renames.get(&s.name) {
+                s.name = n.clone();
+            }
+            for p in &mut s.fields {
+                qualify_ty(&mut p.ty, renames, aliases);
+            }
+        }
+        ast::Item::Interface(i) => {
+            if let Some(n) = renames.get(&i.name) {
+                i.name = n.clone();
+            }
+        }
+        ast::Item::Global(g) => {
+            if let Some(n) = renames.get(&g.name) {
+                g.name = n.clone();
+            }
+            if let Some(t) = &mut g.ty {
+                qualify_ty(t, renames, aliases);
+            }
+            qualify_expr(&mut g.init, renames, aliases);
+        }
+        ast::Item::Extern(f) => {
+            for p in &mut f.params {
+                qualify_ty(&mut p.ty, renames, aliases);
+            }
+            match &mut f.ret {
+                ast::RetTy::One(t) | ast::RetTy::Pair(t) => qualify_ty(t, renames, aliases),
+                ast::RetTy::Void => {}
+            }
+        }
+        ast::Item::Import(_) => {}
+    }
 }
 
 fn compile_mode(src_file: &str, test_mode: bool) -> Result<String, ()> {
@@ -320,18 +546,31 @@ fn analyze_source(path: &Path, src: &str) -> Vec<(usize, usize, String)> {
     let toks = lexer::lex(src, &mut diags);
     let krate = parser::parse(&toks, &mut diags);
     let mut seen = std::collections::HashSet::new();
-    seen.insert(path.to_path_buf());
+    seen.insert(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+    let mut renames: std::collections::HashMap<String, String> = Default::default();
+    let mut aliases: std::collections::HashMap<String, String> = Default::default();
     let mut items = Vec::new();
-    for it in krate.items {
-        match it {
-            ast::Item::Import(imp, _) => {
-                if let Some(p) = resolve_import(path, &imp) {
-                    if let Some(sub) = load_crate_quiet(&p, &mut seen) {
-                        items.extend(sub.items);
-                    }
+    for it in &krate.items {
+        if let ast::Item::Import(imp) = it {
+            if let Some(p) = resolve_import(path, &imp.path) {
+                let stem = mod_stem(&p);
+                aliases.insert(imp.alias.clone().unwrap_or_else(|| stem.clone()), stem.clone());
+                if imp.alias.is_none() {
+                    aliases.insert(stem.clone(), stem.clone());
+                }
+                for s in &imp.selective {
+                    renames.insert(s.clone(), format!("{stem}.{s}"));
+                }
+                if let Some(sub) = load_mod(&p, &stem, &mut seen, false) {
+                    items.extend(sub.items);
                 }
             }
-            other => items.push(other),
+        }
+    }
+    for mut it in krate.items {
+        if !matches!(it, ast::Item::Import(_)) {
+            qualify_item(&mut it, &renames, &aliases);
+            items.push(it);
         }
     }
     check::check(&ast::Crate { items }, &mut diags);
@@ -343,32 +582,6 @@ fn analyze_source(path: &Path, src: &str) -> Vec<(usize, usize, String)> {
             (l, c, format!("[{}] {}", d.code, d.msg))
         })
         .collect()
-}
-
-/// load_crate variant that collects parse diags silently (LSP only wants
-/// diagnostics for the open buffer, not imported files)
-fn load_crate_quiet(path: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> Option<ast::Crate> {
-    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !seen.insert(canon) {
-        return Some(ast::Crate { items: Vec::new() });
-    }
-    let src = std::fs::read_to_string(path).ok()?;
-    let mut diags = diag::Diags::new(path.to_string_lossy(), src.clone());
-    let toks = lexer::lex(&src, &mut diags);
-    let krate = parser::parse(&toks, &mut diags);
-    let mut items = Vec::new();
-    for it in krate.items {
-        if let ast::Item::Import(imp, _) = it {
-            if let Some(p) = resolve_import(path, &imp) {
-                if let Some(sub) = load_crate_quiet(&p, seen) {
-                    items.extend(sub.items);
-                }
-            }
-        } else {
-            items.push(it);
-        }
-    }
-    Some(ast::Crate { items })
 }
 
 /// naive JSON string-field extraction (v0 — no serde dep)

@@ -9,7 +9,7 @@ import "lexlib"
 import "std/json"
 
 struct PCur {
-    t: own Tok
+    t: own lexlib.Tok
     nolit: int // 1 while parsing if/for conditions — `{` is a block, not a literal
 }
 
@@ -46,17 +46,17 @@ fn eat(c: mut PCur, w: str) -> bool {
 
 // ---------- expressions ----------
 
-fn p_primary(c: mut PCur) -> own Json {
+fn p_primary(c: mut PCur) -> own json.Json {
     k := pkind(c)
     if k == 3 {
-        e := jobj()
-        jadd(e, "int", jint(atoi(peek(c))))
+        e := json.jobj()
+        json.jadd(e, "int", json.jint(atoi(peek(c))))
         next(c)
         return e
     }
     if k == 4 {
-        e := jobj()
-        jadd(e, "str", jstr(peek(c)))
+        e := json.jobj()
+        json.jadd(e, "str", json.jstr(peek(c)))
         next(c)
         return e
     }
@@ -66,53 +66,53 @@ fn p_primary(c: mut PCur) -> own Json {
         return e
     }
     // ident / keyword literals
-    e := jobj()
-    jadd(e, "name", jstr(peek(c)))
+    e := json.jobj()
+    json.jadd(e, "name", json.jstr(peek(c)))
     next(c)
     // struct literal: Name { f: v, ... } — suppressed in cond position
     if at(c, "{") && c.nolit == 0 {
         next(c)
-        lit := jobj()
-        jadd(lit, "lit", e)
-        fields := jarr()
+        lit := json.jobj()
+        json.jadd(lit, "lit", e)
+        fields := json.jarr()
         for !at(c, "}") && !eof(c) {
-            f := jobj()
-            jadd(f, "name", jstr(peek(c)))
+            f := json.jobj()
+            json.jadd(f, "name", json.jstr(peek(c)))
             next(c)
             eat(c, ":")
-            jadd(f, "val", p_expr(c))
-            jadd(fields, "", f)
+            json.jadd(f, "val", p_expr(c))
+            json.jadd(fields, "", f)
             eat(c, ",")
         }
         eat(c, "}")
-        jadd(lit, "fields", fields)
+        json.jadd(lit, "fields", fields)
         return lit
     }
     return e
 }
 
-fn p_postfix(c: mut PCur) -> own Json {
+fn p_postfix(c: mut PCur) -> own json.Json {
     e := p_primary(c)
     for true {
         if at(c, "(") {
             next(c)
-            call := jobj()
-            jadd(call, "call", e)
-            args := jarr()
+            call := json.jobj()
+            json.jadd(call, "call", e)
+            args := json.jarr()
             for !at(c, ")") && !eof(c) {
-                jadd(args, "", p_expr(c))
+                json.jadd(args, "", p_expr(c))
                 eat(c, ",")
             }
             eat(c, ")")
-            jadd(call, "args", args)
+            json.jadd(call, "args", args)
             e = call
             continue
         }
         if at(c, ".") {
             next(c)
-            f := jobj()
-            jadd(f, "field", e)
-            jadd(f, "name", jstr(peek(c)))
+            f := json.jobj()
+            json.jadd(f, "field", e)
+            json.jadd(f, "name", json.jstr(peek(c)))
             next(c)
             e = f
             continue
@@ -122,81 +122,81 @@ fn p_postfix(c: mut PCur) -> own Json {
     return e
 }
 
-fn p_unary(c: mut PCur) -> own Json {
+fn p_unary(c: mut PCur) -> own json.Json {
     if at(c, "!") || at(c, "-") {
         op := peek(c)
         next(c)
-        u := jobj()
-        jadd(u, "un", jstr(op))
-        jadd(u, "e", p_unary(c))
+        u := json.jobj()
+        json.jadd(u, "un", json.jstr(op))
+        json.jadd(u, "e", p_unary(c))
         return u
     }
     return p_postfix(c)
 }
 
-fn p_mul(c: mut PCur) -> own Json {
+fn p_mul(c: mut PCur) -> own json.Json {
     l := p_unary(c)
     for at(c, "*") || at(c, "/") {
         op := peek(c)
         next(c)
-        b := jobj()
-        jadd(b, "bin", jstr(op))
-        jadd(b, "l", l)
-        jadd(b, "r", p_unary(c))
+        b := json.jobj()
+        json.jadd(b, "bin", json.jstr(op))
+        json.jadd(b, "l", l)
+        json.jadd(b, "r", p_unary(c))
         l = b
     }
     return l
 }
 
-fn p_add(c: mut PCur) -> own Json {
+fn p_add(c: mut PCur) -> own json.Json {
     l := p_mul(c)
     for at(c, "+") || at(c, "-") {
         op := peek(c)
         next(c)
-        b := jobj()
-        jadd(b, "bin", jstr(op))
-        jadd(b, "l", l)
-        jadd(b, "r", p_mul(c))
+        b := json.jobj()
+        json.jadd(b, "bin", json.jstr(op))
+        json.jadd(b, "l", l)
+        json.jadd(b, "r", p_mul(c))
         l = b
     }
     return l
 }
 
-fn p_cmp(c: mut PCur) -> own Json {
+fn p_cmp(c: mut PCur) -> own json.Json {
     l := p_add(c)
     for at(c, "==") || at(c, "!=") || at(c, "<") || at(c, ">") || at(c, "<=") || at(c, ">=") {
         op := peek(c)
         next(c)
-        b := jobj()
-        jadd(b, "bin", jstr(op))
-        jadd(b, "l", l)
-        jadd(b, "r", p_add(c))
+        b := json.jobj()
+        json.jadd(b, "bin", json.jstr(op))
+        json.jadd(b, "l", l)
+        json.jadd(b, "r", p_add(c))
         l = b
     }
     return l
 }
 
-fn p_and(c: mut PCur) -> own Json {
+fn p_and(c: mut PCur) -> own json.Json {
     l := p_cmp(c)
     for at(c, "&&") {
         next(c)
-        b := jobj()
-        jadd(b, "bin", jstr("&&"))
-        jadd(b, "l", l)
-        jadd(b, "r", p_cmp(c))
+        b := json.jobj()
+        json.jadd(b, "bin", json.jstr("&&"))
+        json.jadd(b, "l", l)
+        json.jadd(b, "r", p_cmp(c))
         l = b
     }
     return l
 }
 
-fn p_expr(c: mut PCur) -> own Json {
+fn p_expr(c: mut PCur) -> own json.Json {
     l := p_and(c)
     for at(c, "||") {
         next(c)
-        b := jobj()
-        jadd(b, "bin", jstr("||"))
-        jadd(b, "l", l)
-        jadd(b, "r", p_and(c))
+        b := json.jobj()
+        json.jadd(b, "bin", json.jstr("||"))
+        json.jadd(b, "l", l)
+        json.jadd(b, "r", p_and(c))
         l = b
     }
     return l
@@ -204,33 +204,33 @@ fn p_expr(c: mut PCur) -> own Json {
 
 // ---------- statements ----------
 
-fn p_stmt(c: mut PCur) -> own Json {
+fn p_stmt(c: mut PCur) -> own json.Json {
     if eat(c, "let") {
-        s := jobj()
-        jadd(s, "let", jstr(peek(c)))
+        s := json.jobj()
+        json.jadd(s, "let", json.jstr(peek(c)))
         next(c)
         if eat(c, ":") { p_ty(c) }
-        if eat(c, "=") { jadd(s, "init", p_expr(c)) }
+        if eat(c, "=") { json.jadd(s, "init", p_expr(c)) }
         return s
     }
     if eat(c, "return") {
-        s := jobj()
-        vals := jarr()
+        s := json.jobj()
+        vals := json.jarr()
         for !at(c, "}") && !eof(c) {
-            jadd(vals, "", p_expr(c))
+            json.jadd(vals, "", p_expr(c))
             if !eat(c, ",") { break }
         }
-        jadd(s, "return", vals)
+        json.jadd(s, "return", vals)
         return s
     }
     if eat(c, "break") {
-        s := jobj()
-        jadd(s, "break", jnull())
+        s := json.jobj()
+        json.jadd(s, "break", json.jnull())
         return s
     }
     if eat(c, "continue") {
-        s := jobj()
-        jadd(s, "continue", jnull())
+        s := json.jobj()
+        json.jadd(s, "continue", json.jnull())
         return s
     }
     if at(c, "if") {
@@ -240,23 +240,23 @@ fn p_stmt(c: mut PCur) -> own Json {
         return p_for(c)
     }
     if eat(c, "scope") {
-        s := jobj()
-        jadd(s, "scope", p_block(c))
+        s := json.jobj()
+        json.jadd(s, "scope", p_block(c))
         return s
     }
     if eat(c, "spawn") {
-        s := jobj()
-        jadd(s, "spawn", p_expr(c))
+        s := json.jobj()
+        json.jadd(s, "spawn", p_expr(c))
         return s
     }
     if eat(c, "spawnBlocking") {
-        s := jobj()
-        jadd(s, "spawnBlocking", p_expr(c))
+        s := json.jobj()
+        json.jadd(s, "spawnBlocking", p_expr(c))
         return s
     }
     if eat(c, "go") {
-        s := jobj()
-        jadd(s, "go", p_expr(c))
+        s := json.jobj()
+        json.jadd(s, "go", p_expr(c))
         return s
     }
     // [a, b] = call
@@ -268,9 +268,9 @@ fn p_stmt(c: mut PCur) -> own Json {
         b := peek(c)
         next(c)
         eat(c, "]")
-        s := jobj()
-        jadd(s, "let2", jstr(a + "," + b))
-        if eat(c, "=") { jadd(s, "call", p_expr(c)) }
+        s := json.jobj()
+        json.jadd(s, "let2", json.jstr(a + "," + b))
+        if eat(c, "=") { json.jadd(s, "call", p_expr(c)) }
         return s
     }
     // ident := expr | ident = expr | call/field stmt
@@ -278,48 +278,48 @@ fn p_stmt(c: mut PCur) -> own Json {
     e := p_postfix(c)
     if eat(c, ":=") || at(c, "=") {
         if peek(c) == "=" { next(c) }
-        s := jobj()
-        jadd(s, "bind", jstr(name))
-        jadd(s, "init", p_expr(c))
+        s := json.jobj()
+        json.jadd(s, "bind", json.jstr(name))
+        json.jadd(s, "init", p_expr(c))
         return s
     }
-    s := jobj()
-    jadd(s, "expr", e)
+    s := json.jobj()
+    json.jadd(s, "expr", e)
     return s
 }
 
-fn p_if(c: mut PCur) -> own Json {
+fn p_if(c: mut PCur) -> own json.Json {
     eat(c, "if")
-    s := jobj()
+    s := json.jobj()
     c.nolit = 1
-    jadd(s, "if", p_expr(c))
+    json.jadd(s, "if", p_expr(c))
     c.nolit = 0
-    jadd(s, "then", p_block(c))
+    json.jadd(s, "then", p_block(c))
     if eat(c, "else") {
         if at(c, "if") {
-            jadd(s, "else", p_if(c))
+            json.jadd(s, "else", p_if(c))
         } else {
-            jadd(s, "else", p_block(c))
+            json.jadd(s, "else", p_block(c))
         }
     }
     return s
 }
 
-fn p_for(c: mut PCur) -> own Json {
+fn p_for(c: mut PCur) -> own json.Json {
     eat(c, "for")
-    s := jobj()
+    s := json.jobj()
     c.nolit = 1
-    jadd(s, "for", p_expr(c))
+    json.jadd(s, "for", p_expr(c))
     c.nolit = 0
-    jadd(s, "body", p_block(c))
+    json.jadd(s, "body", p_block(c))
     return s
 }
 
-fn p_block(c: mut PCur) -> own Json {
-    a := jarr()
+fn p_block(c: mut PCur) -> own json.Json {
+    a := json.jarr()
     if eat(c, "{") {
         for !at(c, "}") && !eof(c) {
-            jadd(a, "", p_stmt(c))
+            json.jadd(a, "", p_stmt(c))
         }
         eat(c, "}")
     }
@@ -328,105 +328,121 @@ fn p_block(c: mut PCur) -> own Json {
 
 // ---------- types + items ----------
 
-fn p_ty(c: mut PCur) -> own Json {
-    t := jobj()
-    txt := peek(c)
+fn p_dotted(c: mut PCur) -> str {
+    n := peek(c)
     next(c)
-    // own/ref/mut T
-    if txt == "own" || txt == "ref" || txt == "mut" {
-        jadd(t, "ty", jstr(txt + " " + peek(c)))
+    for at(c, ".") {
         next(c)
+        n = n + "." + peek(c)
+        next(c)
+    }
+    return n
+}
+
+fn p_ty(c: mut PCur) -> own json.Json {
+    t := json.jobj()
+    txt := peek(c)
+    // own/ref/mut [own/ref/mut] dotted.name
+    if txt == "own" || txt == "ref" || txt == "mut" {
+        next(c)
+        inner := peek(c)
+        if inner == "own" || inner == "ref" || inner == "mut" {
+            next(c)
+            json.jadd(t, "ty", json.jstr(txt + " " + inner + " " + p_dotted(c)))
+            return t
+        }
+        json.jadd(t, "ty", json.jstr(txt + " " + p_dotted(c)))
         return t
     }
-    jadd(t, "ty", jstr(txt))
+    json.jadd(t, "ty", json.jstr(p_dotted(c)))
     return t
 }
 
-fn p_params(c: mut PCur) -> own Json {
-    a := jarr()
+fn p_params(c: mut PCur) -> own json.Json {
+    a := json.jarr()
     eat(c, "(")
     for !at(c, ")") && !eof(c) {
-        p := jobj()
-        jadd(p, "name", jstr(peek(c)))
+        p := json.jobj()
+        json.jadd(p, "name", json.jstr(peek(c)))
         next(c)
-        if eat(c, ":") { jadd(p, "ty", p_ty(c)) }
-        jadd(a, "", p)
+        if eat(c, ":") { json.jadd(p, "ty", p_ty(c)) }
+        json.jadd(a, "", p)
         eat(c, ",")
     }
     eat(c, ")")
     return a
 }
 
-fn p_fn(c: mut PCur, ex: bool) -> own Json {
-    f := jobj()
-    if ex { jadd(f, "extern", jbool(true)) }
+fn p_fn(c: mut PCur, ex: bool) -> own json.Json {
+    f := json.jobj()
+    if ex { json.jadd(f, "extern", json.jbool(true)) }
     eat(c, "fn")
-    jadd(f, "fn", jstr(peek(c)))
+    json.jadd(f, "fn", json.jstr(peek(c)))
     next(c)
-    jadd(f, "params", p_params(c))
+    json.jadd(f, "params", p_params(c))
     if eat(c, "->") {
         if eat(c, "[") { // multi-return [v, err]
-            r := jarr()
+            r := json.jarr()
             for !at(c, "]") && !eof(c) {
-                jadd(r, "", p_ty(c))
+                json.jadd(r, "", p_ty(c))
                 eat(c, ",")
             }
             eat(c, "]")
-            jadd(f, "ret", r)
+            json.jadd(f, "ret", r)
         } else {
-            jadd(f, "ret", p_ty(c))
+            json.jadd(f, "ret", p_ty(c))
         }
     }
-    if at(c, "{") { jadd(f, "body", p_block(c)) }
+    if at(c, "{") { json.jadd(f, "body", p_block(c)) }
     return f
 }
 
-fn p_item(c: mut PCur) -> own Json {
+fn p_item(c: mut PCur) -> own json.Json {
     if eat(c, "import") {
-        it := jobj()
-        jadd(it, "import", jstr(peek(c)))
+        it := json.jobj()
+        json.jadd(it, "import", json.jstr(peek(c)))
         next(c)
         return it
     }
     if eat(c, "struct") {
-        st := jobj()
-        jadd(st, "struct", jstr(peek(c)))
+        st := json.jobj()
+        json.jadd(st, "struct", json.jstr(peek(c)))
         next(c)
-        fields := jarr()
+        fields := json.jarr()
         if eat(c, "{") {
             for !at(c, "}") && !eof(c) {
-                fld := jobj()
-                jadd(fld, "name", jstr(peek(c)))
+                fld := json.jobj()
+                json.jadd(fld, "name", json.jstr(peek(c)))
                 next(c)
-                if eat(c, ":") { jadd(fld, "ty", p_ty(c)) }
-                jadd(fields, "", fld)
+                if eat(c, ":") { json.jadd(fld, "ty", p_ty(c)) }
+                json.jadd(fields, "", fld)
                 eat(c, ",")
             }
             eat(c, "}")
         }
-        jadd(st, "fields", fields)
+        json.jadd(st, "fields", fields)
         return st
     }
     if eat(c, "extern") { return p_fn(c, true) }
     if at(c, "fn") { return p_fn(c, false) }
     if at(c, "let") { return p_stmt(c) }
     // unknown item — skip the token so we always progress
-    u := jobj()
-    jadd(u, "skip", jstr(peek(c)))
+    u := json.jobj()
+    json.jadd(u, "skip", json.jstr(peek(c)))
     next(c)
     return u
 }
 
-fn parse(toks: own Tok) -> own Json {
+fn parse(toks: own lexlib.Tok) -> own json.Json {
     c := new(PCur)
     c.t = toks
     c.nolit = 0
-    root := jobj()
-    items := jarr()
+    root := json.jobj()
+    items := json.jarr()
     for pkind(c) != 0 {
-        jadd(items, "", p_item(c))
+        json.jadd(items, "", p_item(c))
     }
-    jadd(root, "items", items)
+    json.jadd(root, "items", items)
     return root
 }
 
@@ -440,6 +456,6 @@ fn main() {
         println("cannot read " + argv(1))
         exit(1)
     }
-    ast := parse(lex(src))
-    println(tojson(ast))
+    ast := parse(lexlib.lex(src))
+    println(json.tojson(ast))
 }

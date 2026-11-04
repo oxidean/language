@@ -181,7 +181,7 @@ impl<'a> Checker<'a> {
                         FnSig { params, ret, is_extern: matches!(it, Item::Extern(_)), ty_params: f.ty_params.clone() },
                     );
                 }
-                Item::Import(_, _sp) => {} // resolved by the driver before checking
+                Item::Import(_) => {} // resolved by the driver before checking
                 Item::Global(g) => {
                     let mut env = Env::new();
                     let it = self.expr(&g.init, &mut env);

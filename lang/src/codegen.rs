@@ -10,6 +10,11 @@ pub fn runtime_files() -> (&'static str, &'static str) {
     (RT_H, RT_C)
 }
 
+/// lang `mod.name` -> C identifier `mod_name`
+fn cname(n: &str) -> String {
+    n.replace('.', "_")
+}
+
 fn c_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -123,7 +128,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
     // struct defs
     for it in &c.items {
         if let Item::Struct(s) = it {
-            let _ = writeln!(out, "struct l_s_{} {{", s.name);
+            let _ = writeln!(out, "struct l_s_{} {{", cname(&s.name));
             for f in &s.fields {
                 let _ = writeln!(out, "    {} f_{};", g.cty(&g.ty_of_ref(&f.ty)), f.name);
             }
@@ -138,7 +143,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
                 if let RetTy::Pair(t) = &f.ret {
                     let _ = writeln!(
                         out, "struct l_ret_{} {{ {} val; int64_t err; }};",
-                        f.name, g.cty(&g.ty_of_ref(t))
+                        cname(&f.name), g.cty(&g.ty_of_ref(t))
                     );
                 }
             }
@@ -149,7 +154,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
     for it in &c.items {
         if let Item::Global(gl) = it {
             let t = g.globals.get(&gl.name).cloned().unwrap_or(Ty::Int);
-            let _ = writeln!(out, "static {} l_g_{};", g.cty(&t), gl.name);
+            let _ = writeln!(out, "static {} l_g_{};", g.cty(&t), cname(&gl.name));
         }
     }
 
@@ -192,7 +197,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
     for it in &c.items {
         if let Item::Global(gl) = it {
             let v = g.expr(&gl.init);
-            let _ = writeln!(global_inits, "    l_g_{} = {v};", gl.name);
+            let _ = writeln!(global_inits, "    l_g_{} = {v};", cname(&gl.name));
         }
     }
     if test_mode {
@@ -203,8 +208,8 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
             if let Item::Fn(f) = it {
                 if f.name.starts_with("test_") {
                     let _ = writeln!(g.out,
-                        "    {{ RtScope _t{id}; rt_scope_enter(&_t{id}); l_f_{n}(); int _e{id} = rt_scope_try(&_t{id});\n      rt_print_str(rt_str(\"  {n} ... \")); rt_println_str(rt_str(_e{id} ? \"FAIL\" : \"ok\")); }}",
-                        n = f.name, id = id);
+                        "    {{ RtScope _t{id}; rt_scope_enter(&_t{id}); l_f_{cn}(); int _e{id} = rt_scope_try(&_t{id});\n      rt_print_str(rt_str(\"  {n} ... \")); rt_println_str(rt_str(_e{id} ? \"FAIL\" : \"ok\")); }}",
+                        cn = cname(&f.name), n = f.name, id = id);
                     id += 1;
                 }
             }
@@ -293,16 +298,16 @@ impl<'a> Gen<'a> {
             Ty::CStr => "const char*".into(),
             Ty::Void => "void".into(),
             Ty::Chan => "RtChan*".into(),
-            Ty::Struct(n) => format!("struct l_s_{n}"),
+            Ty::Struct(n) => format!("struct l_s_{}", cname(n)),
             Ty::Var(v) => self
                 .subst
                 .get(v)
                 .map(|t| self.cty(t))
                 .unwrap_or_else(|| "int64_t".into()),
             Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
-                Ty::Struct(n) => format!("struct l_s_{n}*"),
+                Ty::Struct(n) => format!("struct l_s_{}*", cname(n)),
                 Ty::Var(v) => match self.subst.get(v) {
-                    Some(Ty::Struct(n)) => format!("struct l_s_{n}*"),
+                    Some(Ty::Struct(n)) => format!("struct l_s_{}*", cname(n)),
                     _ => "void*".into(),
                 },
                 _ => "void*".into(),
@@ -319,7 +324,7 @@ impl<'a> Gen<'a> {
         let (name, ret_c) = if is_extern {
             (f.name.clone(), self.ret_decl(f, false))
         } else {
-            (format!("l_f_{}", f.name), self.ret_decl(f, true))
+            (format!("l_f_{}", cname(&f.name)), self.ret_decl(f, true))
         };
         let params: Vec<String> = f
             .params
@@ -336,7 +341,7 @@ impl<'a> Gen<'a> {
             RetTy::One(t) => self.pty(&self.ty_of_ref(t)),
             RetTy::Pair(_) => {
                 if is_lang {
-                    format!("struct l_ret_{}", f.name)
+                    format!("struct l_ret_{}", cname(&f.name))
                 } else {
                     "int64_t".into()
                 }
@@ -352,7 +357,7 @@ impl<'a> Gen<'a> {
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
         let params = if params.is_empty() { "void".into() } else { params.join(", ") };
-        let _ = writeln!(self.out, "{ret_c} l_f_{}({params}) {{", f.name);
+        let _ = writeln!(self.out, "{ret_c} l_f_{}({params}) {{", cname(&f.name));
         self.cur_fn = f.name.clone();
         self.cur_ret_pair = matches!(f.ret, RetTy::Pair(_));
         self.env.push(HashMap::new());
@@ -383,8 +388,8 @@ impl<'a> Gen<'a> {
         if let RetTy::Pair(t) = &f.ret {
             let _ = writeln!(
                 self.inst_out,
-                "struct l_ret_{mangled} {{ {} val; int64_t err; }};",
-                self.cty(&self.ty_of_ref(t))
+                "struct l_ret_{} {{ {} val; int64_t err; }};",
+                cname(&mangled), self.cty(&self.ty_of_ref(t))
             );
         }
         let mut proto = String::new();
@@ -398,7 +403,7 @@ impl<'a> Gen<'a> {
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
         let params = if params.is_empty() { "void".into() } else { params.join(", ") };
-        let _ = writeln!(self.out, "{ret_c} l_f_{mangled}({params}) {{");
+        let _ = writeln!(self.out, "{ret_c} l_f_{}({params}) {{", cname(&mangled));
         self.cur_fn = mangled.to_string();
         self.cur_ret_pair = matches!(f.ret, RetTy::Pair(_));
         self.env.push(HashMap::new());
@@ -426,14 +431,14 @@ impl<'a> Gen<'a> {
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
         let params = if params.is_empty() { "void".into() } else { params.join(", ") };
-        let _ = writeln!(out, "{ret_c} l_f_{name}({params});");
+        let _ = writeln!(out, "{ret_c} l_f_{}({params});", cname(&name));
     }
 
     fn ret_decl_named(&self, f: &Fn, name: &str) -> String {
         match &f.ret {
             RetTy::Void => "void".into(),
             RetTy::One(t) => self.pty(&self.ty_of_ref(t)),
-            RetTy::Pair(_) => format!("struct l_ret_{name}"),
+            RetTy::Pair(_) => format!("struct l_ret_{}", cname(&name)),
         }
     }
 
@@ -568,7 +573,7 @@ impl<'a> Gen<'a> {
                             Some(bind) => (inst_name(fn_name, &bind), Some(bind)),
                             None => (fn_name.clone(), None),
                         };
-                        let _ = writeln!(self.out, "    struct l_ret_{ret_name} _r{n} = {c};");
+                        let _ = writeln!(self.out, "    struct l_ret_{} _r{n} = {c};", cname(&ret_name));
                         let vt = match self.fns.get(fn_name).map(|x| x.1.clone()) {
                             Some(crate::check::Ret::Pair(t)) => match &bind {
                                 Some(bind) => {
@@ -608,7 +613,7 @@ impl<'a> Gen<'a> {
                     let v = self.expr(&vals[0]);
                     let e = self.expr(&vals[1]);
                     let cf = self.cur_fn.clone();
-                    let _ = writeln!(self.out, "    return (struct l_ret_{cf}){{ {v}, {e} }};");
+                    let _ = writeln!(self.out, "    return (struct l_ret_{}){{ {v}, {e} }};", cname(&cf));
                 } else if self.cur_ret_pair && vals.len() == 1 {
                     let c = self.expr(&vals[0]);
                     let _ = writeln!(self.out, "    return {c};");
@@ -697,7 +702,7 @@ impl<'a> Gen<'a> {
                 }
                 _ => match self.builtin_emit(fn_name, &arg_refs) {
                     Some(b) => format!("{b};"),
-                    None => format!("l_f_{fn_name}({});", arg_refs.join(", ")),
+                    None => format!("l_f_{}({});", cname(&fn_name), arg_refs.join(", ")),
                 },
             };
             tr.push_str(&format!(
@@ -727,7 +732,7 @@ impl<'a> Gen<'a> {
                 // locals shadow globals; a bare global emits l_g_name
                 let local = self.env.iter().skip(1).any(|s| s.contains_key(n));
                 if !local && self.globals.contains_key(n) {
-                    format!("l_g_{n}")
+                    format!("l_g_{}", cname(&n))
                 } else {
                     n.clone()
                 }
@@ -746,7 +751,7 @@ impl<'a> Gen<'a> {
                     .map(|(n, fe)| format!(".f_{n} = {}", self.expr(fe)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("(struct l_s_{name}){{ {init} }}")
+                format!("(struct l_s_{}){{ {init} }}", cname(&name))
             }
             ExprKind::Bin { op, l, r } => {
                 let lt = self.expr_ty(l);
@@ -828,7 +833,7 @@ impl<'a> Gen<'a> {
                 }
                 "new" => {
                     if let ExprKind::Ident(sn) = &args[0].kind {
-                        return format!("(struct l_s_{sn}*)rt_alloc(sizeof(struct l_s_{sn}))");
+                        return format!("(struct l_s_{0}*)rt_alloc(sizeof(struct l_s_{0}))", cname(&sn));
                     }
                 }
                 _ => {
@@ -842,9 +847,9 @@ impl<'a> Gen<'a> {
                             if !self.inst_done.contains(&m) {
                                 self.insts.push((name.clone(), bind));
                             }
-                            format!("l_f_{m}")
+                            format!("l_f_{}", cname(&m))
                         } else {
-                            format!("l_f_{name}")
+                            format!("l_f_{}", cname(&name))
                         }
                     } else {
                         name.clone()
@@ -902,7 +907,7 @@ impl<'a> Gen<'a> {
                                 Ret::Pair(_) => {
                                     return format!(
                                         "({{ struct l_ret_{} __rc; {pre}__rc = {inner}; {post}__rc; }})",
-                                        callee.trim_start_matches("l_f_")
+                                        cname(callee.trim_start_matches("l_f_")).as_str()
                                     );
                                 }
                             }

@@ -2,14 +2,14 @@ import "std/strings"
 import "std/testing"
 
 fn test_strings() {
-    expect(startswith("hello world", "hello"), "startswith")
-    expect(endswith("hello world", "world"), "endswith")
-    expect(contains("abc", "b"), "contains")
-    expect_streq(trim("  hi  "), "hi", "trim")
-    expect_streq(upper("abc"), "ABC", "upper")
-    parts := split("a,b,c", ",")
-    expect_streq(parts.v, "a", "split head")
-    expect_streq(join(parts, "|"), "a|b|c", "join")
+    testing.expect(strings.startswith("hello world", "hello"), "startswith")
+    testing.expect(strings.endswith("hello world", "world"), "endswith")
+    testing.expect(strings.contains("abc", "b"), "contains")
+    testing.expect_streq(strings.trim("  hi  "), "hi", "trim")
+    testing.expect_streq(strings.upper("abc"), "ABC", "upper")
+    parts := strings.split("a,b,c", ",")
+    testing.expect_streq(parts.v, "a", "split head")
+    testing.expect_streq(strings.join(parts, "|"), "a|b|c", "join")
 }
 
 fn test_loops() {
@@ -21,5 +21,5 @@ fn test_loops() {
         if i > 6 { break }
         n = n + i
     }
-    expect_eq(n, 18, "break/continue")
+    testing.expect_eq(n, 18, "break/continue")
 }

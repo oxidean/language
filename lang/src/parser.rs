@@ -159,8 +159,32 @@ impl<'a> Parser<'a> {
             let sp = self.span();
             if let Tok::Str(s) = self.cur().tok.clone() {
                 self.bump();
+                // optional `as alias` and/or selective `.{a, b}`
+                let mut alias = None;
+                let mut selective = Vec::new();
+                if let Tok::Ident(k) = &self.cur().tok {
+                    if k == "as" {
+                        self.bump();
+                        if let Some((a, _)) = self.ident() {
+                            alias = Some(a);
+                        }
+                    }
+                }
+                if self.eat_p(P::Dot) {
+                    if self.expect_p(P::LBrace, "`{`") {
+                        while !self.eat_p(P::RBrace) && !self.at_eof() {
+                            if let Some((n, _)) = self.ident() {
+                                selective.push(n);
+                            }
+                            if !self.eat_p(P::Comma) {
+                                self.expect_p(P::RBrace, "`}`");
+                                break;
+                            }
+                        }
+                    }
+                }
                 self.eat_p(P::Semi);
-                return Some(Item::Import(s, sp));
+                return Some(Item::Import(Import { path: s, alias, selective, span: sp }));
             }
             self.diags.push(Diag::err(sp, "parse", "expected string after `import`"));
             return None;
@@ -259,7 +283,17 @@ impl<'a> Parser<'a> {
         if self.eat_kw(Kw::Chan) {
             return Some(TyRef { kind: TyKind::Chan, span: sp });
         }
-        let (name, _) = self.ident()?;
+        let (mut name, _) = self.ident()?;
+        while self.cur().tok == Tok::P(P::Dot) {
+            if let Some(Tok::Ident(n)) = self.toks.get(self.i + 1).map(|t| t.tok.clone()) {
+                self.bump();
+                self.bump();
+                name.push('.');
+                name.push_str(&n);
+            } else {
+                break;
+            }
+        }
         Some(TyRef { kind: TyKind::Named(name), span: sp })
     }
 
@@ -520,8 +554,27 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Some(Expr { kind: ExprKind::Nil, span: sp })
             }
-            Tok::Ident(name) => {
+            Tok::Ident(mut name) => {
                 self.bump();
+                // qualified struct literal: a.b.T{ ... } — only when the
+                // dotted path is immediately followed by `{`
+                if !self.no_lit {
+                    let mut j = self.i;
+                    while self.toks.get(j).map(|t| &t.tok) == Some(&Tok::P(P::Dot))
+                        && matches!(self.toks.get(j + 1).map(|t| &t.tok), Some(Tok::Ident(_)))
+                    {
+                        j += 2;
+                    }
+                    if self.toks.get(j).map(|t| &t.tok) == Some(&Tok::P(P::LBrace)) && j > self.i {
+                        while self.i < j {
+                            name.push('.');
+                            self.bump();
+                            if let Tok::Ident(n) = self.bump().tok {
+                                name.push_str(&n);
+                            }
+                        }
+                    }
+                }
                 // struct literal: Name{ ... } (uppercase heuristic not required;
                 // disambiguation is the caller's no_lit flag)
                 if !self.no_lit && self.cur().tok == Tok::P(P::LBrace) {

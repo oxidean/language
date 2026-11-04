@@ -13,11 +13,11 @@ fn main() {
         println("cannot read " + argv(1))
         exit(1)
     }
-    toks := lex(src)
+    toks := lexlib.lex(src)
     n := 0
     cur := toks
     for cur != nil {
-        println(kind_name(cur.kind) + "\t" + cur.text)
+        println(lexlib.kind_name(cur.kind) + "\t" + cur.text)
         n = n + 1
         cur = cur.next
     }

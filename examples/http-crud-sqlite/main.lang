@@ -20,17 +20,17 @@ fn route(method: str, path: str, reqbody: str) -> str {
         if find(method, "POST") == 0 {
             sqlite_exec(db, cstr("CREATE TABLE IF NOT EXISTS items(name TEXT)"))
             sqlite_exec(db, cstr("INSERT INTO items VALUES('" + reqbody + "')"))
-            r := jobj()
-            jadd(r, "created", jstr(reqbody))
-            body = tojson(r) + "\n"
+            r := json.jobj()
+            json.jadd(r, "created", json.jstr(reqbody))
+            body = json.tojson(r) + "\n"
         } else {
             // rows arrive as "id|name" lines — reshape into real JSON
-            items := jarr()
-            rows := split(sqlite_query(db, cstr("SELECT rowid, name FROM items")), "\n")
+            items := json.jarr()
+            rows := strings.split(sqlite_query(db, cstr("SELECT rowid, name FROM items")), "\n")
             r := rows
             for r != nil {
                 if len(r.v) > 0 {
-                    item := jobj()
+                    item := json.jobj()
                     idstr := ""
                     nm := r.v
                     sep := find(r.v, "|")
@@ -38,15 +38,15 @@ fn route(method: str, path: str, reqbody: str) -> str {
                         idstr = substr(r.v, 0, sep)
                         nm = substr(r.v, sep + 1, len(r.v))
                     }
-                    jadd(item, "id", jint(atoi(idstr)))
-                    jadd(item, "name", jstr(nm))
-                    jadd(items, "", item)
+                    json.jadd(item, "id", json.jint(atoi(idstr)))
+                    json.jadd(item, "name", json.jstr(nm))
+                    json.jadd(items, "", item)
                 }
                 r = r.next
             }
-            res := jobj()
-            jadd(res, "items", items)
-            body = tojson(res) + "\n"
+            res := json.jobj()
+            json.jadd(res, "items", items)
+            body = json.tojson(res) + "\n"
         }
     } else {
         body = "lang http server — try /items\n"
@@ -55,5 +55,5 @@ fn route(method: str, path: str, reqbody: str) -> str {
 }
 
 fn main() {
-    serve(8080)
+    http.serve(8080)
 }
