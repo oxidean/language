@@ -89,7 +89,8 @@ call site; `import "std/strings"` modules; top-level `let` globals
 | `examples/smoke_test.lang` | `lang test` scoped test harness |
 | `tests/stdlib_test.lang` | stdlib + break/continue coverage |
 | `tests/stdmods_test.lang` | `std/json`, `std/sync`, `std/time` end-to-end |
-| `bootstrap/lexer.lang` | **self-host component**: the language's lexer written in the language |
+| `bootstrap/lexer.lang` | **self-host**: the language's lexer written in the language |
+| `bootstrap/parser.lang` | **self-host**: the language's parser written in the language — parses itself, zero skips |
 
 Try it:
 
@@ -105,8 +106,8 @@ curl localhost:8080/items                      # → {"items":[{"id":1,"name":"w
 lang/          the compiler (Rust): lexer → parser → check → codegen → C → cc
 runtime/       rt.c/rt.h — arenas, ObjHdr checks, scopes/traps, executor, channels
 docs/          design doc, semantics annex, prototype report
-stdlib/        the standard library, written in the language (strings, testing, http, json, sync, time)
-bootstrap/     self-host components — lexer done, parser next (docs/self-hosting.md)
+stdlib/        the standard library, written in the language (strings, testing, http, json, sync, time, os)
+bootstrap/     self-host components — lexer + parser done, self-parses clean (docs/self-hosting.md)
 examples/      pilot programs (see above)
 tests/         tests/run.sh end-to-end suite (runs in CI)
 prototype/     de-risking benchmarks
