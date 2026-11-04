@@ -554,10 +554,13 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
     std::fs::write(dir.join("rt.c"), rt_c).unwrap();
     let cc = std::env::var("LANG_CC").unwrap_or_else(|_| "cc".into());
     let mut cmd = Command::new(&cc);
-    cmd.args(["-O2", "-pthread", "-lsqlite3", "-o"])
+    cmd.args(["-O2", "-pthread", "-o"])
         .arg(out)
         .arg(&c_file)
-        .arg(dir.join("rt.c"));
+        .arg(dir.join("rt.c"))
+        // -l after sources: --as-needed linkers (Ubuntu gcc default)
+        // drop libs seen before the undefined refs they resolve
+        .arg("-lsqlite3");
     // extra link inputs (FFI shim objects, libs) — e.g. the gui pilot's
     // LANG_LDFLAGS="gui_shim.o $(pkg-config --libs gtk4)"
     if let Ok(flags) = std::env::var("LANG_LDFLAGS") {
