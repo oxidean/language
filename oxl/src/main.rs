@@ -81,77 +81,115 @@ fn map_name(
     }
 }
 
+type Locals = Vec<std::collections::HashSet<String>>;
+
+fn local(locals: &Locals, n: &str) -> bool {
+    locals.iter().rev().any(|s| s.contains(n))
+}
+
 /// canonicalize `a.b(...)` calls to `Ident("a.b")` then map through the
 /// module's alias/rename tables; also maps type names and bare decl idents.
+/// `locals` tracks in-scope binders — a local that shadows a same-module
+/// decl name must stay bare (its decl-qualified form would miss in env and
+/// fall through to the fn value).
 fn qualify_expr(
     e: &mut ast::Expr,
     renames: &std::collections::HashMap<String, String>,
     aliases: &std::collections::HashMap<String, String>,
+    locals: &mut Locals,
 ) {
     match &mut e.kind {
         ast::ExprKind::Call { f, args } => {
             if let Some(n) = ast::callee_name(f) {
-                let mapped = map_name(&n, renames, aliases);
+                let head = n.split('.').next().unwrap_or("");
+                // always flatten to `Ident("a.b")` — the checker keys on the
+                // dotted form (e.g. `e.kind()`) — but skip the rename when
+                // the head is a local
+                let mapped = if local(locals, head) {
+                    n
+                } else {
+                    map_name(&n, renames, aliases)
+                };
                 f.kind = ast::ExprKind::Ident(mapped);
             } else {
-                qualify_expr(f, renames, aliases);
+                qualify_expr(f, renames, aliases, locals);
             }
             for a in args {
-                qualify_expr(a, renames, aliases);
+                qualify_expr(a, renames, aliases, locals);
             }
         }
-        ast::ExprKind::Ident(n) => *n = map_name(n, renames, aliases),
+        ast::ExprKind::Ident(n) => {
+            if !local(locals, n) {
+                *n = map_name(n, renames, aliases)
+            }
+        }
         ast::ExprKind::StructLit { name, fields } => {
             *name = map_name(name, renames, aliases);
             for (_, v) in fields {
-                qualify_expr(v, renames, aliases);
+                qualify_expr(v, renames, aliases, locals);
             }
         }
-        ast::ExprKind::Field { obj, .. } => qualify_expr(obj, renames, aliases),
+        ast::ExprKind::Field { obj, .. } => qualify_expr(obj, renames, aliases, locals),
         ast::ExprKind::Index { obj, idx } => {
-            qualify_expr(obj, renames, aliases);
-            qualify_expr(idx, renames, aliases);
+            qualify_expr(obj, renames, aliases, locals);
+            qualify_expr(idx, renames, aliases, locals);
         }
         ast::ExprKind::Slice { obj, lo, hi } => {
-            qualify_expr(obj, renames, aliases);
+            qualify_expr(obj, renames, aliases, locals);
             if let Some(x) = lo {
-                qualify_expr(x, renames, aliases);
+                qualify_expr(x, renames, aliases, locals);
             }
             if let Some(x) = hi {
-                qualify_expr(x, renames, aliases);
+                qualify_expr(x, renames, aliases, locals);
             }
         }
         ast::ExprKind::Closure { params, body } => {
-            for p in params {
+            let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            for p in params.iter_mut() {
                 qualify_ty(&mut p.ty, renames, aliases);
             }
-            qualify_block(body, renames, aliases);
+            locals.push(names.into_iter().collect());
+            qualify_block(body, renames, aliases, locals);
+            locals.pop();
         }
         ast::ExprKind::Bin { l, r, .. } => {
-            qualify_expr(l, renames, aliases);
-            qualify_expr(r, renames, aliases);
+            qualify_expr(l, renames, aliases, locals);
+            qualify_expr(r, renames, aliases, locals);
         }
-        ast::ExprKind::Un { e, .. } => qualify_expr(e, renames, aliases),
+        ast::ExprKind::Un { e, .. } => qualify_expr(e, renames, aliases, locals),
         ast::ExprKind::As { e, ty } => {
-            qualify_expr(e, renames, aliases);
+            qualify_expr(e, renames, aliases, locals);
             qualify_ty(ty, renames, aliases);
         }
         ast::ExprKind::Match { e, arms } => {
-            qualify_expr(e, renames, aliases);
+            qualify_expr(e, renames, aliases, locals);
             for a in arms {
+                locals.push(std::collections::HashSet::new());
                 match &mut a.pat {
                     ast::Pattern::VarUnit { path }
                     | ast::Pattern::VarPos { path, .. }
                     | ast::Pattern::VarNamed { path, .. } => {
                         *path = map_name(path, renames, aliases);
                     }
-                    ast::Pattern::Lit(le) => qualify_expr(le, renames, aliases),
+                    ast::Pattern::Lit(le) => qualify_expr(le, renames, aliases, locals),
                     _ => {}
                 }
-                match &mut a.body {
-                    ast::MatchBody::Expr(be) => qualify_expr(be, renames, aliases),
-                    ast::MatchBody::Block(b) => qualify_block(b, renames, aliases),
+                let binds: Vec<String> = match &a.pat {
+                    ast::Pattern::VarPos { binds, .. }
+                    | ast::Pattern::VarNamed { binds, .. } => binds.clone(),
+                    ast::Pattern::Bind(b) => vec![b.clone()],
+                    _ => Vec::new(),
+                };
+                for b in binds {
+                    if b != "_" {
+                        locals.last_mut().unwrap().insert(b);
+                    }
                 }
+                match &mut a.body {
+                    ast::MatchBody::Expr(be) => qualify_expr(be, renames, aliases, locals),
+                    ast::MatchBody::Block(b) => qualify_block(b, renames, aliases, locals),
+                }
+                locals.pop();
             }
         }
         _ => {}
@@ -185,59 +223,75 @@ fn qualify_block(
     b: &mut ast::Block,
     renames: &std::collections::HashMap<String, String>,
     aliases: &std::collections::HashMap<String, String>,
+    locals: &mut Locals,
 ) {
+    locals.push(std::collections::HashSet::new());
     for s in &mut b.stmts {
         match s {
-            ast::Stmt::Let { ty, init, .. } => {
+            ast::Stmt::Let { name, ty, init, .. } => {
                 if let Some(t) = ty {
                     qualify_ty(t, renames, aliases);
                 }
-                qualify_expr(init, renames, aliases);
+                qualify_expr(init, renames, aliases, locals);
+                locals.last_mut().unwrap().insert(name.clone());
             }
-            ast::Stmt::Let2 { call, .. } => qualify_expr(call, renames, aliases),
+            ast::Stmt::Let2 { a, b, call, .. } => {
+                qualify_expr(call, renames, aliases, locals);
+                for bn in [a, b] {
+                    if let ast::Bind::Name(n) = bn {
+                        locals.last_mut().unwrap().insert(n.clone());
+                    }
+                }
+            }
             ast::Stmt::Assign { target, val, .. } => {
-                qualify_expr(target, renames, aliases);
-                qualify_expr(val, renames, aliases);
+                qualify_expr(target, renames, aliases, locals);
+                qualify_expr(val, renames, aliases, locals);
             }
-            ast::Stmt::Expr(x) => qualify_expr(x, renames, aliases),
+            ast::Stmt::Expr(x) => qualify_expr(x, renames, aliases, locals),
             ast::Stmt::Return { vals, .. } => {
                 for v in vals {
-                    qualify_expr(v, renames, aliases);
+                    qualify_expr(v, renames, aliases, locals);
                 }
             }
             ast::Stmt::If { cond, then, els, .. } => {
-                qualify_expr(cond, renames, aliases);
-                qualify_block(then, renames, aliases);
+                qualify_expr(cond, renames, aliases, locals);
+                qualify_block(then, renames, aliases, locals);
                 if let Some(e) = els {
-                    qualify_block(e, renames, aliases);
+                    qualify_block(e, renames, aliases, locals);
                 }
             }
             ast::Stmt::For { cond, body, .. } => {
-                qualify_expr(cond, renames, aliases);
-                qualify_block(body, renames, aliases);
+                qualify_expr(cond, renames, aliases, locals);
+                qualify_block(body, renames, aliases, locals);
             }
             ast::Stmt::Scope { body, .. } | ast::Stmt::Unsafe { body, .. } => {
-                qualify_block(body, renames, aliases)
+                qualify_block(body, renames, aliases, locals)
             }
-            ast::Stmt::Spawn { call, .. } => qualify_expr(call, renames, aliases),
-            ast::Stmt::Defer { call, .. } => qualify_expr(call, renames, aliases),
+            ast::Stmt::Spawn { call, .. } => qualify_expr(call, renames, aliases, locals),
+            ast::Stmt::Defer { call, .. } => qualify_expr(call, renames, aliases, locals),
             ast::Stmt::Select { arms, .. } => {
                 for a in arms {
+                    locals.push(std::collections::HashSet::new());
                     match &mut a.kind {
-                        ast::SelKind::Recv { chan, .. } => {
-                            qualify_expr(chan, renames, aliases)
+                        ast::SelKind::Recv { chan, bind, .. } => {
+                            qualify_expr(chan, renames, aliases, locals);
+                            if let Some(bn) = bind {
+                                locals.last_mut().unwrap().insert(bn.clone());
+                            }
                         }
                         ast::SelKind::Timeout { ms, .. } => {
-                            qualify_expr(ms, renames, aliases)
+                            qualify_expr(ms, renames, aliases, locals)
                         }
                         ast::SelKind::Else { .. } => {}
                     }
-                    qualify_block(&mut a.body, renames, aliases);
+                    qualify_block(&mut a.body, renames, aliases, locals);
+                    locals.pop();
                 }
             }
             ast::Stmt::Break { .. } | ast::Stmt::Continue { .. } => {}
         }
     }
+    locals.pop();
 }
 
 fn load_crate(path: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> Option<ast::Crate> {
@@ -347,7 +401,9 @@ fn qualify_item(
                 ast::RetTy::Void => {}
             }
             if let Some(b) = &mut f.body {
-                qualify_block(b, renames, aliases);
+                let mut locals: Locals =
+                    vec![f.params.iter().map(|p| p.name.clone()).collect()];
+                qualify_block(b, renames, aliases, &mut locals);
             }
         }
         ast::Item::Struct(s) => {
@@ -390,7 +446,8 @@ fn qualify_item(
             if let Some(t) = &mut g.ty {
                 qualify_ty(t, renames, aliases);
             }
-            qualify_expr(&mut g.init, renames, aliases);
+            let mut locals: Locals = vec![std::collections::HashSet::new()];
+            qualify_expr(&mut g.init, renames, aliases, &mut locals);
         }
         ast::Item::Extern(f) => {
             for p in &mut f.params {

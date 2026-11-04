@@ -116,6 +116,13 @@ d=json.loads(sys.argv[1])
 assert len(d['items'])>20 and not any('skip' in i for i in d['items']), d
 PY
 
+echo "== bootstrap checker =="
+# the self-hosted typechecker must check itself and representative sources
+for f in bootstrap/check.oxl examples/features.oxl tests/match.oxl stdlib/collections.oxl; do
+    out=$("$OXL" run bootstrap/check.oxl -- "$f")
+    [ "$out" = "ok" ] || { echo "FAIL checker $f: $out"; exit 1; }
+done
+
 echo "== a1 coroutine scale =="
 # 2k frame tasks parked on recv, then two drain rounds — a thread-per-task
 # executor cannot do this within pool limits; frames must

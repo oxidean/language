@@ -13,6 +13,15 @@ The goal: the compiler, written in the language, compiled by itself.
   variants with `match` (B2), including `match` itself in the
   grammar. **It parses itself with zero skipped tokens** — full
   round-trip.
+- `bootstrap/check.oxl` — a port of the Rust typechecker, written in
+  `.oxl`: interned integer type handles, scope-slice environments,
+  `std/collections` tables, registration + checking passes over the
+  parser's AST (fns, structs, enums, globals, imports, bodies,
+  patterns/match exhaustiveness, suspension analysis). **It checks
+  itself clean** — `oxl run bootstrap/check.oxl -- file.oxl` prints
+  diagnostics or `ok`. Documented subset: the parser does not yet
+  produce generics (`fn f[T any]` parses but `T` reports unknown),
+  interface decls, or float-typed AST distinctions beyond literals.
 
 Both components are compiled by the Rust bootstrap compiler and run in
 CI (`tests/run.sh`), so the self-host claim can't rot.
@@ -62,8 +71,8 @@ Ordered by what the checker/codegen port actually needs:
 bootstrap/lexlib.oxl   (done — tokenizes .oxl, shared library)
 bootstrap/lexer.oxl    (done — token-dump driver)
 bootstrap/parser.oxl   (done — AST → JSON, self-parses clean)
-bootstrap/check.oxl    (next — needs maps or long if-chains)
-bootstrap/codegen.oxl  (emits C, links against runtime/)
+bootstrap/check.oxl    (done — typechecks .oxl, self-checks clean)
+bootstrap/codegen.oxl  (next — emits C, links against runtime/)
 ```
 
 At that point `oxl` (Rust) is only needed to *first-compile* the
@@ -73,7 +82,8 @@ transform lands independently of self-hosting.
 
 ## Keeping the claim honest
 
-`tests/run.sh` runs both bootstrap components in CI: the lexer over
-`examples/hello.oxl` and the parser over `features.oxl` *and itself*
-(asserting zero skipped tokens both ways). "The language can parse
-itself" is tested on every push.
+`tests/run.sh` runs all three bootstrap components in CI: the lexer over
+`examples/hello.oxl`, the parser over `features.oxl` *and itself*
+(asserting zero skipped tokens both ways), and the checker over itself
+and representative sources (asserting `ok`). "The language can parse and
+typecheck itself" is tested on every push.

@@ -10,11 +10,13 @@ fn k_kw() -> int { return 2 }
 fn k_int() -> int { return 3 }
 fn k_str() -> int { return 4 }
 fn k_punct() -> int { return 5 }
+fn k_float() -> int { return 6 }
 fn k_eof() -> int { return 0 }
 
 struct Tok {
     kind: int
     text: str
+    ln: int
     next: own Tok
 }
 
@@ -36,11 +38,12 @@ fn is_kw(w: str) -> bool {
         || w == "break" || w == "continue" || w == "interface"
         || w == "spawnBlocking"
 }
-fn push(tail: own Tok, kind: int, text: str) -> own Tok {
+fn push(tail: own Tok, kind: int, text: str, ln: int) -> own Tok {
     tail.next = new(Tok)
     tail = tail.next
     tail.kind = kind
     tail.text = text
+    tail.ln = ln
     tail.next = nil
     return tail
 }
@@ -49,12 +52,15 @@ fn lex(src: str) -> own Tok {
     head := new(Tok)
     head.kind = 0
     head.text = ""
+    head.ln = 0
     head.next = nil
     tail := head
     i := 0
+    ln := 1
     for i < len(src) {
         c := byteat(src, i)
         if is_space(c) {
+            if c == 10 { ln = ln + 1 }
             i = i + 1
             continue
         }
@@ -72,7 +78,7 @@ fn lex(src: str) -> own Tok {
             w := substr(src, a, i)
             k := k_ident()
             if is_kw(w) { k = k_kw() }
-            tail = push(tail, k, w)
+            tail = push(tail, k, w, ln)
             continue
         }
         if is_digit(c) {
@@ -80,7 +86,17 @@ fn lex(src: str) -> own Tok {
             for i < len(src) && is_digit(byteat(src, i)) {
                 i = i + 1
             }
-            tail = push(tail, k_int(), substr(src, a, i))
+            // float: <digits>.<digits> — `.` must be followed by a digit
+            // so field/index access like `x.0`/`a.b` stays punct
+            if byteat(src, i) == 46 && is_digit(byteat(src, i + 1)) {
+                i = i + 1
+                for i < len(src) && is_digit(byteat(src, i)) {
+                    i = i + 1
+                }
+                tail = push(tail, k_float(), substr(src, a, i), ln)
+                continue
+            }
+            tail = push(tail, k_int(), substr(src, a, i), ln)
             continue
         }
         if c == 34 {                                  // "..."
@@ -90,7 +106,7 @@ fn lex(src: str) -> own Tok {
                 if byteat(src, i) == 92 { i = i + 1 }  // escape
                 i = i + 1
             }
-            tail = push(tail, k_str(), substr(src, a, i))
+            tail = push(tail, k_str(), substr(src, a, i), ln)
             i = i + 1
             continue
         }
@@ -100,15 +116,15 @@ fn lex(src: str) -> own Tok {
             || (c == 33 && n == 61) || (c == 60 && n == 61)
             || (c == 62 && n == 61) || (c == 38 && n == 38)
             || (c == 124 && n == 124) || (c == 45 && n == 62) {
-            tail = push(tail, k_punct(), substr(src, i, i + 2))
+            tail = push(tail, k_punct(), substr(src, i, i + 2), ln)
             i = i + 2
             continue
         }
         // single-char punct
-        tail = push(tail, k_punct(), substr(src, i, i + 1))
+        tail = push(tail, k_punct(), substr(src, i, i + 1), ln)
         i = i + 1
     }
-    tail = push(tail, k_eof(), "")
+    tail = push(tail, k_eof(), "", ln)
     return head.next
 }
 

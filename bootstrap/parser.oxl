@@ -15,6 +15,7 @@ import "std/json"
 struct PCur {
     t: own lexlib.Tok
     nolit: int // 1 while parsing if/for conditions — `{` is a block, not a literal
+    pln: int   // line of the last consumed token — `x[i]` only binds when adjacent
 }
 
 // ---------- typed AST ----------
@@ -26,6 +27,7 @@ struct NList { v: own Node, next: own NList }
 
 enum Node {
     JInt(int),                              // {"int": i}
+    JFloat(str),                            // {"float": s}
     JStr(str),                              // {"str": s}
     Name(str),                              // {"name": s}
     Ty(str),                                // {"ty": s}
@@ -37,7 +39,7 @@ enum Node {
     Field{obj: own Node, name: str},        // {"field": <o>, "name": s}
     Un{op: str, e: own Node},               // {"un": s, "e": <e>}
     Bin{op: str, l: own Node, r: own Node}, // {"bin": s, "l": <l>, "r": <r>}
-    Let{name: str, init: own Node},         // {"let": s} (+"init")
+    Let{name: str, ty: own Node, init: own Node}, // {"let": s} (+"ty","init")
     Ret{vals: own NList},                   // {"return": [...]}
     Break,                                  // {"break": null}
     Continue,                               // {"continue": null}
@@ -64,6 +66,15 @@ enum Node {
     Pat{path: str, binds: own NList},       // {"pat": s} (+"binds")
     PatWild,                                // {"pat": "_"}
     PatLit{v: own Node},                    // {"patlit": <v>}
+    PatBind{name: str},                     // {"patbind": s} — bare ident binds
+    Assign{target: own Node, val: own Node}, // {"assign": <t>, "val": <v>}
+    Select{arms: own NList},                 // {"select": [...]}
+    SArm{kind: str, ch: own Node, bind: str, ms: own Node, body: own Node},
+    Closure{params: own NList, body: own Node}, // {"closure": [...], "body": <list>}
+    Index{obj: own Node, idx: own Node},    // {"index": <o>, "idx": <i>}
+    Slice{obj: own Node, lo: own Node, hi: own Node}, // {"slice","lo","hi"}
+    Defer{call: own Node},                  // {"defer": <call>}
+    Unsafe{body: own Node},                 // {"unsafe": <body>}
 }
 
 fn ncons(v: own Node, next: own NList) -> own NList {
@@ -101,14 +112,17 @@ fn jl_items(l: own NList) -> own json.Json {
 
 fn to_json(n: own Node) -> own json.Json {
     // List is a bare array — emit it directly, not as a tagged object
-    if n.kind() == 25 {
-        p := n as Node.List
-        return jl_items(p.items)
+    match n {
+        Node.List{items} => { return jl_items(items) }
+        _ => {}
     }
     o := json.jobj()
     match n {
         Node.JInt(v) => {
             json.jadd(o, "int", json.jint(v))
+        }
+        Node.JFloat(s) => {
+            json.jadd(o, "float", json.jstr(s))
         }
         Node.JStr(s) => {
             json.jadd(o, "str", json.jstr(s))
@@ -152,8 +166,9 @@ fn to_json(n: own Node) -> own json.Json {
             json.jadd(o, "l", to_json(l))
             json.jadd(o, "r", to_json(r))
         }
-        Node.Let{name, init} => {
+        Node.Let{name, ty, init} => {
             json.jadd(o, "let", json.jstr(name))
+            if ty != nil { json.jadd(o, "ty", to_json(ty)) }
             if init != nil { json.jadd(o, "init", to_json(init)) }
         }
         Node.Ret{vals} => {
@@ -250,6 +265,42 @@ fn to_json(n: own Node) -> own json.Json {
         Node.PatLit{v} => {
             json.jadd(o, "patlit", to_json(v))
         }
+        Node.PatBind{name} => {
+            json.jadd(o, "patbind", json.jstr(name))
+        }
+        Node.Assign{target, val} => {
+            json.jadd(o, "assign", to_json(target))
+            json.jadd(o, "val", to_json(val))
+        }
+        Node.Index{obj, idx} => {
+            json.jadd(o, "index", to_json(obj))
+            json.jadd(o, "idx", to_json(idx))
+        }
+        Node.Slice{obj, lo, hi} => {
+            json.jadd(o, "slice", to_json(obj))
+            if lo != nil { json.jadd(o, "lo", to_json(lo)) }
+            if hi != nil { json.jadd(o, "hi", to_json(hi)) }
+        }
+        Node.Defer{call} => {
+            json.jadd(o, "defer", to_json(call))
+        }
+        Node.Unsafe{body} => {
+            json.jadd(o, "unsafe", to_json(body))
+        }
+        Node.Select{arms} => {
+            json.jadd(o, "select", jl_items(arms))
+        }
+        Node.SArm{kind, ch, bind, ms, body} => {
+            json.jadd(o, "sarm", json.jstr(kind))
+            if ch != nil { json.jadd(o, "chan", to_json(ch)) }
+            if len(bind) > 0 { json.jadd(o, "bind", json.jstr(bind)) }
+            if ms != nil { json.jadd(o, "ms", to_json(ms)) }
+            json.jadd(o, "body", to_json(body))
+        }
+        Node.Closure{params, body} => {
+            json.jadd(o, "closure", jl_items(params))
+            json.jadd(o, "body", to_json(body))
+        }
     }
     return o
 }
@@ -267,7 +318,10 @@ fn pkind(c: mut PCur) -> int {
 }
 
 fn next(c: mut PCur) {
-    if c.t != nil { c.t = c.t.next }
+    if c.t != nil {
+        c.pln = c.t.ln
+        c.t = c.t.next
+    }
 }
 
 fn at(c: mut PCur, w: str) -> bool {
@@ -293,9 +347,21 @@ fn p_primary(c: mut PCur) -> own Node {
     if at(c, "match") {
         return p_match(c)
     }
+    if at(c, "{") {
+        return p_closure(c)
+    }
+    // `fn(T, ...) -> R` type literal — only meaningful as mkslice's elem ty
+    if at(c, "fn") && c.t.next != nil && c.t.next.text == "(" {
+        return p_ty(c)
+    }
     k := pkind(c)
     if k == 3 {
         e := b(Node.JInt(atoi(peek(c))))
+        next(c)
+        return e
+    }
+    if k == 6 {
+        e := b(Node.JFloat(peek(c)))
         next(c)
         return e
     }
@@ -348,9 +414,84 @@ fn p_match(c: mut PCur) -> own Node {
             body = p_expr(c)
         }
         arms = ncons(b(Node.MArm{pat: pat, body: body}), arms)
+        eat(c, ",")
     }
     eat(c, "}")
     return b(Node.Match{e: e, arms: nrev(arms)})
+}
+
+// select { [v :=] recv(ch) => {...} | timeout(ms) => {...} | else => {...} }
+fn p_select(c: mut PCur) -> own Node {
+    next(c)
+    eat(c, "{")
+    let arms: own NList = nil
+    for !at(c, "}") && !eof(c) {
+        if eat(c, "else") {
+            bdy := p_arm_body(c)
+            arms = ncons(b(Node.SArm{kind: "else", ch: nil, bind: "", ms: nil, body: bdy}), arms)
+            eat(c, ",")
+            continue
+        }
+        // optional `v :=` recv bind
+        bind := ""
+        if pkind(c) == 1 {
+            save := c.t
+            nm := peek(c)
+            next(c)
+            if eat(c, ":=") { bind = nm } else { c.t = save }
+        }
+        e := p_expr(c)
+        kind := ""
+        let ch: own Node = nil
+        let ms: own Node = nil
+        match e {
+            Node.Call{f, args} => {
+                head := match f {
+                    Node.Name(v) => v,
+                    _ => "",
+                }
+                if head == "recv" { kind = "recv"; if args != nil { ch = args.v } }
+                if head == "timeout" { kind = "timeout"; if args != nil { ms = args.v } }
+                if head == "send" { kind = "send" }
+            }
+            _ => {}
+        }
+        bdy := p_arm_body(c)
+        arms = ncons(b(Node.SArm{kind: kind, ch: ch, bind: bind, ms: ms, body: bdy}), arms)
+        eat(c, ",")
+    }
+    eat(c, "}")
+    return b(Node.Select{arms: nrev(arms)})
+}
+
+// arm body: `{...}` block or a single stmt (wrapped in a List, like Rust)
+fn p_arm_body(c: mut PCur) -> own Node {
+    if !eat(c, "=") { return b(Node.List{items: nil}) }
+    eat(c, ">")
+    if at(c, "{") { return p_block(c) }
+    return b(Node.List{items: ncons(p_stmt(c), nil)})
+}
+
+// `{ |a: int, b: int| stmts }` — closure (B4); ret inferred from `return`s
+fn p_closure(c: mut PCur) -> own Node {
+    next(c)                       // {
+    eat(c, "|")
+    let ps: own NList = nil
+    for !at(c, "|") && !eof(c) {
+        nm := peek(c)
+        next(c)
+        eat(c, ":")
+        ps = ncons(b(Node.Param{name: nm, ty: p_ty(c)}), ps)
+        if !eat(c, ",") { break }
+    }
+    eat(c, "|")
+    let items: own NList = nil
+    for !at(c, "}") && !eof(c) {
+        items = ncons(p_stmt(c), items)
+        eat(c, ";")
+    }
+    eat(c, "}")
+    return b(Node.Closure{params: nrev(ps), body: b(Node.List{items: nrev(items)})})
 }
 
 fn p_pat(c: mut PCur) -> own Node {
@@ -360,6 +501,12 @@ fn p_pat(c: mut PCur) -> own Node {
     k := pkind(c)
     if k == 3 || k == 4 {
         return b(Node.PatLit{v: p_primary(c)})
+    }
+    // true/false/nil literal patterns
+    if peek(c) == "true" || peek(c) == "false" || peek(c) == "nil" {
+        nm := peek(c)
+        next(c)
+        return b(Node.PatLit{v: b(Node.Name(nm))})
     }
     path := peek(c)
     next(c)
@@ -382,6 +529,9 @@ fn p_pat(c: mut PCur) -> own Node {
         eat(c, close)
         return b(Node.Pat{path: path, binds: nrev(binds)})
     }
+    // bare ident (no dots, no payload) binds the scrutinee value
+    ld := find(path, ".")
+    if ld < 0 { return b(Node.PatBind{name: path}) }
     return b(Node.Pat{path: path, binds: nil})
 }
 
@@ -419,6 +569,23 @@ fn p_postfix(c: mut PCur) -> own Node {
             }
             eat(c, "}")
             e = b(Node.Lit{obj: e, fields: nrev(fields)})
+            continue
+        }
+        // `e[i]` / `e[a:b]` — only when `[` sits on the same line as e's
+        // last token, else `[v, err] = f()` on the next line misattaches
+        if at(c, "[") && c.t != nil && c.t.ln == c.pln {
+            next(c)
+            let lo: own Node = nil
+            if !at(c, ":") && !at(c, "]") { lo = p_expr(c) }
+            if eat(c, ":") {
+                let hi: own Node = nil
+                if !at(c, "]") { hi = p_expr(c) }
+                eat(c, "]")
+                e = b(Node.Slice{obj: e, lo: lo, hi: hi})
+                continue
+            }
+            eat(c, "]")
+            e = b(Node.Index{obj: e, idx: lo})
             continue
         }
         // `e as T` — enum payload extraction / type assertion
@@ -522,10 +689,11 @@ fn p_stmt(c: mut PCur) -> own Node {
     if eat(c, "let") {
         name := peek(c)
         next(c)
-        if eat(c, ":") { p_ty(c) }
+        let ty: own Node = nil
+        if eat(c, ":") { ty = p_ty(c) }
         let init: own Node = nil
         if eat(c, "=") { init = p_expr(c) }
-        return b(Node.Let{name: name, init: init})
+        return b(Node.Let{name: name, ty: ty, init: init})
     }
     if eat(c, "return") {
         let vals: own NList = nil
@@ -559,25 +727,37 @@ fn p_stmt(c: mut PCur) -> own Node {
     if eat(c, "go") {
         return b(Node.Go{e: p_expr(c)})
     }
+    if at(c, "defer") {
+        next(c)
+        return b(Node.Defer{call: p_expr(c)})
+    }
+    if eat(c, "unsafe") {
+        return b(Node.Unsafe{body: p_block(c)})
+    }
+    if at(c, "select") {
+        return p_select(c)
+    }
     // [a, b] = call
     if at(c, "[") {
         next(c)
-        a := peek(c)
+        n1 := peek(c)
         next(c)
         eat(c, ",")
-        b := peek(c)
+        n2 := peek(c)
         next(c)
         eat(c, "]")
         let call: own Node = nil
         if eat(c, "=") { call = p_expr(c) }
-        return b(Node.Let2{names: a + "," + b, call: call})
+        return b(Node.Let2{names: n1 + "," + n2, call: call})
     }
-    // ident := expr | ident = expr | call/field stmt
+    // ident := expr | target = expr | call/field stmt
     name := peek(c)
     e := p_postfix(c)
-    if eat(c, ":=") || at(c, "=") {
-        if peek(c) == "=" { next(c) }
+    if eat(c, ":=") {
         return b(Node.Bind{name: name, init: p_expr(c)})
+    }
+    if eat(c, "=") {
+        return b(Node.Assign{target: e, val: p_expr(c)})
     }
     return b(Node.ExprStmt{e: e})
 }
@@ -612,6 +792,7 @@ fn p_block(c: mut PCur) -> own Node {
     if eat(c, "{") {
         for !at(c, "}") && !eof(c) {
             items = ncons(p_stmt(c), items)
+            eat(c, ";")
         }
         eat(c, "}")
     }
@@ -633,15 +814,46 @@ fn p_dotted(c: mut PCur) -> str {
 
 fn p_ty(c: mut PCur) -> own Node {
     txt := peek(c)
+    // []T — the inner Ty node carries its own text
+    if at(c, "[") {
+        next(c)
+        eat(c, "]")
+        inner := p_ty(c) as Node.Ty
+        return b(Node.Ty("[]" + inner.f0))
+    }
+    // fn(a, b) -> r — kept as a canonical string for the checker
+    if at(c, "fn") {
+        next(c)
+        eat(c, "(")
+        s := "fn("
+        first := true
+        for !at(c, ")") && !eof(c) {
+            if !first { s = s + ", " }
+            first = false
+            pt := p_ty(c) as Node.Ty
+            s = s + pt.f0
+            if !eat(c, ",") { break }
+        }
+        eat(c, ")")
+        s = s + ")"
+        if eat(c, "->") {
+            rt := p_ty(c) as Node.Ty
+            s = s + " -> " + rt.f0
+        }
+        return b(Node.Ty(s))
+    }
     // own/ref/mut [own/ref/mut] dotted.name
     if txt == "own" || txt == "ref" || txt == "mut" {
         next(c)
-        inner := peek(c)
-        if inner == "own" || inner == "ref" || inner == "mut" {
-            next(c)
-            return b(Node.Ty(txt + " " + inner + " " + p_dotted(c)))
+        // bare `own`/`ref`/`mut` = pointer to void (Rust parity: inner is
+        // parsed only when the next token starts a type)
+        inner := "void"
+        if pkind(c) == 1 || at(c, "own") || at(c, "ref")
+            || at(c, "mut") || at(c, "chan") {
+            it := p_ty(c) as Node.Ty
+            inner = it.f0
         }
-        return b(Node.Ty(txt + " " + p_dotted(c)))
+        return b(Node.Ty(txt + " " + inner))
     }
     return b(Node.Ty(p_dotted(c)))
 }
@@ -665,6 +877,16 @@ fn p_fn(c: mut PCur, ex: bool) -> own Node {
     eat(c, "fn")
     name := peek(c)
     next(c)
+    if at(c, "[") {
+        // generic params `[T any]` — outside the bootstrap AST; skip the bracket group
+        d := 0
+        for !eof(c) {
+            if at(c, "[") { d = d + 1 }
+            if at(c, "]") { d = d - 1 }
+            next(c)
+            if d == 0 { break }
+        }
+    }
     params := p_params(c)
     let ret: own Node = nil
     if eat(c, "->") {
@@ -760,6 +982,7 @@ fn parse(toks: own lexlib.Tok) -> own Node {
     c := new(PCur)
     c.t = toks
     c.nolit = 0
+    c.pln = 0
     let items: own NList = nil
     for pkind(c) != 0 {
         items = ncons(p_item(c), items)
