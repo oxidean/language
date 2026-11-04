@@ -11,7 +11,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macos-15 pinned: every macos-latest run on this repo sat queued
+        # ~15min and was cancelled without acquiring a runner (empty
+        # runner_name, zero steps) — the rolling label never schedules.
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v4
 
