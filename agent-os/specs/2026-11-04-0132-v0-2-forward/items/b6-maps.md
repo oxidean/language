@@ -12,11 +12,12 @@ should be real now so the port doesn't invent its own.
 Written in `.oxl` (stdlib convention):
 
 ```
-m := map_new()
-map_set(m, "key", 42)        // int values (word payloads)
-v := map_get(m, "key")       // -> [int, err]: non-nil err on miss
-map_del(m, "key")
-s := set_new(); set_add(s, "x"); set_has(s, "x")
+m := collections.map_new()
+collections.map_set(m, "key", 42)    // int values (word payloads)
+[v, e] = collections.map_get(m, "key")  // e non-nil on miss
+collections.map_del(m, "key")
+s := collections.set_new()
+collections.set_add(s, "x"); collections.set_has(s, "x")
 ```
 
 - Hash map: FNV-1a over the string bytes, power-of-2 buckets, separate

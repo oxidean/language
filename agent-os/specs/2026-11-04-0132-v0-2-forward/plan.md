@@ -73,11 +73,11 @@ existing primitives. The checker's env/fn tables consume it.
 ### Task C1: `bootstrap/check.oxl` [partial]
 
 `items/c1-check.md`. Typechecker in the language — checks the corpus
-and self-compiles, but lags the Rust checker: no `own` move tracking,
-no generics checking, and diagnostics aren't diffed against `oxl`'s.
+and self-compiles, but lags the Rust checker: full checker parity gaps
+remain and diagnostics aren't diffed against `oxl`'s.
 Full credit needs checker parity + a differential diagnostic test.
 
-### Task C2: `bootstrap/codegen.oxl` [done]
+### Task C2: `bootstrap/codegen.oxl` [partial]
 
 `items/c2-codegen.md`. Emits C against `runtime/` — the last piece
 before the classic bootstrap chain (self-compiled `oxl` compiles
