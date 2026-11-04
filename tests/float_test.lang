@@ -1,0 +1,25 @@
+import "std/json"
+import "std/testing"
+
+fn test_float_arith() {
+    f := 3.14 * 2.0
+    testing.expect(ftoi(f) == 6, "3.14*2 -> 6")
+    testing.expect(1.5 < 2.5, "1.5 < 2.5")
+    testing.expect(2.5 >= 2.5, "2.5 >= 2.5")
+    testing.expect(ftoi(atof("2.5") + itof(2)) == 4, "atof+itof")
+    testing.expect(ftoi(-1.5) == 0 - 1, "neg float")
+}
+
+fn test_float_conv() {
+    testing.expect_streq(ftoa(0.5), "0.5", "ftoa 0.5")
+    testing.expect_streq(ftoa(3.0), "3", "ftoa 3.0")
+    testing.expect(ftoi(7.9) == 7, "ftoi truncates")
+}
+
+fn test_json_float() {
+    j := json.jparse("{\"pi\": 3.14, \"n\": 7}")
+    testing.expect_streq(json.tojson(j), "{\"pi\":3.14,\"n\":7}", "float round-trip")
+    o := json.jobj()
+    json.jadd(o, "f", json.jfloat(2.5))
+    testing.expect_streq(json.tojson(o), "{\"f\":2.5}", "jfloat emit")
+}

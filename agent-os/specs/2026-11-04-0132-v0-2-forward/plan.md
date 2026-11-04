@@ -80,7 +80,7 @@ itself). Needs C1 + B3.
 
 ## Track D — Type-system depth (parallel-safe)
 
-### Task D1: `float` type [not started]
+### Task D1: `float` type [done]
 
 `items/d1-float.md`. Blocks JSON floats and any numeric service work.
 Small, self-contained.
@@ -104,7 +104,7 @@ structural interfaces, no trait solving).
 Full monomorphization works today; this is a compile-time/binary-size
 optimization. Can slip.
 
-### Task D5: module qualification [not started]
+### Task D5: module qualification [done]
 
 `items/d5-module-qualification.md`. `strings.split` namespacing instead
 of merged namespace. Breaking surface change — spec'd, decide before

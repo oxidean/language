@@ -84,6 +84,8 @@ void rt_print_str(LangStr s);
 void rt_print_i64(int64_t v);
 void rt_println_str(LangStr s);
 void rt_println_i64(int64_t v);
+void rt_print_f64(double v);
+void rt_println_f64(double v);
 const char *rt_cstr(LangStr s);
 
 /* args + strings + byte buffers (stdlib wave-1 surface) */
@@ -95,6 +97,8 @@ int64_t rt_byteat(LangStr s, int64_t i);
 LangStr rt_substr(LangStr s, int64_t a, int64_t b);
 int64_t rt_find(LangStr s, LangStr sub);
 int64_t rt_atoi(LangStr s);
+double rt_atof(LangStr s);
+LangStr rt_ftoa(double v);
 void *rt_mkbuf(int64_t size);
 LangStr rt_bufstr(void *buf, int64_t n);
 void rt_poke8(void *buf, int64_t off, int64_t v);

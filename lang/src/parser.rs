@@ -85,6 +85,7 @@ impl<'a> Parser<'a> {
         match &self.cur().tok {
             Tok::Ident(s) => format!("`{s}`"),
             Tok::Int(v) => format!("`{v}`"),
+            Tok::Float(v) => format!("`{v}`"),
             Tok::Str(s) => format!("`\"{s}\"`"),
             Tok::Kw(k) => format!("`{k:?}`"),
             Tok::P(p) => format!("`{p:?}`"),
@@ -538,6 +539,10 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Some(Expr { kind: ExprKind::Int(v), span: sp })
             }
+            Tok::Float(v) => {
+                self.bump();
+                Some(Expr { kind: ExprKind::Float(v), span: sp })
+            }
             Tok::Str(s) => {
                 self.bump();
                 Some(Expr { kind: ExprKind::Str(s), span: sp })
@@ -613,6 +618,7 @@ impl<'a> Parser<'a> {
         match t.tok {
             Tok::Ident(s) => format!("`{s}`"),
             Tok::Int(v) => format!("`{v}`"),
+            Tok::Float(v) => format!("`{v}`"),
             Tok::Str(s) => format!("`\"{s}\"`"),
             Tok::Kw(k) => format!("`{k:?}`"),
             Tok::P(p) => format!("`{p:?}`"),

@@ -137,6 +137,7 @@ pub struct Expr {
 #[derive(Debug)]
 pub enum ExprKind {
     Int(i64),
+    Float(f64),
     Str(String),
     Bool(bool),
     Nil,

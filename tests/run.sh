@@ -28,6 +28,16 @@ grep -q '"name":"widget"' <<<"$out" || { echo "FAIL stdmods json: $out"; exit 1;
 grep -q "^4000$" <<<"$out" || { echo "FAIL stdmods sync counter: $out"; exit 1; }
 [ "$(tail -1 <<<"$out")" = "done" ] || { echo "FAIL stdmods time: $out"; exit 1; }
 
+echo "== float (d1) =="
+"$LANG" test tests/float_test.lang | grep -q "test_json_float ... ok"
+# int/float mixing must be a compile error, not silent widening
+cat > /tmp/floatmix.lang <<'EOF'
+fn main() { x := 1 + 2.5 }
+EOF
+if "$LANG" build /tmp/floatmix.lang -o /tmp/floatmix 2>/dev/null; then
+    echo "FAIL: int+float compiled (should be a type error)"; exit 1
+fi
+
 echo "== bootstrap lexer =="
 out=$("$LANG" run bootstrap/lexer.lang -- examples/hello.lang)
 grep -q "11 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }

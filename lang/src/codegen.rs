@@ -268,6 +268,7 @@ impl<'a> Gen<'a> {
         match &t.kind {
             TyKind::Named(n) => match n.as_str() {
                 "int" => Ty::Int,
+                "float" => Ty::Float,
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
                 "cstr" => Ty::CStr,
@@ -293,6 +294,7 @@ impl<'a> Gen<'a> {
     fn cty(&self, t: &Ty) -> String {
         match t {
             Ty::Int | Ty::Err => "int64_t".into(),
+            Ty::Float => "double".into(),
             Ty::Bool => "int".into(),
             Ty::Str => "LangStr".into(),
             Ty::CStr => "const char*".into(),
@@ -462,6 +464,7 @@ impl<'a> Gen<'a> {
     fn expr_ty(&self, e: &Expr) -> Ty {
         match &e.kind {
             ExprKind::Int(_) => Ty::Int,
+            ExprKind::Float(_) => Ty::Float,
             ExprKind::Str(_) => Ty::Str,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Nil => Ty::Err,
@@ -491,12 +494,13 @@ impl<'a> Gen<'a> {
                     }
                     match n.as_str() {
                         "mkchan" => return Ty::Chan,
-                        "recv" | "argc" | "len" | "byteat" | "find" | "atoi"
+                        "recv" | "argc" | "len" | "byteat" | "find" | "atoi" | "ftoi"
                         | "htons" | "htonl" | "sqlite_exec" | "writefile" | "sget" | "scas"
                         | "sadd" | "now" | "now_ms" => {
                             return Ty::Int
                         }
-                        "argv" | "itoa" | "substr" | "bufstr" | "sqlite_query" | "readfile" => {
+                        "itof" | "atof" => return Ty::Float,
+                        "argv" | "itoa" | "substr" | "bufstr" | "sqlite_query" | "readfile" | "ftoa" => {
                             return Ty::Str
                         }
                         "cstr" => return Ty::CStr,
@@ -538,19 +542,28 @@ impl<'a> Gen<'a> {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                 | BinOp::And | BinOp::Or => Ty::Bool,
                 BinOp::Add => {
-                    if self.dt(&self.expr_ty(l)) == Ty::Str
-                        && self.dt(&self.expr_ty(r)) == Ty::Str
-                    {
+                    let (la, ra) = (self.dt(&self.expr_ty(l)), self.dt(&self.expr_ty(r)));
+                    if la == Ty::Str && ra == Ty::Str {
                         Ty::Str
+                    } else if la == Ty::Float || ra == Ty::Float {
+                        Ty::Float
                     } else {
                         Ty::Int
                     }
                 }
-                _ => Ty::Int,
+                _ => {
+                    if self.dt(&self.expr_ty(l)) == Ty::Float
+                        || self.dt(&self.expr_ty(r)) == Ty::Float
+                    {
+                        Ty::Float
+                    } else {
+                        Ty::Int
+                    }
+                }
             },
-            ExprKind::Un { op, .. } => match op {
+            ExprKind::Un { op, e } => match op {
                 UnOp::Not => Ty::Bool,
-                UnOp::Neg => Ty::Int,
+                UnOp::Neg => self.expr_ty(e),
             },
         }
     }
@@ -725,6 +738,7 @@ impl<'a> Gen<'a> {
     fn expr(&mut self, e: &Expr) -> String {
         match &e.kind {
             ExprKind::Int(v) => format!("{v}LL"),
+            ExprKind::Float(v) => format!("{v:e}"),
             ExprKind::Str(s) => format!("rt_str_lit(\"{}\")", c_escape(s)),
             ExprKind::Bool(b) => format!("{b}"),
             ExprKind::Nil => "0".into(),
@@ -804,9 +818,11 @@ impl<'a> Gen<'a> {
             | "sqlite_exec" | "sqlite_query" => format!("rt_{name}({})", j(argvs)),
             "atoi" | "mkbuf" | "htons" | "htonl" | "cstr" | "sqlite_open" | "sqlite_close"
             | "readfile" | "writefile" | "exit" | "mkshared" | "sget" | "sset" | "scas"
-            | "sadd" | "now" | "now_ms" | "usleep" => {
+            | "sadd" | "now" | "now_ms" | "usleep" | "atof" | "ftoa" => {
                 format!("rt_{name}({})", j(argvs))
             }
+            "ftoi" => format!("((int64_t)({a0}))"),
+            "itof" => format!("((double)({a0}))"),
             _ => return None,
         })
     }
@@ -820,6 +836,7 @@ impl<'a> Gen<'a> {
                     let (sfx, a) = match t {
                         Ty::Str => ("str", argvs[0].clone()),
                         Ty::CStr => ("str", format!("rt_str({})", argvs[0])),
+                        Ty::Float => ("f64", argvs[0].clone()),
                         _ => ("i64", argvs[0].clone()),
                     };
                     return format!("rt_{name}_{sfx}({a})");

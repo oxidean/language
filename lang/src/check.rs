@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty {
     Int,
+    Float,
     Bool,
     Str,
     CStr,
@@ -23,6 +24,7 @@ impl Ty {
     pub fn name(&self) -> String {
         match self {
             Ty::Int => "int".into(),
+            Ty::Float => "float".into(),
             Ty::Bool => "bool".into(),
             Ty::Str => "str".into(),
             Ty::CStr => "cstr".into(),
@@ -103,7 +105,7 @@ const BUILTINS: &[&str] = &[
     "mkbuf", "bufstr", "poke8", "poke16", "poke32", "htons", "htonl",
     "cstr", "sqlite_open", "sqlite_exec", "sqlite_query", "sqlite_close",
     "readfile", "writefile", "exit", "mkshared", "sget", "sset", "scas", "sadd",
-    "now", "now_ms", "usleep",
+    "now", "now_ms", "usleep", "ftoi", "itof", "atof", "ftoa",
 ];
 
 pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
@@ -211,6 +213,7 @@ impl<'a> Checker<'a> {
         match &t.kind {
             TyKind::Named(n) => match n.as_str() {
                 "int" => Ty::Int,
+                "float" => Ty::Float,
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
                 "cstr" => Ty::CStr,
@@ -478,6 +481,7 @@ impl<'a> Checker<'a> {
     fn expr(&mut self, e: &Expr, env: &mut Env) -> Ty {
         match &e.kind {
             ExprKind::Int(_) => Ty::Int,
+            ExprKind::Float(_) => Ty::Float,
             ExprKind::Str(_) => Ty::Str,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Nil => Ty::Err, // nil is the empty err
@@ -569,6 +573,9 @@ impl<'a> Checker<'a> {
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                         if let Ty::Var(v) = &lt {
                             self.req_op(v, "ordered", *op, e.span);
+                        } else if lt == Ty::Float || rt == Ty::Float {
+                            self.assignable(&Ty::Float, &lt, l.span);
+                            self.assignable(&Ty::Float, &rt, r.span);
                         } else {
                             self.assignable(&Ty::Int, &lt, l.span);
                             self.assignable(&Ty::Int, &rt, r.span);
@@ -581,6 +588,10 @@ impl<'a> Checker<'a> {
                             Ty::Var(v.clone())
                         } else if lt == Ty::Str && rt == Ty::Str {
                             Ty::Str
+                        } else if lt == Ty::Float || rt == Ty::Float {
+                            self.assignable(&Ty::Float, &lt, l.span);
+                            self.assignable(&Ty::Float, &rt, r.span);
+                            Ty::Float
                         } else {
                             self.assignable(&Ty::Int, &lt, l.span);
                             self.assignable(&Ty::Int, &rt, r.span);
@@ -588,6 +599,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ => {
+                        if lt == Ty::Float || rt == Ty::Float {
+                            self.assignable(&Ty::Float, &lt, l.span);
+                            self.assignable(&Ty::Float, &rt, r.span);
+                            return Ty::Float;
+                        }
                         self.assignable(&Ty::Int, &lt, l.span);
                         self.assignable(&Ty::Int, &rt, r.span);
                         Ty::Int
@@ -598,8 +614,12 @@ impl<'a> Checker<'a> {
                 let t = self.expr(inner, env);
                 match op {
                     UnOp::Neg => {
-                        self.assignable(&Ty::Int, &t, inner.span);
-                        Ty::Int
+                        if t == Ty::Float {
+                            Ty::Float
+                        } else {
+                            self.assignable(&Ty::Int, &t, inner.span);
+                            Ty::Int
+                        }
                     }
                     UnOp::Not => {
                         self.assignable(&Ty::Bool, &t, inner.span);
@@ -697,6 +717,34 @@ impl<'a> Checker<'a> {
                         self.expr(a, env);
                     }
                     return Ty::Int;
+                }
+                "ftoi" => {
+                    if let Some(a) = args.first() {
+                        let t = self.expr(a, env);
+                        self.assignable(&Ty::Float, &t, a.span);
+                    }
+                    return Ty::Int;
+                }
+                "itof" => {
+                    if let Some(a) = args.first() {
+                        let t = self.expr(a, env);
+                        self.assignable(&Ty::Int, &t, a.span);
+                    }
+                    return Ty::Float;
+                }
+                "atof" => {
+                    if let Some(a) = args.first() {
+                        let t = self.expr(a, env);
+                        self.assignable(&Ty::Str, &t, a.span);
+                    }
+                    return Ty::Float;
+                }
+                "ftoa" => {
+                    if let Some(a) = args.first() {
+                        let t = self.expr(a, env);
+                        self.assignable(&Ty::Float, &t, a.span);
+                    }
+                    return Ty::Str;
                 }
                 "substr" | "bufstr" => {
                     for a in args {

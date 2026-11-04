@@ -364,6 +364,8 @@ void rt_print_str(LangStr s) { wr(s); }
 void rt_println_str(LangStr s) { wr(s); wr(rt_str("\n")); fflush(stdout); }
 void rt_print_i64(int64_t v) { printf("%lld", (long long)v); }
 void rt_println_i64(int64_t v) { printf("%lld\n", (long long)v); fflush(stdout); }
+void rt_print_f64(double v) { printf("%.15g", v); }
+void rt_println_f64(double v) { printf("%.15g\n", v); fflush(stdout); }
 
 void rt_sleep(int64_t secs) {
     if (cancelled()) pthread_exit(0);
@@ -400,7 +402,15 @@ int64_t rt_find(LangStr s, LangStr sub) {
         if (memcmp(s.p + i, sub.p, (size_t)sub.n) == 0) return i;
     return -1;
 }
-int64_t rt_atoi(LangStr s) { return strtoll(s.p, NULL, 10); }
+int64_t rt_atoi(LangStr s) { return strtoll(rt_cstr(s), NULL, 10); }
+
+double rt_atof(LangStr s) { return strtod(rt_cstr(s), NULL); }
+
+LangStr rt_ftoa(double v) {
+    char *p = rt_alloc(40);
+    snprintf(p, 40, "%.15g", v);
+    return rt_str(p);
+}
 
 void *rt_mkbuf(int64_t size) { return rt_alloc_own(size); }
 LangStr rt_bufstr(void *buf, int64_t n) {

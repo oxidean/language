@@ -14,6 +14,7 @@ struct Json {
     key: str,
     s: str,
     i: int,
+    f: float,
     b: bool,
     child: own Json,
     next: own Json
@@ -36,6 +37,13 @@ fn jint(v: int) -> own Json {
     j := new(Json)
     j.kind = 2
     j.i = v
+    return j
+}
+
+fn jfloat(v: float) -> own Json {
+    j := new(Json)
+    j.kind = 6
+    j.f = v
     return j
 }
 
@@ -127,6 +135,9 @@ fn tojson(j: own Json) -> str {
     if j.kind == 2 {
         return itoa(j.i)
     }
+    if j.kind == 6 {
+        return ftoa(j.f)
+    }
     if j.kind == 3 {
         return "\"" + jescape(j.s) + "\""
     }
@@ -209,26 +220,27 @@ fn jparse_str(p: mut JCur) -> str {
     return out
 }
 
-fn jparse_num(p: mut JCur) -> int {
+fn jparse_num(p: mut JCur) -> own Json {
     start := p.pos
-    neg := 0
-    if byteat(p.src, p.pos) == 45 {
-        neg = 1
-        p.pos = p.pos + 1
-    }
-    digits := start + neg
+    isf := 0
     for p.pos < len(p.src) {
         c := byteat(p.src, p.pos)
-        if c < 48 || c > 57 {
-            break
+        // digits, sign, '.', exponent
+        if (c >= 48 && c <= 57) || c == 45 || c == 43 {
+            p.pos = p.pos + 1
+            continue
         }
-        p.pos = p.pos + 1
+        if c == 46 || c == 101 || c == 69 { // . e E
+            isf = 1
+            p.pos = p.pos + 1
+            continue
+        }
+        break
     }
-    v := atoi(substr(p.src, digits, p.pos))
-    if neg == 1 {
-        return 0 - v
+    if isf == 1 {
+        return jfloat(atof(substr(p.src, start, p.pos)))
     }
-    return v
+    return jint(atoi(substr(p.src, start, p.pos)))
 }
 
 fn jparse_val(p: mut JCur) -> own Json {
@@ -289,7 +301,7 @@ fn jparse_val(p: mut JCur) -> own Json {
         p.pos = p.pos + 4
         return jnull()
     }
-    return jint(jparse_num(p))
+    return jparse_num(p)
 }
 
 /// parse text into a Json tree (null node on malformed input)

@@ -21,6 +21,7 @@ pub enum P {
 pub enum Tok {
     Ident(String),
     Int(i64),
+    Float(f64),
     Str(String),
     Kw(Kw),
     P(P),
@@ -63,10 +64,28 @@ pub fn lex(src: &str, diags: &mut Diags) -> Vec<Token> {
                 while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'_') {
                     i += 1;
                 }
+                // float: digits '.' digits ('.' not followed by digit stays punct)
+                let mut is_float = false;
+                if i < b.len() && b[i] == b'.'
+                    && i + 1 < b.len() && b[i + 1].is_ascii_digit()
+                {
+                    i += 1;
+                    while i < b.len() && b[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    is_float = true;
+                }
                 let s: String = src[lo..i].chars().filter(|c| *c != '_').collect();
-                match s.parse::<i64>() {
-                    Ok(v) => out.push(Token { tok: Tok::Int(v), span: Span::new(at(lo), at(i)) }),
-                    Err(_) => diags.push(Diag::err(Span::new(at(lo), at(i)), "lex", "integer literal out of range")),
+                if is_float {
+                    match s.parse::<f64>() {
+                        Ok(v) => out.push(Token { tok: Tok::Float(v), span: Span::new(at(lo), at(i)) }),
+                        Err(_) => diags.push(Diag::err(Span::new(at(lo), at(i)), "lex", "float literal out of range")),
+                    }
+                } else {
+                    match s.parse::<i64>() {
+                        Ok(v) => out.push(Token { tok: Tok::Int(v), span: Span::new(at(lo), at(i)) }),
+                        Err(_) => diags.push(Diag::err(Span::new(at(lo), at(i)), "lex", "integer literal out of range")),
+                    }
                 }
             }
             b'"' => {
