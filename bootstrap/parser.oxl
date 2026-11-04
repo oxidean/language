@@ -610,7 +610,7 @@ fn p_unary(c: mut PCur) -> own Node {
 
 fn p_mul(c: mut PCur) -> own Node {
     l := p_unary(c)
-    for at(c, "*") || at(c, "/") {
+    for at(c, "*") || at(c, "/") || at(c, "%") {
         op := peek(c)
         next(c)
         l = b(Node.Bin{op: op, l: l, r: p_unary(c)})
@@ -890,14 +890,19 @@ fn p_fn(c: mut PCur, ex: bool) -> own Node {
     params := p_params(c)
     let ret: own Node = nil
     if eat(c, "->") {
-        if eat(c, "[") { // multi-return [v, err]
-            let tys: own NList = nil
-            for !at(c, "]") && !eof(c) {
-                tys = ncons(p_ty(c), tys)
-                eat(c, ",")
+        if eat(c, "[") { // multi-return [v, err] — or `[]T` slice ret
+            if eat(c, "]") {
+                inner := p_ty(c) as Node.Ty
+                ret = b(Node.Ty("[]" + inner.f0))
+            } else {
+                let tys: own NList = nil
+                for !at(c, "]") && !eof(c) {
+                    tys = ncons(p_ty(c), tys)
+                    eat(c, ",")
+                }
+                eat(c, "]")
+                ret = b(Node.List{items: nrev(tys)})
             }
-            eat(c, "]")
-            ret = b(Node.List{items: nrev(tys)})
         } else {
             ret = p_ty(c)
         }

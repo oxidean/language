@@ -123,6 +123,27 @@ for f in bootstrap/check.oxl examples/features.oxl tests/match.oxl stdlib/collec
     [ "$out" = "ok" ] || { echo "FAIL checker $f: $out"; exit 1; }
 done
 
+echo "== bootstrap codegen =="
+# the self-hosted C emitter must produce working binaries
+cgen_dir=$(mktemp -d)
+for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl; do
+    "$OXL" run bootstrap/codegen.oxl -- "$f" > "$cgen_dir/out.c"
+    cc -O2 -pthread -Iruntime "$cgen_dir/out.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/out" || { echo "FAIL codegen cc $f"; exit 1; }
+    got=$("$cgen_dir/out")
+    want=$("$OXL" run "$f")
+    [ "$got" = "$want" ] || { echo "FAIL codegen $f"; exit 1; }
+done
+# --test mode: scope-wrapped runner like `oxl test`
+"$OXL" run bootstrap/codegen.oxl -- --test examples/smoke_test.oxl > "$cgen_dir/t.c"
+cc -O2 -pthread -Iruntime "$cgen_dir/t.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/t" || { echo "FAIL codegen cc --test"; exit 1; }
+"$cgen_dir/t" | grep -q "test_chan ... ok" || { echo "FAIL codegen --test"; exit 1; }
+# bootstrap chain: codegen compiled by itself emits identical C
+"$OXL" run bootstrap/codegen.oxl -- bootstrap/codegen.oxl > "$cgen_dir/self.c"
+cc -O2 -pthread -Iruntime "$cgen_dir/self.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/self" || { echo "FAIL codegen self-cc"; exit 1; }
+"$cgen_dir/self" examples/hello.oxl > "$cgen_dir/chain.c"
+"$OXL" run bootstrap/codegen.oxl -- examples/hello.oxl > "$cgen_dir/direct.c"
+cmp "$cgen_dir/chain.c" "$cgen_dir/direct.c" || { echo "FAIL bootstrap chain"; exit 1; }
+
 echo "== a1 coroutine scale =="
 # 2k frame tasks parked on recv, then two drain rounds — a thread-per-task
 # executor cannot do this within pool limits; frames must

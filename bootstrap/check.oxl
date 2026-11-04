@@ -2927,11 +2927,11 @@ fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
     }
 }
 
-fn main() {
-    if argc() < 2 {
-        println("usage: check <file.oxl>")
-        exit(1)
-    }
+// result of the whole check pipeline — codegen consumes it too
+struct CkRes { ck: own Ck, items: []It }
+
+// load + register + typecheck + susp analysis for `path`
+fn check_file(path: str) -> own CkRes {
     ck := new(Ck)
     ck.tyv = mkslice(T, 0)
     ck.fns = collections.map_new()
@@ -2958,7 +2958,7 @@ fn main() {
     ck.nerr = 0
     ld := new(Loader)
     ld.items = mkslice(It, 0)
-    load_mod(ck, ld, argv(1), "")
+    load_mod(ck, ld, path, "")
     register(ck, ld.items)
     check_skips(ck, ld.items)
     check_items(ck, ld.items)
@@ -2967,6 +2967,19 @@ fn main() {
     check_closures(ck)
     check_fnvals(ck)
     check_suspend_rules(ck, ld.items)
+    r := new(CkRes)
+    r.ck = ck
+    r.items = ld.items
+    return r
+}
+
+fn main() {
+    if argc() < 2 {
+        println("usage: check <file.oxl>")
+        exit(1)
+    }
+    r := check_file(argv(1))
+    ck := r.ck
     if len(ck.diags) == 0 {
         println("ok")
         return

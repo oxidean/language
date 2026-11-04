@@ -22,9 +22,17 @@ The goal: the compiler, written in the language, compiled by itself.
   diagnostics or `ok`. Documented subset: the parser does not yet
   produce generics (`fn f[T any]` parses but `T` reports unknown),
   interface decls, or float-typed AST distinctions beyond literals.
+- `bootstrap/codegen.oxl` — a port of the Rust C emitter, written in
+  `.oxl`, consuming the checker's tables over the parser's AST:
+  `oxl run bootstrap/codegen.oxl -- file.oxl > out.c`, then
+  `cc -O2 -pthread -Iruntime out.c runtime/rt.c -lsqlite3 -o out`.
+  Suspension lowers to the same `o_frm_*`/`o_poll_*` state machines the
+  Rust emitter produces; `--test` mirrors `oxl test`'s scope-wrapped
+  runner. **It compiles itself** — the emitted binary regenerates
+  byte-identical C, closing the classic bootstrap chain.
 
-Both components are compiled by the Rust bootstrap compiler and run in
-CI (`tests/run.sh`), so the self-host claim can't rot.
+All three components are compiled by the Rust bootstrap compiler and run
+in CI (`tests/run.sh`), so the self-host claim can't rot.
 
 ## What the language already has (sufficient for frontend)
 
@@ -72,18 +80,21 @@ bootstrap/lexlib.oxl   (done — tokenizes .oxl, shared library)
 bootstrap/lexer.oxl    (done — token-dump driver)
 bootstrap/parser.oxl   (done — AST → JSON, self-parses clean)
 bootstrap/check.oxl    (done — typechecks .oxl, self-checks clean)
-bootstrap/codegen.oxl  (next — emits C, links against runtime/)
+bootstrap/codegen.oxl  (done — emits C, self-compiles byte-identical)
 ```
 
-At that point `oxl` (Rust) is only needed to *first-compile* the
-self-hosted compiler — the classic bootstrap chain. The interim C
-backend stays the codegen target through this; the state-machine
-transform lands independently of self-hosting.
+`oxl` (Rust) is now only needed to *first-compile* the self-hosted
+compiler — the classic bootstrap chain is closed. The interim C
+backend stays the codegen target; the state-machine transform lands
+independently of self-hosting.
 
 ## Keeping the claim honest
 
-`tests/run.sh` runs all three bootstrap components in CI: the lexer over
+`tests/run.sh` runs all bootstrap components in CI: the lexer over
 `examples/hello.oxl`, the parser over `features.oxl` *and itself*
-(asserting zero skipped tokens both ways), and the checker over itself
-and representative sources (asserting `ok`). "The language can parse and
-typecheck itself" is tested on every push.
+(asserting zero skipped tokens both ways), the checker over itself
+and representative sources (asserting `ok`), and the codegen by
+compiling emitted C and diffing program output against `oxl run` —
+plus the chain check: `codegen.oxl` compiled by itself must emit
+byte-identical C for `hello.oxl`. "The language can parse, typecheck,
+and compile itself" is tested on every push.

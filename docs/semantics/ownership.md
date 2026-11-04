@@ -33,7 +33,12 @@ reliable. `new(expr)` heap-boxes a *value*: `new(E.V(...))` yields
 ## Borrow rules (dynamic)
 
 1. While a `mut T` borrow is live: no other `mut` or `ref` borrow of the
-   same object may activate. Violation → `TrapAliasing`.
+   same object may activate. Violation → `TrapAliasing`. A call's `own`
+   argument borrow is live for the whole call — `f(x, g(x))` where `x`
+   is `own` and both params take `mut`/`ref` traps; hoist the inner
+   call to a `let`/`:=` so the borrows sequence.
+   (Passing a `mut`/`ref` *reference* on is a reborrow — no runtime op —
+   only `own` arguments start a fresh borrow.)
 2. Any access through a dead handle (moved `own`, outlived arena
    reference, freed generation) → `TrapDangling`.
 3. Channel `send` transfers ownership: the sent handle dies at the

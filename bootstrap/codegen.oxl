@@ -1,0 +1,2981 @@
+// bootstrap/codegen.oxl — the C emitter, written in .oxl.
+// Fourth self-host component: ports oxl/src/codegen.rs over the
+// bootstrap parser's `Node` AST, consuming check.oxl's tables (fn sigs,
+// struct/enum layouts, globals, susp set). Emits C against runtime/rt.
+//
+//   oxl run bootstrap/codegen.oxl -- file.oxl > out.c
+//   cc -O2 -pthread -Iruntime out.c runtime/rt.c -lsqlite3 -o out
+//
+// Subset boundary (same as the checker port): the bootstrap parser does
+// not produce generics, so monomorphized instantiations don't exist —
+// every fn emits exactly once under its qualified name.
+
+import "check"
+import "std/collections"
+
+// ---------- output accumulation ----------
+// `g.w` is the current line buffer; nested emitters (match block arms,
+// closures, frame bodies) swap it out and join captures with `wjoin`
+// (pairwise fold — repeated `+` concat is quadratic at file scale).
+
+fn wjoin(parts: []str) -> str {
+    if len(parts) == 0 { return "" }
+    for len(parts) > 1 {
+        next := mkslice(str, (len(parts) + 1) / 2)
+        j := 0
+        i := 0
+        for i < len(parts) {
+            if i + 1 < len(parts) {
+                next[j] = parts[i] + parts[i + 1]
+            } else {
+                next[j] = parts[i]
+            }
+            j = j + 1
+            i = i + 2
+        }
+        parts = next
+    }
+    return parts[0]
+}
+
+// ---------- generator state ----------
+
+// where a suspend point's result lands (Rust FDest)
+struct GDest { k: int, a: str, b: str } // 0 void, 1 field, 2 assign, 3 pair
+
+// one (name, init-expr, ty) decode from a match pattern
+struct GBnd { n: str, ce: str, t: int, next: own GBnd }
+
+fn gbnd(n: str, ce: str, t: int, next: own GBnd) -> own GBnd {
+    c := new(GBnd)
+    c.n = n
+    c.ce = ce
+    c.t = t
+    c.next = next
+    return c
+}
+
+// match arm decode: has=0 → unconditional (else), has=1 → `if (cond)`
+struct GArm { has: int, cond: str, binds: own GBnd }
+
+// enum variant lookup result (Rust Option<(en, v, i)>)
+struct GEV { ok: bool, en: str, vn: str, i: int }
+
+// (continue, break) label pair per enclosing loop in a frame body
+struct GLab { c: str, b: str }
+
+// forward-appending Node list builder for the hoist transform
+struct GBuf { items: own parser.NList, tail: own parser.NList }
+
+fn nput(b: mut GBuf, s: own parser.Node) {
+    c := parser.ncons(s, nil)
+    if b.items == nil {
+        b.items = c
+    } else {
+        b.tail.next = c
+    }
+    b.tail = c
+}
+
+struct G {
+    ck: own check.Ck
+    its: []check.It
+    fidx: own collections.Map // qualified fn name -> its[] idx
+    env: own check.Env        // emission scopes: name -> ty handle
+    benv: own check.Env       // match-pattern binds for xty
+    fsl: own check.Env        // frame slots: name -> -2 (p_name) or vN idx
+    w: []str                  // current output target
+    wst: own WStk             // saved buffers for nested emit contexts
+    wlast: []str              // buffer detached by the last wpop
+    head: []str               // header + type decls + protos
+    out: []str                // fn bodies
+    tramp: []str              // spawn trampolines
+    fhead: []str              // frame struct decls + poll protos
+    fbody: []str              // poll driver bodies
+    clpro: []str              // closure env structs + protos + fnv wraps
+    clbod: []str              // closure wrapper bodies
+    ginit: []str              // global initializer stmts for oxl_main
+    maink: int                // 0 none, 1 susp main, 2 plain main
+    testm: int                // 1 = emit a test_* runner as oxl_main
+    defers: own parser.NList  // LIFO defer calls for the current fn
+    fnv: own check.SList      // named fns needing zero-env wrappers
+    fdecls: []str             // collected "cty vN;" frame fields
+    sdecls: []str             // "RtScope scN;" frame fields
+    states: []int             // resume labels used in this frame
+    loops: []GLab             // (continue, break) label stack
+    tmpn: int
+    scopen: int
+    cln: int
+    staten: int
+    labeln: int
+    hoistn: int
+    retk: int                 // current fn ret kind (2 = [T, err])
+    cur: str                  // current fn's qualified name
+    inframe: int
+}
+
+fn wl(g: mut G, s: str) { g.w = push(g.w, s) }
+fn wln(g: mut G, s: str) { g.w = push(g.w, s + "\n") }
+
+struct WStk { w: []str, next: own WStk }
+
+// save the current emit target on a stack, start a fresh one
+fn wpush(g: mut G) {
+    s := new(WStk)
+    s.w = g.w
+    s.next = g.wst
+    g.wst = s
+    g.w = mkslice(str, 0)
+}
+
+// finish the current buffer into g.wlast, restore the saved one
+fn wpop(g: mut G) {
+    g.wlast = g.w
+    g.w = g.wst.w
+    g.wst = g.wst.next
+}
+
+// collect call args as evaluated C fragments (linked list — []str returns
+// can't be written in the `->` position)
+struct GAv { v: str, next: own GAv }
+
+fn gav(g: mut G, args: ref parser.NList) -> own GAv {
+    let head: own GAv = nil
+    let tail: own GAv = nil
+    l := args
+    for l != nil {
+        v := gx(g, l.v)
+        c := new(GAv)
+        c.v = v
+        if head == nil { head = c } else { tail.next = c }
+        tail = c
+        l = l.next
+    }
+    return head
+}
+
+fn gav_at(a: ref GAv, i: int) -> str {
+    n := i
+    for a != nil && n > 0 {
+        a = a.next
+        n = n - 1
+    }
+    if a == nil { return "0" }
+    return a.v
+}
+
+fn gav_join(a: ref GAv) -> str {
+    j := ""
+    first := true
+    for a != nil {
+        if !first { j = j + ", " }
+        first = false
+        j = j + a.v
+        a = a.next
+    }
+    return j
+}
+
+// ---------- name / literal helpers ----------
+
+// oxl `mod.name` -> C identifier `mod_name`
+fn cname(s: str) -> str {
+    out := ""
+    i := 0
+    for i < len(s) {
+        c := substr(s, i, i + 1)
+        if byteat(s, i) == 46 { c = "_" }
+        out = out + c
+        i = i + 1
+    }
+    return out
+}
+
+fn hex2(c: int) -> str {
+    d := "0123456789abcdef"
+    return substr(d, c / 16, c / 16 + 1) + substr(d, c % 16, c % 16 + 1)
+}
+
+fn c_escape(s: str) -> str {
+    out := ""
+    i := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if c == 92 { out = out + "\\\\" }
+        if c == 34 { out = out + "\\\"" }
+        if c == 10 { out = out + "\\n" }
+        if c == 13 { out = out + "\\r" }
+        if c == 9 { out = out + "\\t" }
+        if c == 0 { out = out + "\\0" }
+        if c < 32 && c != 0 && c != 9 && c != 10 && c != 13 {
+            out = out + "\\x" + hex2(c)
+        }
+        if c >= 32 && c != 34 && c != 92 {
+            out = out + substr(s, i, i + 1)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ---------- type helpers over the checker's interned handles ----------
+
+// `Node.Ty` payload -> ty handle
+fn gty(g: mut G, n: ref parser.Node) -> int {
+    return check.ty_parse(g.ck, check.ty_str(n))
+}
+
+// ty kind of a handle (-1 for missing)
+fn tyk(g: ref G, t: int) -> int {
+    if t < 0 || t >= len(g.ck.tyv) { return -1 }
+    return g.ck.tyv[t].k
+}
+
+// inner handle of own/ref/mut/slice (-1)
+fn tyi(g: ref G, t: int) -> int {
+    if t < 0 || t >= len(g.ck.tyv) { return -1 }
+    return g.ck.tyv[t].i
+}
+
+// ty -> C type (Rust cty)
+fn gcty(g: mut G, t: int) -> str {
+    k := tyk(g, t)
+    if k == check.k_int() || k == check.k_err() { return "int64_t" }
+    if k == check.k_float() { return "double" }
+    if k == check.k_bool() { return "int" }
+    if k == check.k_str() { return "OxlStr" }
+    if k == check.k_cstr() { return "const char*" }
+    if k == check.k_void() { return "void" }
+    if k == check.k_chan() { return "RtChan*" }
+    if k == check.k_slice() { return "RtSlice" }
+    if k == check.k_fn() { return "RtFnv" }
+    if k == check.k_struct() { return "struct o_s_" + cname(g.ck.tyv[t].name) }
+    if k == check.k_enum() { return "struct o_en_" + cname(g.ck.tyv[t].name) }
+    if k == check.k_own() || k == check.k_ref() || k == check.k_mut() {
+        i := tyi(g, t)
+        ik := tyk(g, i)
+        if ik == check.k_struct() {
+            return "struct o_s_" + cname(g.ck.tyv[i].name) + "*"
+        }
+        if ik == check.k_enum() {
+            return "struct o_en_" + cname(g.ck.tyv[i].name) + "*"
+        }
+        if ik == check.k_slice() { return "RtSlice*" }
+        return "void*"
+    }
+    return "int64_t"
+}
+
+// `E.V` -> enum/variant/index (Rust enum_variant)
+fn gev(g: mut G, path: str) -> GEV {
+    r := GEV{ok: false, en: "", vn: "", i: -1}
+    ld := check.last_dot(path)
+    if ld < 0 { return r }
+    en := check.resolve_named(g.ck, substr(path, 0, ld))
+    if !collections.map_has(g.ck.enums, en) { return r }
+    [ei, err] = collections.map_get(g.ck.enums, en)
+    if err != nil { return r }
+    vn := substr(path, ld + 1, len(path))
+    vl := g.ck.enumsv[ei].vars
+    i := 0
+    for vl != nil {
+        if vl.v.n == vn {
+            r.ok = true
+            r.en = en
+            r.vn = vn
+            r.i = i
+            return r
+        }
+        i = i + 1
+        vl = vl.next
+    }
+    return r
+}
+
+// ---------- scoped env (name -> ty handle; globals live in ck.globals) ----------
+
+fn genv_get(e: ref check.Env, n: str) -> int {
+    i := len(e.scopes) - 1
+    for i >= 0 {
+        if collections.map_has(e.scopes[i].m, n) {
+            [v, err] = collections.map_get(e.scopes[i].m, n)
+            if err == nil { return v }
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+// Rust lookup(): bind env (match arms), then locals, then globals
+fn gx_lookup(g: mut G, n: str) -> int {
+    t := genv_get(g.benv, n)
+    if t >= 0 { return t }
+    t = genv_get(g.env, n)
+    if t >= 0 { return t }
+    if collections.map_has(g.ck.globals, n) {
+        [v, err] = collections.map_get(g.ck.globals, n)
+        if err == nil { return v }
+    }
+    return -1
+}
+
+// is `n` a local (any emission scope), not a global/fn?
+fn g_local(g: mut G, n: str) -> bool {
+    return genv_get(g.env, n) >= 0
+}
+
+// qualified fn sig lookup — returns fnsv index or -1
+fn gfn(g: mut G, name: str) -> int {
+    qn := check.resolve_named(g.ck, name)
+    if !collections.map_has(g.ck.fns, qn) { return -1 }
+    [fi, err] = collections.map_get(g.ck.fns, qn)
+    if err != nil { return -1 }
+    return fi
+}
+
+// the Fn AST node for a qualified name (-1)
+fn gfn_item(g: mut G, qn: str) -> int {
+    if !collections.map_has(g.fidx, qn) { return -1 }
+    [i, err] = collections.map_get(g.fidx, qn)
+    if err != nil { return -1 }
+    return i
+}
+// @PART2
+
+// ---------- xty: the emitter's lightweight inference (Rust expr_ty) ----------
+
+// callee resolves to a `fn(...)` value type — fn-typed var or expr
+fn xfnval_ty(g: mut G, f: ref parser.Node) -> int {
+    if check.nk(f) == 2 {
+        match f {
+            parser.Node.Name(n) => {
+                t := gx_lookup(g, n)
+                if t >= 0 && tyk(g, t) == check.k_fn() { return t }
+            }
+            _ => {}
+        }
+        return -1
+    }
+    return xty(g, f)
+}
+
+// (name, ty) binds a pattern introduces — for benv during xty of match arms
+fn xpatbinds(g: mut G, pat: ref parser.Node, st: int) -> own GBnd {
+    if check.nk(pat) == 46 {
+        match pat {
+            parser.Node.PatBind{name} => { return gbnd(name, "", st, nil) }
+            _ => {}
+        }
+        return nil
+    }
+    if check.nk(pat) != 34 { return nil }
+    match pat {
+        parser.Node.Pat{path, binds} => {
+            qpath := check.resolve_named(g.ck, path)
+            if !collections.map_has(g.ck.structs, qpath) { return nil }
+            [si, err] = collections.map_get(g.ck.structs, qpath)
+            if err != nil { return nil }
+            fields := g.ck.structsv[si].fields
+            let out: own GBnd = nil
+            if check.fall_positional(fields) {
+                wl := fields
+                bl := binds
+                for bl != nil && wl != nil {
+                    match bl.v {
+                        parser.Node.Name(bn) => {
+                            if bn != "_" { out = gbnd(bn, "", wl.v.t, out) }
+                        }
+                        _ => {}
+                    }
+                    wl = wl.next
+                    bl = bl.next
+                }
+                return out
+            }
+            bl := binds
+            for bl != nil {
+                match bl.v {
+                    parser.Node.Name(bn) => {
+                        if bn != "_" {
+                            ft := check.ffind(fields, bn)
+                            if ft >= 0 { out = gbnd(bn, "", ft, out) }
+                        }
+                    }
+                    _ => {}
+                }
+                bl = bl.next
+            }
+            return out
+        }
+        _ => { return nil }
+    }
+    return nil
+}
+
+// closure return type: first `return <expr>` in the body, else void
+fn xclret_match(g: mut G, e: ref parser.Node) -> int {
+    if e == nil || check.nk(e) != 32 { return check.t_void(g.ck) }
+    match e {
+        parser.Node.Match{arms} => {
+            a := arms
+            for a != nil {
+                match a.v {
+                    parser.Node.MArm{body} => {
+                        if body != nil && check.nk(body) == 23 {
+                            t := xclret(g, body)
+                            if tyk(g, t) != check.k_void() { return t }
+                        }
+                    }
+                    _ => {}
+                }
+                a = a.next
+            }
+        }
+        _ => {}
+    }
+    return check.t_void(g.ck)
+}
+
+fn xclret(g: mut G, b: ref parser.Node) -> int {
+    if b == nil { return check.t_void(g.ck) }
+    if check.nk(b) == 21 {
+        // bare else-if chain — descend as one stmt
+        match b {
+            parser.Node.If{then, els} => {
+                t := xclret(g, then)
+                if tyk(g, t) != check.k_void() { return t }
+                if els != nil { return xclret(g, els) }
+            }
+            _ => {}
+        }
+        return check.t_void(g.ck)
+    }
+    if check.nk(b) != 23 { return check.t_void(g.ck) }
+    match b {
+        parser.Node.List{items} => {
+            l := items
+            for l != nil {
+                s := l.v
+                match s {
+                    parser.Node.Ret{vals} => {
+                        if vals != nil && vals.next == nil {
+                            return xty(g, vals.v)
+                        }
+                    }
+                    parser.Node.If{then, els} => {
+                        t := xclret(g, then)
+                        if tyk(g, t) != check.k_void() { return t }
+                        if els != nil {
+                            t = xclret(g, els)
+                            if tyk(g, t) != check.k_void() { return t }
+                        }
+                    }
+                    parser.Node.For{body} => {
+                        t := xclret(g, body)
+                        if tyk(g, t) != check.k_void() { return t }
+                    }
+                    parser.Node.Scope{body} => {
+                        t := xclret(g, body)
+                        if tyk(g, t) != check.k_void() { return t }
+                    }
+                    parser.Node.Unsafe{body} => {
+                        t := xclret(g, body)
+                        if tyk(g, t) != check.k_void() { return t }
+                    }
+                    parser.Node.Select{arms} => {
+                        sa := arms
+                        for sa != nil {
+                            match sa.v {
+                                parser.Node.SArm{body} => {
+                                    t := xclret(g, body)
+                                    if tyk(g, t) != check.k_void() { return t }
+                                }
+                                _ => {}
+                            }
+                            sa = sa.next
+                        }
+                    }
+                    parser.Node.ExprStmt{e} => {
+                        t := xclret_match(g, e)
+                        if tyk(g, t) != check.k_void() { return t }
+                    }
+                    parser.Node.Bind{init} => {
+                        t := xclret_match(g, init)
+                        if tyk(g, t) != check.k_void() { return t }
+                    }
+                    parser.Node.Let{init} => {
+                        t := xclret_match(g, init)
+                        if tyk(g, t) != check.k_void() { return t }
+                    }
+                    _ => {}
+                }
+                l = l.next
+            }
+        }
+        _ => {}
+    }
+    return check.t_void(g.ck)
+}
+
+// element type of a slice-valued expr (unwraps own/ref/mut headers)
+fn xsel(g: mut G, obj: ref parser.Node) -> int {
+    ot := xty(g, obj)
+    k := tyk(g, ot)
+    if k == check.k_slice() { return tyi(g, ot) }
+    if k == check.k_own() || k == check.k_ref() || k == check.k_mut() {
+        i := tyi(g, ot)
+        if tyk(g, i) == check.k_slice() { return tyi(g, i) }
+    }
+    return check.t_unk(g.ck)
+}
+
+fn xty(g: mut G, e: ref parser.Node) -> int {
+    if e == nil { return check.t_unk(g.ck) }
+    t := match e {
+        parser.Node.JInt(_) => check.t_int(g.ck),
+        parser.Node.JFloat(_) => check.tk(g.ck, check.k_float()),
+        parser.Node.JStr(_) => check.t_str(g.ck),
+        parser.Node.Name(n) => xty_name(g, n),
+        parser.Node.Call{f, args} => xty_call(g, f, args),
+        parser.Node.Field{obj, name} => xty_field(g, obj, name),
+        parser.Node.Lit{obj} => xty_lit(g, obj),
+        parser.Node.As{ty} => xty_as(g, ty),
+        parser.Node.Match{e, arms} => xty_match(g, e, arms),
+        parser.Node.Index{obj} => xsel(g, obj),
+        parser.Node.Slice{obj} => xty_slice(g, obj),
+        parser.Node.Closure{params, body} => xty_closure(g, params, body),
+        parser.Node.Bin{op, l, r} => xty_bin(g, op, l, r),
+        parser.Node.Un{op, e} => xty_un(g, op, e),
+        parser.Node.Ty(_) => check.t_void(g.ck),
+        _ => check.t_unk(g.ck),
+    }
+    return t
+}
+
+fn xty_name(g: mut G, n: str) -> int {
+    if n == "nil" { return check.t_err(g.ck) }
+    if n == "true" || n == "false" { return check.t_bool(g.ck) }
+    t := gx_lookup(g, n)
+    if t >= 0 { return t }
+    fi := gfn(g, n)
+    if fi >= 0 {
+        sig := g.ck.fnsv[fi]
+        r1 := sig.ret1
+        if sig.retk == 0 { r1 = check.t_void(g.ck) }
+        return check.tm(g.ck, check.k_fn(), -1, sig.params, r1, "")
+    }
+    return check.t_unk(g.ck)
+}
+
+fn xty_call(g: mut G, f: ref parser.Node, args: ref parser.NList) -> int {
+    ft := xfnval_ty(g, f)
+    if ft >= 0 && tyk(g, ft) == check.k_fn() { return g.ck.tyv[ft].r }
+    name := check.callee_name(f)
+    if len(name) == 0 { return check.t_unk(g.ck) }
+    ev := gev(g, name)
+    if ev.ok { return check.tn(g.ck, check.k_enum(), ev.en) }
+    // `e.kind()` — enum tag accessor
+    if args == nil {
+        match f {
+            parser.Node.Field{obj, name} => {
+                if name == "kind" {
+                    ot := xty(g, obj)
+                    if tyk(g, ot) == check.k_enum() { return check.t_int(g.ck) }
+                    if tyk(g, ot) == check.k_own() {
+                        if tyk(g, tyi(g, ot)) == check.k_enum() {
+                            return check.t_int(g.ck)
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    fi := gfn(g, name)
+    if fi >= 0 {
+        sig := g.ck.fnsv[fi]
+        if sig.retk == 1 || sig.retk == 2 { return sig.ret1 }
+        return check.t_void(g.ck)
+    }
+    if name == "mkchan" { return check.tk(g.ck, check.k_chan()) }
+    if name == "mkslice" {
+        et := check.t_unk(g.ck)
+        if args != nil {
+            a := args.v
+            if check.nk(a) == 2 {
+                match a {
+                    parser.Node.Name(an) => { et = check.ty_parse(g.ck, an) }
+                    _ => {}
+                }
+            }
+            if check.nk(a) == 3 { et = gty(g, a) }
+        }
+        return check.ti(g.ck, check.k_slice(), et)
+    }
+    if name == "push" && args != nil { return xty(g, args.v) }
+    if name == "recv" || name == "argc" || name == "len" || name == "byteat"
+        || name == "find" || name == "atoi" || name == "ftoi" || name == "htons"
+        || name == "htonl" || name == "sqlite_exec" || name == "writefile"
+        || name == "sget" || name == "scas" || name == "sadd" || name == "now"
+        || name == "now_ms" { return check.t_int(g.ck) }
+    if name == "itof" || name == "atof" { return check.tk(g.ck, check.k_float()) }
+    if name == "argv" || name == "itoa" || name == "substr" || name == "bufstr"
+        || name == "sqlite_query" || name == "readfile" || name == "ftoa" {
+        return check.t_str(g.ck)
+    }
+    if name == "cstr" { return check.tk(g.ck, check.k_cstr()) }
+    if name == "mkbuf" || name == "sqlite_open" || name == "mkshared" {
+        unk := check.t_unk(g.ck)
+        return check.ti(g.ck, check.k_own(), unk)
+    }
+    if name == "new" {
+        if args != nil {
+            a := args.v
+            if check.nk(a) == 2 {
+                match a {
+                    parser.Node.Name(sn) => {
+                        q := check.resolve_named(g.ck, sn)
+                        if collections.map_has(g.ck.structs, q) {
+                            st := check.tn(g.ck, check.k_struct(), q)
+                            return check.ti(g.ck, check.k_own(), st)
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            at := xty(g, a)
+            return check.ti(g.ck, check.k_own(), at)
+        }
+        unk2 := check.t_unk(g.ck)
+        return check.ti(g.ck, check.k_own(), unk2)
+    }
+    return check.t_unk(g.ck)
+}
+
+fn xty_field(g: mut G, obj: ref parser.Node, name: str) -> int {
+    base := check.callee_name(obj)
+    if len(base) > 0 {
+        ev := gev(g, base + "." + name)
+        if ev.ok { return check.tn(g.ck, check.k_enum(), ev.en) }
+    }
+    ot := xty(g, obj)
+    sn := ""
+    ok := tyk(g, ot)
+    if ok == check.k_struct() { sn = g.ck.tyv[ot].name }
+    if ok == check.k_own() || ok == check.k_ref() || ok == check.k_mut() {
+        i := tyi(g, ot)
+        if tyk(g, i) == check.k_struct() { sn = g.ck.tyv[i].name }
+    }
+    if len(sn) == 0 { return check.t_unk(g.ck) }
+    if !collections.map_has(g.ck.structs, sn) { return check.t_unk(g.ck) }
+    [si, err] = collections.map_get(g.ck.structs, sn)
+    if err != nil { return check.t_unk(g.ck) }
+    ft := check.ffind(g.ck.structsv[si].fields, name)
+    if ft < 0 { return check.t_unk(g.ck) }
+    return ft
+}
+
+fn xty_lit(g: mut G, obj: ref parser.Node) -> int {
+    name := check.callee_name(obj)
+    path := check.resolve_named(g.ck, name)
+    ev := gev(g, path)
+    if ev.ok { return check.tn(g.ck, check.k_enum(), ev.en) }
+    return check.tn(g.ck, check.k_struct(), path)
+}
+
+fn xty_as(g: mut G, ty: ref parser.Node) -> int {
+    ev := gev(g, check.ty_str(ty))
+    if ev.ok { return gty(g, ty) }
+    return check.t_unk(g.ck)
+}
+
+fn xty_match(g: mut G, scrut: ref parser.Node, arms: ref parser.NList) -> int {
+    st := xty(g, scrut)
+    a := arms
+    for a != nil {
+        match a.v {
+            parser.Node.MArm{pat, body} => {
+                if body != nil && check.nk(body) != 23 {
+                    check.env_push(g.benv)
+                    pb := xpatbinds(g, pat, st)
+                    for pb != nil {
+                        check.env_set(g.benv, pb.n, pb.t)
+                        pb = pb.next
+                    }
+                    t := xty(g, body)
+                    check.env_pop(g.benv)
+                    return t
+                }
+            }
+            _ => {}
+        }
+        a = a.next
+    }
+    return check.t_void(g.ck)
+}
+
+fn xty_slice(g: mut G, obj: ref parser.Node) -> int {
+    ot := xty(g, obj)
+    k := tyk(g, ot)
+    if k == check.k_slice() { return ot }
+    if k == check.k_own() || k == check.k_ref() || k == check.k_mut() {
+        i := tyi(g, ot)
+        if tyk(g, i) == check.k_slice() { return i }
+    }
+    return check.t_unk(g.ck)
+}
+
+fn xty_closure(g: mut G, params: ref parser.NList, body: ref parser.Node) -> int {
+    let ps: own check.IList = nil
+    pl := params
+    for pl != nil {
+        match pl.v {
+            parser.Node.Param{ty} => { ps = check.icons(gty(g, ty), ps) }
+            _ => {}
+        }
+        pl = pl.next
+    }
+    ps = check.irev(ps)
+    rt := xclret(g, body)
+    return check.tm(g.ck, check.k_fn(), -1, ps, rt, "")
+}
+
+fn xty_bin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> int {
+    if op == "&&" || op == "||" || op == "==" || op == "!=" || op == "<"
+        || op == "<=" || op == ">" || op == ">=" {
+        return check.t_bool(g.ck)
+    }
+    lt := xty(g, l)
+    rt := xty(g, r)
+    lk := tyk(g, lt)
+    rk := tyk(g, rt)
+    if op == "+" && lk == check.k_str() && rk == check.k_str() {
+        return check.t_str(g.ck)
+    }
+    if lk == check.k_float() || rk == check.k_float() {
+        return check.tk(g.ck, check.k_float())
+    }
+    return check.t_int(g.ck)
+}
+
+fn xty_un(g: mut G, op: str, e: ref parser.Node) -> int {
+    if op == "!" { return check.t_bool(g.ck) }
+    return xty(g, e)
+}
+// @PART3
+
+// ---------- emission internals ----------
+// `gx` emits a susp-free C fragment. In frame context (`inframe`) a nested
+// susp call parks inline: its suspend code lands in g.w before the fragment
+// is consumed, and the call reads back as `fr->vN` — the same shape Rust's
+// AST hoist produces, without rebuilding the tree.
+
+// deref own/ref/mut to the pointee handle (Rust dt)
+fn gdt(g: mut G, t: int) -> int {
+    for tyk(g, t) == check.k_own() || tyk(g, t) == check.k_ref()
+        || tyk(g, t) == check.k_mut() {
+        t = tyi(g, t)
+    }
+    return t
+}
+
+// frame slot name for an fsl value (-2 -> p_<name>, else v<i>)
+fn fslot_str(name: str, v: int) -> str {
+    if v == -2 { return "p_" + name }
+    return "v" + itoa(v)
+}
+
+// a local's C access path — `fr-><slot>` in frame, bare name otherwise
+fn gref(g: mut G, n: str) -> str {
+    if g.inframe == 1 {
+        s := genv_get(g.fsl, n)
+        if s != -1 { return "fr->" + fslot_str(n, s) }
+    }
+    return n
+}
+
+// register a frame field for an oxl local (Rust fslot)
+fn gfslot(g: mut G, name: str, ct: str) -> str {
+    i := len(g.fdecls)
+    g.fdecls = push(g.fdecls, ct + " v" + itoa(i) + ";")
+    check.env_set(g.fsl, name, i)
+    return "v" + itoa(i)
+}
+
+// LIFO defers for the current fn — consed head-first
+fn gdefers(g: mut G) {
+    d := g.defers
+    for d != nil {
+        v := gx(g, d.v)
+        wln(g, "    " + v + ";")
+        d = d.next
+    }
+}
+
+// susp callee name: bare leaf builtin or qualified oxl fn ("" = not susp)
+fn gsusp_name(g: mut G, f: ref parser.Node) -> str {
+    n := check.callee_name(f)
+    if len(n) == 0 { return "" }
+    qn := check.resolve_named(g.ck, n)
+    if check.is_susp_builtin(qn) { return qn }
+    if check.sl_has(g.ck.susp, qn) { return qn }
+    return ""
+}
+
+// does this call park? (Rust call_is_susp)
+fn g_call_susp(g: mut G, e: ref parser.Node) -> str {
+    if e == nil || check.nk(e) != 8 { return "" }
+    sn := ""
+    match e {
+        parser.Node.Call{f} => { sn = gsusp_name(g, f) }
+        _ => {}
+    }
+    return sn
+}
+
+
+
+// pattern -> (cond, binds) over scrutinee accessor `acc` (Rust arm_cond)
+fn garm(g: mut G, pat: ref parser.Node, acc: str, st: int) -> GArm {
+    r := GArm{has: -1, cond: "", binds: nil}
+    if pat == nil { return r }
+    k := check.nk(pat)
+    if k == 35 { return r }                    // `_`
+    if k == 46 {                               // bare ident binds whole
+        match pat {
+            parser.Node.PatBind{name} => {
+                r.binds = gbnd(name, "_ms", st, nil)
+            }
+            _ => {}
+        }
+        return r
+    }
+    if k == 36 {                               // literal
+        match pat {
+            parser.Node.PatLit{v} => {
+                lv := gx(g, v)
+                if tyk(g, gdt(g, st)) == check.k_str() {
+                    r.has = 1
+                    r.cond = "rt_streq(" + acc + ", " + lv + ")"
+                } else {
+                    r.has = 1
+                    r.cond = "(" + acc + " == " + lv + ")"
+                }
+            }
+            _ => {}
+        }
+        return r
+    }
+    if k != 34 { return r }
+    match pat {
+        parser.Node.Pat{path, binds} => {
+            qpath := check.resolve_named(g.ck, path)
+            ev := gev(g, qpath)
+            r.has = 1
+            if !ev.ok {
+                r.cond = "0"
+                return r
+            }
+            r.cond = acc + ".tag == " + itoa(ev.i)
+            if !collections.map_has(g.ck.structs, qpath) { return r }
+            [si, err] = collections.map_get(g.ck.structs, qpath)
+            if err != nil { return r }
+            fields := g.ck.structsv[si].fields
+            let out: own GBnd = nil
+            if check.fall_positional(fields) {
+                wl := fields
+                bl := binds
+                for bl != nil && wl != nil {
+                    match bl.v {
+                        parser.Node.Name(bn) => {
+                            if bn != "_" {
+                                ce := acc + ".u.v" + itoa(ev.i) + ".f_" + wl.v.n
+                                out = gbnd(bn, ce, wl.v.t, out)
+                            }
+                        }
+                        _ => {}
+                    }
+                    wl = wl.next
+                    bl = bl.next
+                }
+            } else {
+                bl := binds
+                for bl != nil {
+                    match bl.v {
+                        parser.Node.Name(bn) => {
+                            if bn != "_" {
+                                ce := acc + ".u.v" + itoa(ev.i) + ".f_" + bn
+                                out = gbnd(bn, ce, check.ffind(fields, bn), out)
+                            }
+                        }
+                        _ => {}
+                    }
+                    bl = bl.next
+                }
+            }
+            // cons order reverses binds; emission doesn't care (decls commute)
+            r.binds = out
+        }
+        _ => {}
+    }
+    return r
+}
+
+// `match` -> C statement-expression (Rust match_expr). Block arms emit
+// through the stmt path via a buffer swap.
+fn gmatch(g: mut G, scrut: ref parser.Node, arms: ref parser.NList) -> str {
+    st := xty(g, scrut)
+    sct := gcty(g, st)
+    rt := xty_match(g, scrut, arms)
+    valued := tyk(g, rt) != check.k_void() && tyk(g, rt) != check.k_unk()
+    acc := "_ms"
+    sk := tyk(g, st)
+    if sk == check.k_own() || sk == check.k_ref() || sk == check.k_mut() {
+        acc = "(*_ms)"
+    }
+    sv := gx(g, scrut)
+    o := "({ " + sct + " _ms = " + sv + "; "
+    if valued { o = o + gcty(g, rt) + " _mr; " }
+    first := true
+    a := arms
+    for a != nil {
+        match a.v {
+            parser.Node.MArm{pat, body} => {
+                ga := garm(g, pat, acc, st)
+                if ga.has == 1 {
+                    if first { o = o + "if (" + ga.cond + ") { " }
+                    if !first { o = o + "else if (" + ga.cond + ") { " }
+                } else {
+                    o = o + "else { "
+                }
+                first = false
+                check.env_push(g.env)
+                pb := ga.binds
+                for pb != nil {
+                    o = o + gcty(g, pb.t) + " " + pb.n + " = " + pb.ce + "; "
+                    check.env_set(g.env, pb.n, pb.t)
+                    pb = pb.next
+                }
+                if body != nil && check.nk(body) == 23 {
+                    wpush(g)
+                    match body {
+                        parser.Node.List{items} => {
+                            li := items
+                            for li != nil {
+                                gs(g, li.v)
+                                li = li.next
+                            }
+                        }
+                        _ => {}
+                    }
+                    wpop(g)
+                    o = o + wjoin(g.wlast)
+                } else if body != nil {
+                    bv := gx(g, body)
+                    if valued {
+                        o = o + "_mr = " + bv + "; "
+                    } else {
+                        o = o + "(" + bv + "); "
+                    }
+                }
+                check.env_pop(g.env)
+                o = o + "} "
+            }
+            _ => {}
+        }
+        a = a.next
+    }
+    if valued { o = o + "_mr; " }
+    return o + "})"
+}
+
+// builtins that expand to an rt_* call (Rust builtin_emit)
+fn gbuiltin(name: str, argvs: ref GAv) -> str {
+    a0 := ""
+    if argvs != nil { a0 = argvs.v }
+    j := gav_join(argvs)
+    if name == "assert" {
+        return "((" + a0 + ") ? (void)0 : (rt_trap(3)))"
+    }
+    if name == "mkchan" {
+        if argvs == nil { return "rt_mkchan(0LL)" }
+        return "rt_mkchan(" + a0 + ")"
+    }
+    if name == "send" { return "rt_send(" + j + ")" }
+    if name == "recv" { return "rt_recv(" + a0 + ")" }
+    if name == "sleep" { return "rt_sleep(" + a0 + ")" }
+    if name == "itoa" { return "rt_itoa(" + a0 + ")" }
+    if name == "argc" { return "rt_argc()" }
+    if name == "argv" { return "rt_argv(" + a0 + ")" }
+    if name == "len" { return "rt_len(" + a0 + ")" }
+    if name == "byteat" || name == "substr" || name == "find" || name == "bufstr"
+        || name == "poke8" || name == "poke16" || name == "poke32"
+        || name == "sqlite_exec" || name == "sqlite_query" {
+        return "rt_" + name + "(" + j + ")"
+    }
+    if name == "atoi" || name == "mkbuf" || name == "htons" || name == "htonl"
+        || name == "cstr" || name == "sqlite_open" || name == "sqlite_close"
+        || name == "readfile" || name == "writefile" || name == "exit"
+        || name == "mkshared" || name == "sget" || name == "sset"
+        || name == "scas" || name == "sadd" || name == "now" || name == "now_ms"
+        || name == "usleep" || name == "atof" || name == "ftoa" {
+        return "rt_" + name + "(" + j + ")"
+    }
+    if name == "ftoi" { return "((int64_t)(" + a0 + "))" }
+    if name == "itof" { return "((double)(" + a0 + "))" }
+    return ""
+}
+
+// ---------- expr emission (Rust expr) ----------
+
+// expr-position susp call inside a frame: park inline, land in a fresh slot
+fn gxsusp(g: mut G, e: ref parser.Node, sn: str) -> str {
+    rt := xty(g, e)
+    fd := gfslot(g, "_h" + itoa(g.hoistn), gcty(g, rt))
+    g.hoistn = g.hoistn + 1
+    match e {
+        parser.Node.Call{f, args} => {
+            if check.is_susp_builtin(sn) {
+                gfsusp_leaf(g, sn, args, 1, fd, "")
+            } else {
+                gfsusp_call(g, sn, args, 1, fd, "")
+            }
+        }
+        _ => {}
+    }
+    return "fr->" + fd
+}
+
+// `a && <susp>` / `a || <susp>` — guarded eval of the right side (the AST
+// hoist's if-desugar, emitted in place)
+fn gxguard(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> str {
+    fd := gfslot(g, "_b" + itoa(g.hoistn), "int")
+    g.hoistn = g.hoistn + 1
+    lv := gx(g, l)
+    wln(g, "    fr->" + fd + " = " + lv + ";")
+    lb := "L" + itoa(g.labeln)
+    g.labeln = g.labeln + 1
+    if op == "&&" {
+        wln(g, "    if (!(fr->" + fd + ")) goto " + lb + ";")
+    } else {
+        wln(g, "    if (fr->" + fd + ") goto " + lb + ";")
+    }
+    rv := gx(g, r)
+    wln(g, "    fr->" + fd + " = " + rv + ";")
+    wln(g, "    " + lb + ": ;")
+    return "fr->" + fd
+}
+
+fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> str {
+    lt := xty(g, l)
+    lv := gx(g, l)
+    rv := gx(g, r)
+    if op == "+" && tyk(g, gdt(g, lt)) == check.k_str() {
+        return "rt_strcat(" + lv + ", " + rv + ")"
+    }
+    if (op == "==" || op == "!=") && tyk(g, gdt(g, lt)) == check.k_str() {
+        neg := ""
+        if op == "!=" { neg = "!" }
+        return "(" + neg + "rt_streq(" + lv + ", " + rv + "))"
+    }
+    return "(" + lv + " " + op + " " + rv + ")"
+}
+
+// slice expr as a C value — own/ref/mut headers dereference (Rust slice_val)
+fn gslice_val(g: mut G, obj: ref parser.Node) -> str {
+    ov := gx(g, obj)
+    ot := gdt(g, xty(g, obj))
+    if ot != xty(g, obj) { return "(*" + ov + ")" }
+    return ov
+}
+
+fn gxfield(g: mut G, obj: ref parser.Node, name: str) -> str {
+    // module path: unit variant or fn value — never a member access
+    base := check.callee_name(obj)
+    if len(base) > 0 {
+        qn := check.resolve_named(g.ck, base + "." + name)
+        ev := gev(g, qn)
+        if ev.ok {
+            return "(struct o_en_" + cname(ev.en) + "){ .tag = " + itoa(ev.i) + " }"
+        }
+        fi := gfn(g, base + "." + name)
+        if fi >= 0 {
+            sig := g.ck.fnsv[fi]
+            if !check.sl_has(g.ck.susp, qn) && sig.retk != 2 {
+                if !check.sl_has(g.fnv, qn) {
+                    g.fnv = check.scons(qn, g.fnv)
+                }
+                return "(RtFnv){ 0, (void*)o_fnv_wrap_" + cname(qn) + " }"
+            }
+        }
+    }
+    o := gx(g, obj)
+    ot := xty(g, obj)
+    ok := tyk(g, ot)
+    if ok == check.k_own() || ok == check.k_ref() || ok == check.k_mut() {
+        return o + "->f_" + name
+    }
+    return o + ".f_" + name
+}
+
+fn gxlit(g: mut G, obj: ref parser.Node, fields: ref parser.NList) -> str {
+    name := check.callee_name(obj)
+    path := check.resolve_named(g.ck, name)
+    ev := gev(g, path)
+    init := ""
+    fl := fields
+    for fl != nil {
+        match fl.v {
+            parser.Node.NamedField{name, val} => {
+                if len(init) > 0 { init = init + ", " }
+                init = init + ".f_" + name + " = " + gx(g, val)
+            }
+            _ => {}
+        }
+        fl = fl.next
+    }
+    if ev.ok {
+        return "(struct o_en_" + cname(ev.en) + "){ .tag = " + itoa(ev.i)
+            + ", .u.v" + itoa(ev.i) + " = (struct o_s_" + cname(path)
+            + "){ " + init + " } }"
+    }
+    return "(struct o_s_" + cname(path) + "){ " + init + " }"
+}
+
+fn gxas(g: mut G, inner: ref parser.Node, ty: ref parser.Node) -> str {
+    tn := check.ty_str(ty)
+    ev := gev(g, check.resolve_named(g.ck, tn))
+    if !ev.ok { return "(" + gx(g, inner) + ")" }
+    e := gx(g, inner)
+    ec := cname(ev.en)
+    it := xty(g, inner)
+    ik := tyk(g, it)
+    if ik == check.k_own() || ik == check.k_ref() || ik == check.k_mut() {
+        return "({ struct o_en_" + ec + " *_ev = (" + e + "); if ((*_ev).tag != "
+            + itoa(ev.i) + ") rt_trap(9); (*_ev).u.v" + itoa(ev.i) + "; })"
+    }
+    return "({ struct o_en_" + ec + " _ev = (" + e + "); if (_ev.tag != "
+        + itoa(ev.i) + ") rt_trap(9); _ev.u.v" + itoa(ev.i) + "; })"
+}
+
+// named fn as a value — zero-env fat pair (Rust Ident fnval branch)
+fn gxfnv(g: mut G, n: str) -> str {
+    qn := check.resolve_named(g.ck, n)
+    if !collections.map_has(g.ck.fns, qn) { return "" }
+    if check.sl_has(g.ck.susp, qn) { return "" }
+    [fi, err] = collections.map_get(g.ck.fns, qn)
+    if err != nil { return "" }
+    if g.ck.fnsv[fi].retk == 2 { return "" }
+    if !check.sl_has(g.fnv, qn) {
+        g.fnv = check.scons(qn, g.fnv)
+    }
+    return "(RtFnv){ 0, (void*)o_fnv_wrap_" + cname(qn) + " }"
+}
+
+fn gx(g: mut G, e: ref parser.Node) -> str {
+    if e == nil { return "0" }
+    if g.inframe == 1 {
+        sn := g_call_susp(g, e)
+        if len(sn) > 0 { return gxsusp(g, e, sn) }
+        // `&&`/`||` with a susp right side — the guard desugar
+        early := ""
+        hit := false
+        match e {
+            parser.Node.Bin{op, l, r} => {
+                if (op == "&&" || op == "||")
+                    && check.expr_has_susp(g.ck, r) {
+                    early = gxguard(g, op, l, r)
+                    hit = true
+                }
+            }
+            _ => {}
+        }
+        if hit { return early }
+    }
+    out := match e {
+        parser.Node.JInt(v) => itoa(v) + "LL",
+        parser.Node.JFloat(s) => s,
+        parser.Node.JStr(s) => "rt_str_lit(\"" + s + "\")",
+        parser.Node.Name(n) => gxname(g, n),
+        parser.Node.Call{f, args} => gcall(g, f, args),
+        parser.Node.Field{obj, name} => gxfield(g, obj, name),
+        parser.Node.Lit{obj, fields} => gxlit(g, obj, fields),
+        parser.Node.As{e, ty} => gxas(g, e, ty),
+        parser.Node.Bin{op, l, r} => gxbin(g, op, l, r),
+        parser.Node.Un{op, e} => gxun(g, op, e),
+        parser.Node.Match{e, arms} => gmatch(g, e, arms),
+        parser.Node.Index{obj, idx} => gxindex(g, obj, idx),
+        parser.Node.Slice{obj, lo, hi} => gxslice(g, obj, lo, hi),
+        parser.Node.Closure{params, body} => gclosure(g, params, body),
+        _ => "0",
+    }
+    return out
+}
+
+fn gxname(g: mut G, n: str) -> str {
+    if n == "nil" { return "0" }
+    if n == "true" { return "1" }
+    if n == "false" { return "0" }
+    if g.inframe == 1 {
+        s := genv_get(g.fsl, n)
+        if s != -1 { return "fr->" + fslot_str(n, s) }
+    }
+    if g_local(g, n) { return n }
+    if collections.map_has(g.ck.globals, n) {
+        return "o_g_" + cname(n)
+    }
+    v := gxfnv(g, n)
+    if len(v) > 0 { return v }
+    return n
+}
+
+fn gxun(g: mut G, op: str, inner: ref parser.Node) -> str {
+    v := gx(g, inner)
+    if op == "!" { return "(!" + v + ")" }
+    return "(-" + v + ")"
+}
+
+fn gxindex(g: mut G, obj: ref parser.Node, idx: ref parser.Node) -> str {
+    el := xsel(g, obj)
+    ect := gcty(g, el)
+    sv := gslice_val(g, obj)
+    iv := gx(g, idx)
+    return "(*({ RtSlice _ms = " + sv + "; int64_t _mi = " + iv
+        + "; if (_mi < 0 || _mi >= _ms.len) rt_trap(10); (" + ect
+        + "*)_ms.ptr + _mi; }))"
+}
+
+fn gxslice(g: mut G, obj: ref parser.Node, lo: ref parser.Node, hi: ref parser.Node) -> str {
+    el := xsel(g, obj)
+    ect := gcty(g, el)
+    sv := gslice_val(g, obj)
+    av := "0LL"
+    bv := "_ms.len"
+    if lo != nil { av = gx(g, lo) }
+    if hi != nil { bv = gx(g, hi) }
+    return "({ RtSlice _ms = " + sv + "; int64_t _ma = " + av + "; int64_t _mb = "
+        + bv + "; if (_ma < 0 || _mb < _ma || _mb > _ms.len) rt_trap(10); (RtSlice){ ("
+        + ect + "*)_ms.ptr + _ma, _mb - _ma, _ms.cap - _ma }; })"
+}
+
+// ---------- call emission (Rust call) ----------
+
+fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
+    argvs := gav(g, args)
+    // indirect call through a fn value — bind once, jump through fp
+    ft := xfnval_ty(g, f)
+    if ft >= 0 && tyk(g, ft) == check.k_fn() {
+        fv := gx(g, f)
+        rt := g.ck.tyv[ft].r
+        ret_c := gcty(g, rt)
+        sig := "void*"
+        il := g.ck.tyv[ft].args
+        for il != nil {
+            sig = sig + ", " + gcty(g, il.v)
+            il = il.next
+        }
+        argl := ""
+        if argvs != nil { argl = ", " + gav_join(argvs) }
+        return "({ RtFnv _fv = " + fv + "; ((" + ret_c + " (*)(" + sig
+            + "))_fv.fp)(_fv.env" + argl + "); })"
+    }
+    name := check.callee_name(f)
+    if len(name) == 0 { return "0 /*badcall*/" }
+    qn := check.resolve_named(g.ck, name)
+    // enum variant construction `E.V(..)`
+    ev := gev(g, qn)
+    if ev.ok {
+        return "(struct o_en_" + cname(ev.en) + "){ .tag = " + itoa(ev.i)
+            + ", .u.v" + itoa(ev.i) + " = (struct o_s_" + cname(qn)
+            + "){ " + gav_join(argvs) + " } }"
+    }
+    // `e.kind()` — enum tag accessor (deref own handles)
+    if args == nil && check.nk(f) == 9 {
+        match f {
+            parser.Node.Field{obj, name} => {
+                if name == "kind" {
+                    ot := xty(g, obj)
+                    if tyk(g, ot) == check.k_enum() {
+                        return "(" + gx(g, obj) + ").tag"
+                    }
+                    if tyk(g, ot) == check.k_own() || tyk(g, ot) == check.k_ref()
+                        || tyk(g, ot) == check.k_mut() {
+                        if tyk(g, tyi(g, ot)) == check.k_enum() {
+                            return "(*" + gx(g, obj) + ").tag"
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // builtins dispatch on the resolved name — `lexlib.push` ≠ `push`
+    if qn == "print" || qn == "println" {
+        a0 := ""
+        if argvs != nil { a0 = argvs.v }
+        t := check.t_unk(g.ck)
+        if args != nil { t = gdt(g, xty(g, args.v)) }
+        sfx := "i64"
+        a := a0
+        if tyk(g, t) == check.k_str() { sfx = "str" }
+        if tyk(g, t) == check.k_cstr() { sfx = "str"; a = "rt_str(" + a0 + ")" }
+        if tyk(g, t) == check.k_float() { sfx = "f64" }
+        return "rt_" + name + "_" + sfx + "(" + a + ")"
+    }
+    if qn == "close" {
+        a0 := "0"
+        if argvs != nil { a0 = argvs.v }
+        t := check.t_unk(g.ck)
+        if args != nil { t = gdt(g, xty(g, args.v)) }
+        if tyk(g, t) == check.k_chan() { return "rt_close(" + a0 + ")" }
+        return "close(" + a0 + ")"
+    }
+    if qn == "new" && args != nil {
+        sn := ""
+        match args.v {
+            parser.Node.Name(an) => { sn = an }
+            _ => {}
+        }
+        if len(sn) > 0 {
+            q := check.resolve_named(g.ck, sn)
+            if collections.map_has(g.ck.structs, q) {
+                return "({ struct o_s_" + cname(q) + " *_nb = rt_alloc(sizeof(struct o_s_"
+                    + cname(q) + ")); __builtin_memset(_nb, 0, sizeof(struct o_s_"
+                    + cname(q) + ")); _nb; })"
+            }
+        }
+        ct := gcty(g, xty(g, args.v))
+        v := argvs.v
+        return "({ " + ct + " *_nb = rt_alloc(sizeof(" + ct + ")); *_nb = (" + v + "); _nb; })"
+    }
+    if qn == "mkslice" && args != nil {
+        et := check.t_unk(g.ck)
+        if check.nk(args.v) == 2 {
+            match args.v {
+                parser.Node.Name(an) => { et = check.ty_parse(g.ck, an) }
+                _ => {}
+            }
+        }
+        if check.nk(args.v) == 3 { et = gty(g, args.v) }
+        n := "0LL"
+        if args.next != nil { n = gav_at(argvs, 1) }
+        return "rt_mkslice(" + n + ", sizeof(" + gcty(g, et) + "))"
+    }
+    if qn == "push" && args != nil {
+        st := xty(g, args.v)
+        el := check.t_unk(g.ck)
+        owned := false
+        if tyk(g, st) == check.k_slice() { el = tyi(g, st) }
+        if tyk(g, st) == check.k_own() || tyk(g, st) == check.k_ref()
+            || tyk(g, st) == check.k_mut() {
+            i := tyi(g, st)
+            if tyk(g, i) == check.k_slice() { el = tyi(g, i); owned = true }
+        }
+        ect := gcty(g, el)
+        sv := argvs.v
+        if owned { sv = "(*" + sv + ")" }
+        v := gav_at(argvs, 1)
+        return "({ " + ect + " _pv = " + v + "; rt_slice_push(" + sv
+            + ", sizeof(" + ect + "), &_pv); })"
+    }
+    if qn == "len" && args != nil {
+        st := gdt(g, xty(g, args.v))
+        a0 := argvs.v
+        if tyk(g, st) == check.k_slice() {
+            if tyk(g, xty(g, args.v)) == check.k_slice() { return "(" + a0 + ").len" }
+            return "(*" + a0 + ").len"
+        }
+        return "rt_len(" + a0 + ")"
+    }
+    b := gbuiltin(qn, argvs)
+    if len(b) > 0 { return b }
+    // regular call — oxl fn gets o_f_, extern/raw C keeps the bare name
+    fi := gfn(g, name)
+    if fi < 0 { return name + "(" + gav_join(argvs) + ")" }
+    sig := g.ck.fnsv[fi]
+    callee := name
+    if sig.is_extern == 0 { callee = "o_f_" + cname(qn) }
+    // str -> cstr coercion + own-arg borrows around the call
+    pre := ""
+    post := ""
+    il := sig.params
+    al := args
+    av := argvs
+    let coerced: own GAv = nil
+    let ctail: own GAv = nil
+    for al != nil {
+        v := av.v
+        if il != nil {
+            pt := il.v
+            raw := xty(g, al.v)
+            if tyk(g, pt) == check.k_cstr() && tyk(g, gdt(g, raw)) == check.k_str() {
+                v = "rt_cstr(" + v + ")"
+            }
+            if tyk(g, raw) == check.k_own() {
+                pk := tyk(g, pt)
+                if pk == check.k_mut() {
+                    pre = pre + "rt_borrow_mut(" + v + "); "
+                    post = post + "rt_unborrow(" + v + "); "
+                }
+                if pk == check.k_ref() {
+                    pre = pre + "rt_borrow_read(" + v + "); "
+                    post = post + "rt_unborrow(" + v + "); "
+                }
+            }
+            il = il.next
+        }
+        c := new(GAv)
+        c.v = v
+        if coerced == nil { coerced = c } else { ctail.next = c }
+        ctail = c
+        al = al.next
+        av = av.next
+    }
+    inner := callee + "(" + gav_join(coerced) + ")"
+    if len(pre) == 0 { return inner }
+    if sig.retk == 0 {
+        return "({ " + pre + inner + "; " + post + "})"
+    }
+    if sig.retk == 1 {
+        return "({ " + gcty(g, sig.ret1) + " __rc; " + pre + "__rc = " + inner
+            + "; " + post + "__rc; })"
+    }
+    return "({ struct o_ret_" + cname(qn) + " __rc; " + pre + "__rc = " + inner
+        + "; " + post + "__rc; })"
+}
+
+// ---------- spawn (Rust spawn) ----------
+
+fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
+    if e == nil || check.nk(e) != 8 { return }
+    match e {
+        parser.Node.Call{f, args} => {
+            // fn value callee — pack the fat pair as a0
+            ft := xfnval_ty(g, f)
+            if ft >= 0 && tyk(g, ft) == check.k_fn() {
+                id := g.tmpn
+                g.tmpn = g.tmpn + 1
+                sid := itoa(id)
+                tr := "struct o_args_" + sid + " { RtFnv a0;"
+                il := g.ck.tyv[ft].args
+                i := 1
+                for il != nil {
+                    tr = tr + " " + gcty(g, il.v) + " a" + itoa(i) + ";"
+                    i = i + 1
+                    il = il.next
+                }
+                tr = tr + " };\n"
+                ret_c := gcty(g, g.ck.tyv[ft].r)
+                sig := "void*"
+                argl := ""
+                il = g.ck.tyv[ft].args
+                i = 1
+                for il != nil {
+                    sig = sig + ", " + gcty(g, il.v)
+                    argl = argl + ", a->a" + itoa(i)
+                    i = i + 1
+                    il = il.next
+                }
+                tr = tr + "static void* l_tr_" + sid + "(void* _p) { struct o_args_"
+                    + sid + "* a = _p; ((" + ret_c + " (*)(" + sig
+                    + "))a->a0.fp)(a->a0.env" + argl + "); return 0; }\n"
+                g.tramp = push(g.tramp, tr)
+                wln(g, "    { struct o_args_" + sid + "* a = rt_alloc(sizeof(struct o_args_"
+                    + sid + "));")
+                fv := gx(g, f)
+                wln(g, "      a->a0 = " + fv + ";")
+                i = 1
+                al := args
+                for al != nil {
+                    wln(g, "      a->a" + itoa(i) + " = " + gx(g, al.v) + ";")
+                    i = i + 1
+                    al = al.next
+                }
+                sp := "rt_spawn"
+                if blocking { sp = "rt_spawnb" }
+                wln(g, "      " + sp + "(l_tr_" + sid + ", a); }")
+                return
+            }
+            name := check.callee_name(f)
+            if len(name) == 0 { return }
+            qn := check.resolve_named(g.ck, name)
+            // suspendable callee — heap frame + poll driver task
+            if check.sl_has(g.ck.susp, qn) {
+                cn := cname(qn)
+                argvs := gav(g, args)
+                wln(g, "    { struct o_frm_" + cn + " *_t = (struct o_frm_" + cn
+                    + " *)rt_task_new(o_poll_" + cn + ", (int64_t)sizeof(struct o_frm_"
+                    + cn + "));")
+                gspawn_args(g, qn, "_t", argvs)
+                sp := "rt_spawn_task"
+                if blocking { sp = "rt_spawnb_task" }
+                wln(g, "      " + sp + "((RtFrame *)_t); }")
+                return
+            }
+            // regular callee — args struct + file-scope trampoline
+            id := g.tmpn
+            g.tmpn = g.tmpn + 1
+            sid := itoa(id)
+            tr := "struct o_args_" + sid + " {"
+            al := args
+            i := 0
+            for al != nil {
+                tr = tr + " " + gcty(g, xty(g, al.v)) + " a" + itoa(i) + ";"
+                i = i + 1
+                al = al.next
+            }
+            tr = tr + " };\n"
+            // the arg-ref list as a GAv so gbuiltin can consume it
+            let afs: own GAv = nil
+            let atail: own GAv = nil
+            i = 0
+            al = args
+            for al != nil {
+                c := new(GAv)
+                c.v = "a->a" + itoa(i)
+                if afs == nil { afs = c } else { atail.next = c }
+                atail = c
+                i = i + 1
+                al = al.next
+            }
+            arefs := gav_join(afs)
+            body := ""
+            if name == "print" || name == "println" || name == "new" {
+                body = "rt_trap(9);"
+            } else if name == "close" {
+                t := check.t_unk(g.ck)
+                if args != nil { t = gdt(g, xty(g, args.v)) }
+                if tyk(g, t) == check.k_chan() {
+                    body = "rt_close(a->a0);"
+                } else {
+                    body = "close(a->a0);"
+                }
+            } else {
+                bb := gbuiltin(name, afs)
+                if len(bb) > 0 {
+                    body = bb + ";"
+                } else {
+                    callee := name
+                    fi := gfn(g, name)
+                    if fi >= 0 && g.ck.fnsv[fi].is_extern == 0 {
+                        callee = "o_f_" + cname(qn)
+                    }
+                    body = callee + "(" + arefs + ");"
+                }
+            }
+            tr = tr + "static void* l_tr_" + sid + "(void* _p) { struct o_args_"
+                + sid + "* a = _p; " + body + " return 0; }\n"
+            g.tramp = push(g.tramp, tr)
+            wln(g, "    { struct o_args_" + sid + "* a = rt_alloc(sizeof(struct o_args_"
+                + sid + "));")
+            i = 0
+            al = args
+            for al != nil {
+                wln(g, "      a->a" + itoa(i) + " = " + gx(g, al.v) + ";")
+                i = i + 1
+                al = al.next
+            }
+            sp := "rt_spawn"
+            if blocking { sp = "rt_spawnb" }
+            wln(g, "      " + sp + "(l_tr_" + sid + ", a); }")
+        }
+        _ => {}
+    }
+}
+
+// write spawn/fsusp-call args into `dst->p_<param>` slots
+fn gspawn_args(g: mut G, qn: str, dst: str, argvs: ref GAv) {
+    fi := gfn_item(g, qn)
+    if fi < 0 { return }
+    if check.nk(g.its[fi].node) != 24 { return }
+    match g.its[fi].node {
+        parser.Node.Fn{params} => {
+            pl := params
+            av := argvs
+            for pl != nil && av != nil {
+                match pl.v {
+                    parser.Node.Param{name} => {
+                        wln(g, "      " + dst + "->p_" + name + " = " + av.v + ";")
+                    }
+                    _ => {}
+                }
+                pl = pl.next
+                av = av.next
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------- closures (Rust closure_expr + BodyScan) ----------
+
+struct GS { l: own check.SList }
+
+fn gsc_add(s: mut GS, n: str) {
+    if len(n) == 0 { return }
+    if !check.sl_has(s.l, n) { s.l = check.scons(n, s.l) }
+}
+
+// every Name use under a node — the capture scan over-collects and lets
+// gx_lookup filter (module heads, field names, pattern binds drop out)
+fn gscan_e(g: mut G, s: mut GS, e: ref parser.Node) {
+    if e == nil { return }
+    match e {
+        parser.Node.Name(n) => { gsc_add(s, n) }
+        parser.Node.Call{f, args} => {
+            gscan_e(g, s, f)
+            al := args
+            for al != nil { gscan_e(g, s, al.v); al = al.next }
+        }
+        parser.Node.Field{obj} => { gscan_e(g, s, obj) }
+        parser.Node.Lit{obj, fields} => {
+            gscan_e(g, s, obj)
+            fl := fields
+            for fl != nil {
+                match fl.v {
+                    parser.Node.NamedField{val} => { gscan_e(g, s, val) }
+                    _ => {}
+                }
+                fl = fl.next
+            }
+        }
+        parser.Node.Bin{l, r} => { gscan_e(g, s, l); gscan_e(g, s, r) }
+        parser.Node.Un{e} => { gscan_e(g, s, e) }
+        parser.Node.As{e} => { gscan_e(g, s, e) }
+        parser.Node.Match{e, arms} => {
+            gscan_e(g, s, e)
+            al := arms
+            for al != nil {
+                match al.v {
+                    parser.Node.MArm{pat, body} => {
+                        gscan_pat(g, s, pat)
+                        if body != nil && check.nk(body) == 23 {
+                            gscan_b(g, s, body)
+                        } else {
+                            gscan_e(g, s, body)
+                        }
+                    }
+                    _ => {}
+                }
+                al = al.next
+            }
+        }
+        parser.Node.Index{obj, idx} => { gscan_e(g, s, obj); gscan_e(g, s, idx) }
+        parser.Node.Slice{obj, lo, hi} => {
+            gscan_e(g, s, obj)
+            gscan_e(g, s, lo)
+            gscan_e(g, s, hi)
+        }
+        parser.Node.Closure{body} => { gscan_b(g, s, body) }
+        _ => {}
+    }
+}
+
+fn gscan_pat(g: mut G, s: mut GS, pat: ref parser.Node) {
+    if pat == nil { return }
+    match pat {
+        parser.Node.PatLit{v} => { gscan_e(g, s, v) }
+        _ => {}
+    }
+}
+
+fn gscan_s(g: mut G, s: mut GS, st: ref parser.Node) {
+    if st == nil { return }
+    match st {
+        parser.Node.Let{init} => { gscan_e(g, s, init) }
+        parser.Node.Bind{init} => { gscan_e(g, s, init) }
+        parser.Node.Let2{call} => { gscan_e(g, s, call) }
+        parser.Node.Assign{target, val} => {
+            gscan_e(g, s, target)
+            gscan_e(g, s, val)
+        }
+        parser.Node.ExprStmt{e} => { gscan_e(g, s, e) }
+        parser.Node.Ret{vals} => {
+            l := vals
+            for l != nil { gscan_e(g, s, l.v); l = l.next }
+        }
+        parser.Node.If{cond, then, els} => {
+            gscan_e(g, s, cond)
+            gscan_b(g, s, then)
+            if els != nil && check.nk(els) == 23 { gscan_b(g, s, els) }
+            if els != nil && check.nk(els) != 23 { gscan_s(g, s, els) }
+        }
+        parser.Node.For{cond, body} => {
+            gscan_e(g, s, cond)
+            gscan_b(g, s, body)
+        }
+        parser.Node.Scope{body} => { gscan_b(g, s, body) }
+        parser.Node.Unsafe{body} => { gscan_b(g, s, body) }
+        parser.Node.Spawn{e} => { gscan_e(g, s, e) }
+        parser.Node.SpawnBlocking{e} => { gscan_e(g, s, e) }
+        parser.Node.Go{e} => { gscan_e(g, s, e) }
+        parser.Node.Defer{call} => { gscan_e(g, s, call) }
+        parser.Node.Select{arms} => {
+            al := arms
+            for al != nil {
+                match al.v {
+                    parser.Node.SArm{ch, ms, body} => {
+                        gscan_e(g, s, ch)
+                        gscan_e(g, s, ms)
+                        gscan_b(g, s, body)
+                    }
+                    _ => {}
+                }
+                al = al.next
+            }
+        }
+        parser.Node.List{items} => {
+            l := items
+            for l != nil { gscan_s(g, s, l.v); l = l.next }
+        }
+        _ => {}
+    }
+}
+
+fn gscan_b(g: mut G, s: mut GS, body: ref parser.Node) {
+    if body == nil || check.nk(body) != 23 { return }
+    match body {
+        parser.Node.List{items} => {
+            l := items
+            for l != nil { gscan_s(g, s, l.v); l = l.next }
+        }
+        _ => {}
+    }
+}
+
+fn gscan_param(params: ref parser.NList, n: str) -> bool {
+    pl := params
+    for pl != nil {
+        match pl.v {
+            parser.Node.Param{name} => { if name == n { return true } }
+            _ => {}
+        }
+        pl = pl.next
+    }
+    return false
+}
+
+// `{ |params| stmts }` — env struct + wrapper fn + {env, fp} value
+fn gclosure(g: mut G, params: ref parser.NList, body: ref parser.Node) -> str {
+    id := g.cln
+    g.cln = g.cln + 1
+    sid := itoa(id)
+    sc := new(GS)
+    sc.l = nil
+    gscan_b(g, sc, body)
+    let caps: own GBnd = nil
+    u := sc.l
+    for u != nil {
+        if !gscan_param(params, u.v) {
+            t := gx_lookup(g, u.v)
+            if t >= 0 { caps = gbnd(u.v, "", t, caps) }
+        }
+        u = u.next
+    }
+    psig := ""
+    pl := params
+    for pl != nil {
+        match pl.v {
+            parser.Node.Param{name, ty} => {
+                psig = psig + ", " + gcty(g, gty(g, ty)) + " " + cname(name)
+            }
+            _ => {}
+        }
+        pl = pl.next
+    }
+    ret_c := gcty(g, xclret(g, body))
+    envf := ""
+    cp := caps
+    for cp != nil {
+        envf = envf + " " + gcty(g, cp.t) + " " + cname(cp.n) + ";"
+        cp = cp.next
+    }
+    g.clpro = push(g.clpro, "struct o_env_" + sid + " {" + envf + " };")
+    g.clpro = push(g.clpro, "static " + ret_c + " o_cl_" + sid + "(struct o_env_"
+        + sid + " *_e" + psig + ");")
+    // wrapper body — a plain fn: captures arrive via _e
+    save_frame := g.inframe
+    g.inframe = 0
+    save_def := g.defers
+    g.defers = nil
+    save_ret := g.retk
+    g.retk = 0
+    wpush(g)
+    wln(g, "static " + ret_c + " o_cl_" + sid + "(struct o_env_" + sid
+        + " *_e" + psig + ") {")
+    check.env_push(g.env)
+    cp = caps
+    for cp != nil {
+        wln(g, "    " + gcty(g, cp.t) + " " + cname(cp.n) + " = _e->" + cname(cp.n) + ";")
+        check.env_set(g.env, cp.n, cp.t)
+        cp = cp.next
+    }
+    pl = params
+    for pl != nil {
+        match pl.v {
+            parser.Node.Param{name, ty} => {
+                check.env_set(g.env, name, gty(g, ty))
+            }
+            _ => {}
+        }
+        pl = pl.next
+    }
+    gblk(g, body)
+    gdefers(g)
+    check.env_pop(g.env)
+    wln(g, "}")
+    wpop(g)
+    g.clbod = push(g.clbod, wjoin(g.wlast))
+    g.inframe = save_frame
+    g.defers = save_def
+    g.retk = save_ret
+    // the value: env populated from the enclosing scope
+    inits := ""
+    cp = caps
+    for cp != nil {
+        inits = inits + " _e->" + cname(cp.n) + " = " + gxname(g, cp.n) + ";"
+        cp = cp.next
+    }
+    return "({ struct o_env_" + sid + " *_e = rt_alloc(sizeof(struct o_env_"
+        + sid + "));" + inits + " (RtFnv){ _e, (void*)o_cl_" + sid + " }; })"
+}
+
+// ---------- stmt emission (Rust stmt, non-frame path) ----------
+
+fn gblk(g: mut G, body: ref parser.Node) {
+    if body == nil || check.nk(body) != 23 { return }
+    match body {
+        parser.Node.List{items} => {
+            l := items
+            for l != nil {
+                gs(g, l.v)
+                l = l.next
+            }
+        }
+        _ => {}
+    }
+}
+
+// `[a, err] = call` — pair-return destructure (Rust Stmt::Let2)
+fn glet2(g: mut G, names: str, call: ref parser.Node) {
+    cn := ""
+    match call {
+        parser.Node.Call{f} => { cn = check.callee_name(f) }
+        _ => {}
+    }
+    i := find(names, ",")
+    na := names
+    nb := ""
+    if i >= 0 {
+        na = substr(names, 0, i)
+        nb = substr(names, i + 1, len(names))
+    }
+    vt := check.t_unk(g.ck)
+    qn := check.resolve_named(g.ck, cn)
+    fi := -1
+    if len(cn) > 0 { fi = gfn(g, cn) }
+    if fi >= 0 { vt = g.ck.fnsv[fi].ret1 }
+    n := g.tmpn
+    g.tmpn = g.tmpn + 1
+    c := gx(g, call)
+    wln(g, "    struct o_ret_" + cname(qn) + " _r" + itoa(n) + " = " + c + ";")
+    if len(na) > 0 && na != "_" {
+        wln(g, "    " + gcty(g, vt) + " " + na + " = _r" + itoa(n) + ".val;")
+        check.env_set(g.env, na, vt)
+    }
+    if len(nb) > 0 && nb != "_" {
+        wln(g, "    int64_t " + nb + " = _r" + itoa(n) + ".err;")
+        check.env_set(g.env, nb, check.t_err(g.ck))
+    }
+}
+
+fn gs(g: mut G, s: ref parser.Node) {
+    if s == nil { return }
+    match s {
+        parser.Node.Let{name, ty, init} => {
+            t := check.t_unk(g.ck)
+            if ty != nil { t = gty(g, ty) }
+            if ty == nil { t = xty(g, init) }
+            v := gx(g, init)
+            wln(g, "    " + gcty(g, t) + " " + name + " = " + v + ";")
+            check.env_set(g.env, name, t)
+        }
+        parser.Node.Bind{name, init} => {
+            t := xty(g, init)
+            v := gx(g, init)
+            wln(g, "    " + gcty(g, t) + " " + name + " = " + v + ";")
+            check.env_set(g.env, name, t)
+        }
+        parser.Node.Let2{names, call} => { glet2(g, names, call) }
+        parser.Node.Assign{target, val} => {
+            t := gx(g, target)
+            v := gx(g, val)
+            wln(g, "    " + t + " = " + v + ";")
+        }
+        parser.Node.ExprStmt{e} => {
+            v := gx(g, e)
+            wln(g, "    " + v + ";")
+        }
+        parser.Node.Defer{call} => {
+            g.defers = parser.ncons(call, g.defers)
+        }
+        parser.Node.Ret{vals} => {
+            gdefers(g)
+            if vals == nil {
+                wln(g, "    return;")
+            } else if g.retk == 2 && vals.next != nil {
+                v := gx(g, vals.v)
+                e2 := gx(g, vals.next.v)
+                wln(g, "    return (struct o_ret_" + cname(g.cur) + "){ " + v
+                    + ", " + e2 + " };")
+            } else {
+                v := gx(g, vals.v)
+                wln(g, "    return " + v + ";")
+            }
+        }
+        parser.Node.If{cond, then, els} => {
+            c := gx(g, cond)
+            wln(g, "    if (" + c + ") {")
+            check.env_push(g.env)
+            gblk(g, then)
+            check.env_pop(g.env)
+            if els == nil {
+                wln(g, "    }")
+            } else if check.nk(els) == 23 {
+                wln(g, "    } else {")
+                check.env_push(g.env)
+                gblk(g, els)
+                check.env_pop(g.env)
+                wln(g, "    }")
+            } else {
+                wl(g, "    } else ")
+                gs(g, els)
+            }
+        }
+        parser.Node.For{cond, body} => {
+            c := gx(g, cond)
+            wln(g, "    while (" + c + ") {")
+            check.env_push(g.env)
+            gblk(g, body)
+            check.env_pop(g.env)
+            wln(g, "    }")
+        }
+        parser.Node.Break => { wln(g, "    break;") }
+        parser.Node.Continue => { wln(g, "    continue;") }
+        parser.Node.Scope{body} => {
+            id := g.scopen
+            g.scopen = g.scopen + 1
+            wln(g, "    { RtScope _sc" + itoa(id) + "; rt_scope_enter(&_sc" + itoa(id) + ");")
+            check.env_push(g.env)
+            gblk(g, body)
+            check.env_pop(g.env)
+            wln(g, "      rt_scope_leave(&_sc" + itoa(id) + "); }")
+        }
+        parser.Node.Spawn{e} => { gspawn(g, e, false) }
+        parser.Node.Go{e} => { gspawn(g, e, false) }
+        parser.Node.SpawnBlocking{e} => { gspawn(g, e, true) }
+        parser.Node.Select{arms} => {
+            wln(g, "    fprintf(stderr, \"select in non-suspendable fn\\n\"); abort();")
+        }
+        parser.Node.Unsafe{body} => {
+            check.env_push(g.env)
+            gblk(g, body)
+            check.env_pop(g.env)
+        }
+        parser.Node.List{items} => {
+            l := items
+            for l != nil {
+                gs(g, l.v)
+                l = l.next
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------- suspension state machine (Rust fsusp_*/fstmt/func_frame) ----------
+
+// `fr->cur_scope = tls_scope; tls_scope = saved; return <code>;`
+fn gsusp_ret(g: mut G, code: str) {
+    wln(g, "    fr->cur_scope = tls_scope; tls_scope = saved; return " + code + ";")
+}
+
+// suspend point for an oxl-fn call: alloc child frame, poll it, propagate
+// PENDING/CANCEL, bind the result on READY (Rust fsusp_call)
+// dk: 0 void, 1 frame-field(da), 2 assign-target(da), 3 pair(da,db; ""=blank)
+fn gfsusp_call(g: mut G, name: str, args: ref parser.NList, dk: int, da: str, db: str) {
+    cn := cname(name)
+    frty := "o_frm_" + cn
+    argvs := gav(g, args)
+    wln(g, "    { struct " + frty + " *_c = (struct " + frty
+        + " *)malloc(sizeof(struct " + frty + "));")
+    wln(g, "      ((RtFrame *)_c)->cur_scope = tls_scope; ((RtFrame *)_c)->state = 0;")
+    gspawn_args(g, name, "_c", argvs)
+    k := g.staten
+    g.staten = g.staten + 1
+    g.states = push(g.states, k)
+    wln(g, "      fr->child = (RtFrame *)_c; fr->state = " + itoa(k) + ";")
+    wln(g, "    s" + itoa(k) + ": ;")
+    wln(g, "      _p = o_poll_" + cn + "(fr->child, task);")
+    wln(g, "      if (_p != RT_READY) { fr->cur_scope = tls_scope; tls_scope = saved; return _p; }")
+    if dk == 1 {
+        wln(g, "      fr->" + da + " = ((struct " + frty + " *)fr->child)->result;")
+    }
+    if dk == 2 {
+        wln(g, "      " + da + " = ((struct " + frty + " *)fr->child)->result;")
+    }
+    if dk == 3 {
+        wln(g, "      { struct o_ret_" + cn + " _r = ((struct " + frty
+            + " *)fr->child)->result;")
+        if len(da) > 0 { wln(g, "        fr->" + da + " = _r.val;") }
+        if len(db) > 0 { wln(g, "        fr->" + db + " = _r.err;") }
+        wln(g, "      }")
+    }
+    wln(g, "      free(fr->child);")
+    wln(g, "    }")
+}
+
+// leaf suspends: recv/send/sleep park on the chan/timer wait queue
+fn gfsusp_leaf(g: mut G, name: str, args: ref parser.NList, dk: int, da: str, db: str) {
+    argvs := gav(g, args)
+    k := g.staten
+    g.staten = g.staten + 1
+    g.states = push(g.states, k)
+    wln(g, "    if (rt_cancelled()) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_CANCEL; }")
+    wln(g, "    fr->state = " + itoa(k) + ";")
+    poll := ""
+    if name == "recv" { poll = "rt_recv_poll(" + gav_at(argvs, 0) + ", task)" }
+    if name == "send" {
+        poll = "rt_send_poll(" + gav_at(argvs, 0) + ", " + gav_at(argvs, 1) + ", task)"
+    }
+    if name == "sleep" { poll = "rt_sleep_poll(" + gav_at(argvs, 0) + ", task)" }
+    wln(g, "    if (" + poll + " == RT_PENDING) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }")
+    wln(g, "    s" + itoa(k) + ": ;")
+    wln(g, "    if (rt_cancelled()) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_CANCEL; }")
+    if dk == 1 { wln(g, "    fr->" + da + " = rt_task_data(task);") }
+    if dk == 2 { wln(g, "    " + da + " = rt_task_data(task);") }
+}
+
+// dispatch a stmt-level susp call: leaf builtin or oxl frame call
+fn gfsusp_go(g: mut G, call: ref parser.Node, dk: int, da: str, db: str) {
+    sn := g_call_susp(g, call)
+    if len(sn) == 0 { return }
+    match call {
+        parser.Node.Call{args} => {
+            if check.is_susp_builtin(sn) {
+                gfsusp_leaf(g, sn, args, dk, da, db)
+            } else {
+                gfsusp_call(g, sn, args, dk, da, db)
+            }
+        }
+        _ => {}
+    }
+}
+
+fn gfblk(g: mut G, body: ref parser.Node) {
+    if body == nil || check.nk(body) != 23 { return }
+    match body {
+        parser.Node.List{items} => {
+            l := items
+            for l != nil {
+                gfstmt(g, l.v)
+                l = l.next
+            }
+        }
+        _ => {}
+    }
+}
+
+// statement-level match inside a frame — real if-chain so block arms can
+// suspend; payload binds live in frame slots (Rust fstmt_match)
+fn gfmatch(g: mut G, scrut: ref parser.Node, arms: ref parser.NList) {
+    st := xty(g, scrut)
+    sct := gcty(g, st)
+    acc := "_ms"
+    sk := tyk(g, st)
+    if sk == check.k_own() || sk == check.k_ref() || sk == check.k_mut() {
+        acc = "(*_ms)"
+    }
+    sv := gx(g, scrut)
+    wln(g, "    { " + sct + " _ms = " + sv + ";")
+    first := true
+    a := arms
+    for a != nil {
+        match a.v {
+            parser.Node.MArm{pat, body} => {
+                ga := garm(g, pat, acc, st)
+                if ga.has == 1 {
+                    if first { wln(g, "    if (" + ga.cond + ") {") }
+                    if !first { wln(g, "    else if (" + ga.cond + ") {") }
+                } else {
+                    wln(g, "    else {")
+                }
+                first = false
+                check.env_push(g.env)
+                check.env_push(g.fsl)
+                pb := ga.binds
+                for pb != nil {
+                    fd := gfslot(g, pb.n, gcty(g, pb.t))
+                    check.env_set(g.env, pb.n, pb.t)
+                    wln(g, "      fr->" + fd + " = " + pb.ce + ";")
+                    pb = pb.next
+                }
+                if body != nil && check.nk(body) == 23 {
+                    gfblk(g, body)
+                } else if body != nil {
+                    gfstmt_expr(g, body)
+                }
+                check.env_pop(g.fsl)
+                check.env_pop(g.env)
+                wln(g, "    }")
+            }
+            _ => {}
+        }
+        a = a.next
+    }
+    wln(g, "    }")
+}
+
+// an expr in stmt position inside a frame (ExprStmt / match arm body)
+fn gfstmt_expr(g: mut G, e: ref parser.Node) {
+    if check.nk(e) == 8 && len(g_call_susp(g, e)) > 0 {
+        gfsusp_go(g, e, 0, "", "")
+        return
+    }
+    if check.nk(e) == 32 {
+        match e {
+            parser.Node.Match{e, arms} => {
+                gfmatch(g, e, arms)
+                return
+            }
+            _ => {}
+        }
+    }
+    v := gx(g, e)
+    wln(g, "    " + v + ";")
+}
+
+// select { v := recv(ch) => .. timeout(ms) => .. else => .. }
+fn gfselect(g: mut G, arms: ref parser.NList) {
+    // evaluate arm chans / timeout ms once, before the suspend
+    let chs: own check.IList = nil   // arm index per recv slot (reversed ok)
+    let cvs: own GAv = nil
+    let cvtail: own GAv = nil
+    ncv := 0
+    tmo := "-1"
+    has_else := false
+    a := arms
+    for a != nil {
+        match a.v {
+            parser.Node.SArm{kind, ch, ms} => {
+                if kind == "recv" {
+                    cv := new(GAv)
+                    cv.v = gx(g, ch)
+                    if cvs == nil { cvs = cv } else { cvtail.next = cv }
+                    cvtail = cv
+                    ncv = ncv + 1
+                }
+                if kind == "timeout" { tmo = gx(g, ms) }
+                if kind == "else" { has_else = true }
+            }
+            _ => {}
+        }
+        a = a.next
+    }
+    k := g.staten
+    g.staten = g.staten + 1
+    g.states = push(g.states, k)
+    wln(g, "    if (rt_cancelled()) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_CANCEL; }")
+    wln(g, "    fr->state = " + itoa(k) + ";")
+    wln(g, "    { RtChan *_sc[" + itoa(ncv) + "];")
+    j := 0
+    cv := cvs
+    for cv != nil {
+        wln(g, "      _sc[" + itoa(j) + "] = " + cv.v + ";")
+        j = j + 1
+        cv = cv.next
+    }
+    he := "0"
+    if has_else { he = "1" }
+    wln(g, "      if (rt_select_poll(_sc, " + itoa(ncv) + ", " + tmo + ", " + he
+        + ", task) == RT_PENDING) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; } }")
+    wln(g, "    s" + itoa(k) + ": ;")
+    wln(g, "    if (rt_cancelled()) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_CANCEL; }")
+    // dispatch: recv slot j -> arm at recv position j; TMO/ELSE specials
+    lend := "L" + itoa(g.labeln)
+    g.labeln = g.labeln + 1
+    alabs := mkslice(str, check.nl_len(arms))
+    aidx := 0
+    a = arms
+    for a != nil {
+        alabs[aidx] = "L" + itoa(g.labeln)
+        g.labeln = g.labeln + 1
+        aidx = aidx + 1
+        a = a.next
+    }
+    wln(g, "    switch ((int)rt_select_arm(task)) {")
+    j = 0
+    aidx = 0
+    tmo_arm := -1
+    else_arm := -1
+    a = arms
+    for a != nil {
+        match a.v {
+            parser.Node.SArm{kind} => {
+                if kind == "recv" {
+                    wln(g, "      case " + itoa(j) + ": goto " + alabs[aidx] + ";")
+                    j = j + 1
+                }
+                if kind == "timeout" { tmo_arm = aidx }
+                if kind == "else" { else_arm = aidx }
+            }
+            _ => {}
+        }
+        aidx = aidx + 1
+        a = a.next
+    }
+    if tmo_arm >= 0 {
+        wln(g, "      case RT_SEL_TMO: goto " + alabs[tmo_arm] + ";")
+    }
+    if else_arm >= 0 {
+        wln(g, "      case RT_SEL_ELSE: goto " + alabs[else_arm] + ";")
+    }
+    wln(g, "      default: goto " + lend + ";")
+    wln(g, "    }")
+    aidx = 0
+    a = arms
+    for a != nil {
+        match a.v {
+            parser.Node.SArm{kind, bind, body} => {
+                wln(g, "    " + alabs[aidx] + ": ;")
+                if kind == "recv" && len(bind) > 0 {
+                    fd := gfslot(g, bind, "int64_t")
+                    check.env_set(g.env, bind, check.t_int(g.ck))
+                    wln(g, "    fr->" + fd + " = rt_task_data(task);")
+                }
+                check.env_push(g.env)
+                check.env_push(g.fsl)
+                gfblk(g, body)
+                check.env_pop(g.fsl)
+                check.env_pop(g.env)
+                wln(g, "    goto " + lend + ";")
+            }
+            _ => {}
+        }
+        aidx = aidx + 1
+        a = a.next
+    }
+    wln(g, "    " + lend + ": ;")
+}
+
+// stmt inside a suspendable fn (Rust fstmt)
+fn gfstmt(g: mut G, s: ref parser.Node) {
+    if s == nil { return }
+    match s {
+        parser.Node.Let{name, ty, init} => {
+            t := check.t_unk(g.ck)
+            if ty != nil { t = gty(g, ty) }
+            if ty == nil { t = xty(g, init) }
+            ct := gcty(g, t)
+            fd := gfslot(g, name, ct)
+            check.env_set(g.env, name, t)
+            if len(g_call_susp(g, init)) > 0 {
+                gfsusp_go(g, init, 1, fd, "")
+            } else {
+                v := gx(g, init)
+                wln(g, "    fr->" + fd + " = " + v + ";")
+            }
+        }
+        parser.Node.Bind{name, init} => {
+            t := xty(g, init)
+            fd := gfslot(g, name, gcty(g, t))
+            check.env_set(g.env, name, t)
+            if len(g_call_susp(g, init)) > 0 {
+                gfsusp_go(g, init, 1, fd, "")
+            } else {
+                v := gx(g, init)
+                wln(g, "    fr->" + fd + " = " + v + ";")
+            }
+        }
+        parser.Node.Let2{names, call} => {
+            i := find(names, ",")
+            na := names
+            nb := ""
+            if i >= 0 {
+                na = substr(names, 0, i)
+                nb = substr(names, i + 1, len(names))
+            }
+            cn := ""
+            match call {
+                parser.Node.Call{f} => { cn = check.callee_name(f) }
+                _ => {}
+            }
+            qn := check.resolve_named(g.ck, cn)
+            susp := len(cn) > 0 && check.sl_has(g.ck.susp, qn)
+            fa := ""
+            fb := ""
+            vt := check.t_unk(g.ck)
+            fi := -1
+            if len(cn) > 0 { fi = gfn(g, cn) }
+            if fi >= 0 { vt = g.ck.fnsv[fi].ret1 }
+            if len(na) > 0 && na != "_" {
+                fa = gfslot(g, na, gcty(g, vt))
+                check.env_set(g.env, na, vt)
+            }
+            if len(nb) > 0 && nb != "_" {
+                fb = gfslot(g, nb, "int64_t")
+                check.env_set(g.env, nb, check.t_err(g.ck))
+            }
+            if susp {
+                match call {
+                    parser.Node.Call{args} => { gfsusp_call(g, qn, args, 3, fa, fb) }
+                    _ => {}
+                }
+                return
+            }
+            n := g.tmpn
+            g.tmpn = g.tmpn + 1
+            c := gx(g, call)
+            wln(g, "    { struct o_ret_" + cname(qn) + " _r" + itoa(n) + " = " + c + ";")
+            if len(fa) > 0 { wln(g, "      fr->" + fa + " = _r" + itoa(n) + ".val;") }
+            if len(fb) > 0 { wln(g, "      fr->" + fb + " = _r" + itoa(n) + ".err;") }
+            wln(g, "    }")
+        }
+        parser.Node.Assign{target, val} => {
+            if len(g_call_susp(g, val)) > 0 {
+                tc := gx(g, target)
+                match val {
+                    parser.Node.Call{f, args} => {
+                        sn := gsusp_name(g, f)
+                        if check.is_susp_builtin(sn) {
+                            gfsusp_leaf(g, sn, args, 2, tc, "")
+                        } else {
+                            gfsusp_call(g, sn, args, 2, tc, "")
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                t := gx(g, target)
+                v := gx(g, val)
+                wln(g, "    " + t + " = " + v + ";")
+            }
+        }
+        parser.Node.ExprStmt{e} => { gfstmt_expr(g, e) }
+        parser.Node.Defer{call} => {
+            g.defers = parser.ncons(call, g.defers)
+        }
+        parser.Node.Ret{vals} => {
+            // `return suspPair()` forwards [v, err] — desugar via two slots
+            if vals != nil && vals.next == nil && len(g_call_susp(g, vals.v)) > 0 {
+                cn := ""
+                match vals.v {
+                    parser.Node.Call{f} => { cn = check.callee_name(f) }
+                    _ => {}
+                }
+                fi := gfn(g, cn)
+                if fi >= 0 && g.ck.fnsv[fi].retk == 2 {
+                    pa := gfslot(g, "_pa" + itoa(g.hoistn), gcty(g, g.ck.fnsv[fi].ret1))
+                    g.hoistn = g.hoistn + 1
+                    pe := gfslot(g, "_pe" + itoa(g.hoistn), "int64_t")
+                    g.hoistn = g.hoistn + 1
+                    gdefers(g)
+                    qn := check.resolve_named(g.ck, cn)
+                    match vals.v {
+                        parser.Node.Call{args} => { gfsusp_call(g, qn, args, 3, pa, pe) }
+                        _ => {}
+                    }
+                    wln(g, "    fr->result = (struct o_ret_" + cname(g.cur)
+                        + "){ fr->" + pa + ", fr->" + pe + " };")
+                    gsusp_ret(g, "RT_READY")
+                    return
+                }
+            }
+            gdefers(g)
+            if vals != nil {
+                if g.retk == 2 && vals.next != nil {
+                    v := gx(g, vals.v)
+                    e2 := gx(g, vals.next.v)
+                    wln(g, "    fr->result = (struct o_ret_" + cname(g.cur)
+                        + "){ " + v + ", " + e2 + " };")
+                } else {
+                    v := gx(g, vals.v)
+                    wln(g, "    fr->result = " + v + ";")
+                }
+            }
+            gsusp_ret(g, "RT_READY")
+        }
+        parser.Node.If{cond, then, els} => {
+            c := gx(g, cond)
+            lelse := "L" + itoa(g.labeln)
+            g.labeln = g.labeln + 1
+            lend := "L" + itoa(g.labeln)
+            g.labeln = g.labeln + 1
+            wln(g, "    if (!(" + c + ")) goto " + lelse + ";")
+            check.env_push(g.env)
+            check.env_push(g.fsl)
+            gfblk(g, then)
+            check.env_pop(g.fsl)
+            check.env_pop(g.env)
+            wln(g, "    goto " + lend + ";")
+            wln(g, "    " + lelse + ": ;")
+            if els != nil {
+                check.env_push(g.env)
+                check.env_push(g.fsl)
+                if check.nk(els) == 23 {
+                    gfblk(g, els)
+                } else {
+                    gfstmt(g, els)
+                }
+                check.env_pop(g.fsl)
+                check.env_pop(g.env)
+            }
+            wln(g, "    " + lend + ": ;")
+        }
+        parser.Node.For{cond, body} => {
+            lhead := "L" + itoa(g.labeln)
+            g.labeln = g.labeln + 1
+            lend := "L" + itoa(g.labeln)
+            g.labeln = g.labeln + 1
+            c := gx(g, cond)
+            wln(g, "    " + lhead + ": ;")
+            wln(g, "    if (!(" + c + ")) goto " + lend + ";")
+            g.loops = push(g.loops, GLab{c: lhead, b: lend})
+            check.env_push(g.env)
+            check.env_push(g.fsl)
+            gfblk(g, body)
+            check.env_pop(g.fsl)
+            check.env_pop(g.env)
+            gpop_loop(g)
+            wln(g, "    goto " + lhead + ";")
+            wln(g, "    " + lend + ": ;")
+        }
+        parser.Node.Break => {
+            if len(g.loops) > 0 {
+                wln(g, "    goto " + g.loops[len(g.loops) - 1].b + ";")
+            }
+        }
+        parser.Node.Continue => {
+            if len(g.loops) > 0 {
+                wln(g, "    goto " + g.loops[len(g.loops) - 1].c + ";")
+            }
+        }
+        parser.Node.Scope{body} => {
+            i := len(g.sdecls)
+            g.sdecls = push(g.sdecls, "RtScope sc" + itoa(i) + ";")
+            wln(g, "    rt_scope_enter(&fr->sc" + itoa(i) + ");")
+            check.env_push(g.env)
+            check.env_push(g.fsl)
+            gfblk(g, body)
+            check.env_pop(g.fsl)
+            check.env_pop(g.env)
+            k := g.staten
+            g.staten = g.staten + 1
+            g.states = push(g.states, k)
+            wln(g, "    fr->state = " + itoa(k) + ";")
+            wln(g, "    if (rt_scope_join_poll(&fr->sc" + itoa(i)
+                + ", task) == RT_PENDING) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }")
+            wln(g, "    s" + itoa(k) + ": ;")
+            wln(g, "    { int64_t _e = rt_scope_finish(&fr->sc" + itoa(i) + ");")
+            wln(g, "      if (_e) { if (fr->sc" + itoa(i) + ".parent) { fr->sc" + itoa(i)
+                + ".parent->trapped = 1; fr->sc" + itoa(i) + ".parent->err = _e; } else { fprintf(stderr, \"trap %lld escaped top scope\\n\", (long long)_e); abort(); } } }")
+        }
+        parser.Node.Spawn{e} => { gspawn(g, e, false) }
+        parser.Node.Go{e} => { gspawn(g, e, false) }
+        parser.Node.SpawnBlocking{e} => { gspawn(g, e, true) }
+        parser.Node.Select{arms} => { gfselect(g, arms) }
+        parser.Node.Unsafe{body} => {
+            check.env_push(g.env)
+            check.env_push(g.fsl)
+            gfblk(g, body)
+            check.env_pop(g.fsl)
+            check.env_pop(g.env)
+        }
+        parser.Node.List{items} => {
+            l := items
+            for l != nil {
+                gfstmt(g, l.v)
+                l = l.next
+            }
+        }
+        _ => {}
+    }
+}
+
+// drop the innermost loop label (loop stack pop)
+fn gpop_loop(g: mut G) {
+    n := len(g.loops)
+    if n == 0 { return }
+    ys := mkslice(GLab, n - 1)
+    i := 0
+    for i < n - 1 {
+        ys[i] = g.loops[i]
+        i = i + 1
+    }
+    g.loops = ys
+}
+
+// ---------- fn emission (Rust func/func_frame/generate) ----------
+
+// ret kind of a Fn.ret node: 0 void / 1 single / 2 pair
+fn gretdk(g: mut G, ret: ref parser.Node) -> int {
+    if ret == nil { return 0 }
+    if check.nk(ret) == 23 { return 2 }
+    return 1
+}
+
+fn gret1(g: mut G, ret: ref parser.Node) -> int {
+    if ret == nil { return check.t_void(g.ck) }
+    if check.nk(ret) == 23 {
+        match ret {
+            parser.Node.List{items} => {
+                if items != nil { return gty(g, items.v) }
+            }
+            _ => {}
+        }
+        return check.t_unk(g.ck)
+    }
+    return gty(g, ret)
+}
+
+// C return type text (Rust ret_decl — externs degrade pairs to int64_t)
+fn gret_c(g: mut G, ret: ref parser.Node, name: str, is_oxl: bool) -> str {
+    k := gretdk(g, ret)
+    if k == 0 { return "void" }
+    if k == 1 { return gcty(g, gret1(g, ret)) }
+    if is_oxl { return "struct o_ret_" + cname(name) }
+    return "int64_t"
+}
+
+fn gparams(g: mut G, params: ref parser.NList) -> str {
+    s := ""
+    pl := params
+    for pl != nil {
+        match pl.v {
+            parser.Node.Param{name, ty} => {
+                if len(s) > 0 { s = s + ", " }
+                s = s + gcty(g, gty(g, ty)) + " " + name
+            }
+            _ => {}
+        }
+        pl = pl.next
+    }
+    if len(s) == 0 { return "void" }
+    return s
+}
+
+// frame path for a susp fn (Rust func_frame): struct o_frm_ + o_poll_ driver
+fn gframe(g: mut G, qn: str, params: ref parser.NList, ret: ref parser.Node,
+    body: ref parser.Node) {
+    g.inframe = 1
+    g.fsl = check.env_new()
+    check.env_push(g.fsl)
+    g.fdecls = mkslice(str, 0)
+    g.sdecls = mkslice(str, 0)
+    g.states = mkslice(int, 0)
+    g.staten = 1
+    g.loops = mkslice(GLab, 0)
+    g.defers = nil
+    check.env_push(g.env)
+    pfields := ""
+    pl := params
+    for pl != nil {
+        match pl.v {
+            parser.Node.Param{name, ty} => {
+                t := gty(g, ty)
+                pfields = pfields + " " + gcty(g, t) + " p_" + name + ";"
+                check.env_set(g.env, name, t)
+                check.env_set(g.fsl, name, -2)
+            }
+            _ => {}
+        }
+        pl = pl.next
+    }
+    res := ""
+    if g.retk == 1 { res = " " + gcty(g, gret1(g, ret)) + " result;" }
+    if g.retk == 2 { res = " struct o_ret_" + cname(qn) + " result;" }
+    wpush(g)
+    check.env_push(g.fsl)
+    gfblk(g, body)
+    check.env_pop(g.fsl)
+    gdefers(g)
+    wpop(g)
+    bodytxt := wjoin(g.wlast)
+    check.env_pop(g.env)
+    cases := "case 0: goto s0;"
+    i := 0
+    for i < len(g.states) {
+        cases = cases + " case " + itoa(g.states[i]) + ": goto s" + itoa(g.states[i]) + ";"
+        i = i + 1
+    }
+    fdj := ""
+    i = 0
+    for i < len(g.fdecls) {
+        fdj = fdj + g.fdecls[i] + " "
+        i = i + 1
+    }
+    sdj := ""
+    i = 0
+    for i < len(g.sdecls) {
+        sdj = sdj + g.sdecls[i] + " "
+        i = i + 1
+    }
+    ce := cname(qn)
+    g.fhead = push(g.fhead, "struct o_frm_" + ce
+        + " { RtScope *cur_scope; int state; RtFrame *child;" + res + pfields
+        + " " + fdj + " " + sdj + "};\nint o_poll_" + ce + "(RtFrame *_f, RtTask *task);\n")
+    g.fbody = push(g.fbody, "int o_poll_" + ce + "(RtFrame *_f, RtTask *task) {\n    struct o_frm_"
+        + ce + " *fr = (struct o_frm_" + ce + " *)_f;\n    RtScope *saved = tls_scope;\n    tls_scope = fr->cur_scope;\n    int _p;\n    switch (fr->state) { "
+        + cases + " default: tls_scope = saved; return RT_READY; }\n    s0: ;\n"
+        + bodytxt + "    fr->cur_scope = tls_scope; tls_scope = saved; return RT_READY;\n}\n")
+    g.inframe = 0
+}
+
+fn gfunc(g: mut G, i: int) {
+    if check.nk(g.its[i].node) != 24 { return }
+    match g.its[i].node {
+        parser.Node.Fn{name, params, ret, body} => {
+            qn := check.qname(g.its[i].mod, name)
+            g.ck.cur_mod = g.its[i].mod
+            g.cur = qn
+            g.retk = gretdk(g, ret)
+            g.defers = nil
+            if check.sl_has(g.ck.susp, qn) {
+                gframe(g, qn, params, ret, body)
+                if qn == "main" { g.maink = 1 }
+                return
+            }
+            wln(g, gret_c(g, ret, qn, true) + " o_f_" + cname(qn) + "("
+                + gparams(g, params) + ") {")
+            check.env_push(g.env)
+            pl := params
+            for pl != nil {
+                match pl.v {
+                    parser.Node.Param{name, ty} => {
+                        check.env_set(g.env, name, gty(g, ty))
+                    }
+                    _ => {}
+                }
+                pl = pl.next
+            }
+            gblk(g, body)
+            gdefers(g)
+            check.env_pop(g.env)
+            wln(g, "}\n")
+            if qn == "main" { g.maink = 2 }
+        }
+        _ => {}
+    }
+}
+
+// enum decl: payload structs + the tagged union (Rust generate pass 1)
+fn gemit_enum(g: mut G, i: int) {
+    if check.nk(g.its[i].node) != 29 { return }
+    match g.its[i].node {
+        parser.Node.Enum{name, vars} => {
+            qn := check.qname(g.its[i].mod, name)
+            members := ""
+            vi := 0
+            vl := vars
+            for vl != nil {
+                match vl.v {
+                    parser.Node.Variant{name} => {
+                        sn := qn + "." + name
+                        if collections.map_has(g.ck.structs, sn) {
+                            [si, err] = collections.map_get(g.ck.structs, sn)
+                            if err == nil {
+                                fields := g.ck.structsv[si].fields
+                                if fields != nil {
+                                    g.head = push(g.head, "struct o_s_" + cname(sn) + " {")
+                                    fl := fields
+                                    for fl != nil {
+                                        g.head = push(g.head, "    " + gcty(g, fl.v.t)
+                                            + " f_" + fl.v.n + ";")
+                                        fl = fl.next
+                                    }
+                                    g.head = push(g.head, "};\n")
+                                    members = members + " struct o_s_" + cname(sn)
+                                        + " v" + itoa(vi) + ";"
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                vi = vi + 1
+                vl = vl.next
+            }
+            if len(members) == 0 { members = " char _pad;" }
+            g.head = push(g.head, "struct o_en_" + cname(qn)
+                + " { int tag; union {" + members + " } u; };\n")
+        }
+        _ => {}
+    }
+}
+
+fn gemit_struct(g: mut G, i: int) {
+    if check.nk(g.its[i].node) != 26 { return }
+    match g.its[i].node {
+        parser.Node.Struct{name, fields} => {
+            g.ck.cur_mod = g.its[i].mod
+            qn := check.qname(g.its[i].mod, name)
+            g.head = push(g.head, "struct o_s_" + cname(qn) + " {")
+            fl := fields
+            for fl != nil {
+                match fl.v {
+                    parser.Node.FieldDef{name, ty} => {
+                        g.head = push(g.head, "    " + gcty(g, gty(g, ty))
+                            + " f_" + name + ";")
+                    }
+                    _ => {}
+                }
+                fl = fl.next
+            }
+            g.head = push(g.head, "};\n")
+        }
+        _ => {}
+    }
+}
+
+fn gemit_retstruct(g: mut G, i: int) {
+    if check.nk(g.its[i].node) != 24 { return }
+    match g.its[i].node {
+        parser.Node.Fn{ex, name, ret} => {
+            if ex { return }
+            if gretdk(g, ret) != 2 { return }
+            g.ck.cur_mod = g.its[i].mod
+            qn := check.qname(g.its[i].mod, name)
+            g.head = push(g.head, "struct o_ret_" + cname(qn) + " { "
+                + gcty(g, gret1(g, ret)) + " val; int64_t err; };")
+        }
+        _ => {}
+    }
+}
+
+fn gemit_static(g: mut G, i: int) {
+    if check.nk(g.its[i].node) != 10 { return }
+    match g.its[i].node {
+        parser.Node.Let{name, ty, init} => {
+            g.ck.cur_mod = g.its[i].mod
+            t := check.t_unk(g.ck)
+            if ty != nil { t = gty(g, ty) }
+            if ty == nil { t = xty(g, init) }
+            g.head = push(g.head, "static " + gcty(g, t) + " o_g_" + cname(name) + ";")
+        }
+        _ => {}
+    }
+}
+
+fn gemit_proto(g: mut G, i: int) {
+    if check.nk(g.its[i].node) != 24 { return }
+    match g.its[i].node {
+        parser.Node.Fn{ex, name, params, ret} => {
+            g.ck.cur_mod = g.its[i].mod
+            qn := check.qname(g.its[i].mod, name)
+            nm := name
+            if !ex { nm = "o_f_" + cname(qn) }
+            g.head = push(g.head, gret_c(g, ret, qn, !ex) + " " + nm + "("
+                + gparams(g, params) + ");\n")
+        }
+        _ => {}
+    }
+}
+
+// `o_fnv_wrap_<qn>` — zero-env wrapper over a named fn (Rust fnv_wraps pass)
+fn gemit_fnv(g: mut G) {
+    fl := g.fnv
+    for fl != nil {
+        n := fl.v
+        [fi, err] = collections.map_get(g.ck.fns, n)
+        if err == nil {
+            sig := g.ck.fnsv[fi]
+            ret_c := "void"
+            if sig.retk == 1 { ret_c = gcty(g, sig.ret1) }
+            psig := ""
+            argl := ""
+            il := sig.params
+            i := 0
+            for il != nil {
+                psig = psig + ", " + gcty(g, il.v) + " a" + itoa(i)
+                if i > 0 { argl = argl + ", " }
+                argl = argl + "a" + itoa(i)
+                i = i + 1
+                il = il.next
+            }
+            callee := n
+            if sig.is_extern == 0 { callee = "o_f_" + cname(n) }
+            ret_kw := "return "
+            if ret_c == "void" { ret_kw = "" }
+            g.clpro = push(g.clpro, "static " + ret_c + " o_fnv_wrap_" + cname(n)
+                + "(void* _e" + psig + ") { " + ret_kw + callee + "(" + argl + "); }\n")
+        }
+        fl = fl.next
+    }
+}
+
+fn genall(g: mut G) -> str {
+    g.head = push(g.head, "#include \"rt.h\"\n\n")
+    i := 0
+    for i < len(g.its) { gemit_enum(g, i); i = i + 1 }
+    i = 0
+    for i < len(g.its) { gemit_struct(g, i); i = i + 1 }
+    i = 0
+    for i < len(g.its) { gemit_retstruct(g, i); i = i + 1 }
+    i = 0
+    for i < len(g.its) { gemit_static(g, i); i = i + 1 }
+    i = 0
+    for i < len(g.its) { gemit_proto(g, i); i = i + 1 }
+    // fn bodies — g.w is the `out` buffer throughout
+    g.w = mkslice(str, 0)
+    i = 0
+    for i < len(g.its) {
+        if check.nk(g.its[i].node) == 24 {
+            match g.its[i].node {
+                parser.Node.Fn{ex} => {
+                    if !ex { gfunc(g, i) }
+                }
+                _ => {}
+            }
+        }
+        i = i + 1
+    }
+    g.out = g.w
+    gemit_fnv(g)
+    // global initializers run inside oxl_main's prologue
+    i = 0
+    for i < len(g.its) {
+        if check.nk(g.its[i].node) == 10 {
+            match g.its[i].node {
+                parser.Node.Let{name, init} => {
+                    g.ck.cur_mod = g.its[i].mod
+                    v := gx(g, init)
+                    g.ginit = push(g.ginit, "    o_g_" + cname(name) + " = " + v + ";")
+                }
+                _ => {}
+            }
+        }
+        i = i + 1
+    }
+    oxlmain := ""
+    if g.testm == 1 {
+        // test mode: scope-wrap each top-level test_ fn (Rust test_mode)
+        tb := "void oxl_main(void) {\n" + wjoin(g.ginit)
+        i = 0
+        id := 0
+        for i < len(g.its) {
+            if check.nk(g.its[i].node) == 24 {
+                match g.its[i].node {
+                    parser.Node.Fn{name} => {
+                        if len(name) > 5 && substr(name, 0, 5) == "test_" {
+                            qn := check.qname(g.its[i].mod, name)
+                            cn := cname(qn)
+                            sid := itoa(id)
+                            tb = tb + "    { RtScope _t" + sid
+                                + "; rt_scope_enter(&_t" + sid + "); "
+                            if check.sl_has(g.ck.susp, qn) {
+                                tb = tb + "struct o_frm_" + cn + " *_fr = (struct o_frm_"
+                                    + cn + " *)rt_task_new(o_poll_" + cn
+                                    + ", (int64_t)sizeof(struct o_frm_" + cn
+                                    + "));\n      rt_run_root((RtFrame *)_fr); "
+                            } else {
+                                tb = tb + "o_f_" + cn + "(); "
+                            }
+                            tb = tb + "int _e" + sid + " = rt_scope_try(&_t" + sid
+                                + ");\n      rt_print_str(rt_str(\"  " + name
+                                + " ... \")); rt_println_str(rt_str(_e" + sid
+                                + " ? \"FAIL\" : \"ok\")); }\n"
+                            id = id + 1
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            i = i + 1
+        }
+        oxlmain = tb + "}\n"
+    }
+    if g.testm == 0 && g.maink == 1 {
+        oxlmain = "void oxl_main(void) {\n" + wjoin(g.ginit)
+            + "    struct o_frm_main *_rt = (struct o_frm_main *)rt_task_new(o_poll_main, (int64_t)sizeof(struct o_frm_main));\n    rt_run_root((RtFrame *)_rt); }\n"
+    }
+    if g.testm == 0 && g.maink == 2 {
+        oxlmain = "void oxl_main(void) {\n" + wjoin(g.ginit) + "    o_f_main(); }\n"
+    }
+    return wjoin(g.head) + wjoin(g.tramp) + wjoin(g.fhead) + wjoin(g.clpro)
+        + wjoin(g.fbody) + wjoin(g.out) + oxlmain + wjoin(g.clbod)
+}
+
+// ---------- driver ----------
+
+fn main() {
+    testm := 0
+    file := ""
+    ai := 1
+    for ai < argc() {
+        a := argv(ai)
+        if a == "--test" { testm = 1 } else { file = a }
+        ai = ai + 1
+    }
+    if len(file) == 0 {
+        println("usage: codegen [--test] <file.oxl>")
+        exit(1)
+    }
+    r := check.check_file(file)
+    if len(r.ck.diags) > 0 {
+        i := 0
+        for i < len(r.ck.diags) {
+            d := r.ck.diags[i]
+            println("error [" + d.kind + "] " + d.msg)
+            i = i + 1
+        }
+        exit(1)
+    }
+    g := new(G)
+    g.ck = r.ck
+    g.its = r.items
+    g.fidx = collections.map_new()
+    i := 0
+    for i < len(g.its) {
+        if check.nk(g.its[i].node) == 24 {
+            match g.its[i].node {
+                parser.Node.Fn{name} => {
+                    collections.map_set(g.fidx, check.qname(g.its[i].mod, name), i)
+                }
+                _ => {}
+            }
+        }
+        i = i + 1
+    }
+    g.env = check.env_new()
+    g.benv = check.env_new()
+    g.fsl = check.env_new()
+    g.w = mkslice(str, 0)
+    g.wst = nil
+    g.wlast = mkslice(str, 0)
+    g.head = mkslice(str, 0)
+    g.out = mkslice(str, 0)
+    g.tramp = mkslice(str, 0)
+    g.fhead = mkslice(str, 0)
+    g.fbody = mkslice(str, 0)
+    g.clpro = mkslice(str, 0)
+    g.clbod = mkslice(str, 0)
+    g.ginit = mkslice(str, 0)
+    g.defers = nil
+    g.fnv = nil
+    g.fdecls = mkslice(str, 0)
+    g.sdecls = mkslice(str, 0)
+    g.states = mkslice(int, 0)
+    g.loops = mkslice(GLab, 0)
+    g.tmpn = 0
+    g.scopen = 0
+    g.cln = 0
+    g.staten = 0
+    g.labeln = 0
+    g.hoistn = 0
+    g.retk = 0
+    g.cur = ""
+    g.inframe = 0
+    g.maink = 0
+    g.testm = testm
+    print(genall(g))
+}
