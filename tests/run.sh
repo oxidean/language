@@ -236,6 +236,12 @@ echo "== a3 buffered channels =="
 out=$("$OXL" run tests/chanbuf.oxl)
 [ "$(tail -1 <<<"$out")" = "chanbuf done" ] || { echo "FAIL chanbuf: $out"; exit 1; }
 
+echo "== fmt check =="
+# the whole .oxl corpus must be canonically formatted
+if ! "$OXL" fmt --check $(find stdlib bootstrap tests examples -name '*.oxl' | sort); then
+    echo "FAIL fmt: run \`oxl fmt -w\` on the corpus"; exit 1
+fi
+
 echo "== http pilot =="
 work=$(mktemp -d)
 "$OXL" build examples/http-crud-sqlite/main.oxl -o "$work/httpsrv"

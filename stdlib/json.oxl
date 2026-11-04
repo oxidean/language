@@ -8,7 +8,6 @@
 //
 // Numbers are ints only; string escapes handle \" \\ \n \t. That covers
 // the pilot and config-file cases; floats/unicode escapes are v1 work.
-
 struct Json {
     kind: int,
     key: str,
@@ -17,7 +16,7 @@ struct Json {
     f: float,
     b: bool,
     child: own Json,
-    next: own Json
+    next: own Json,
 }
 
 fn jnull() -> own Json {
@@ -93,7 +92,6 @@ fn jget(obj: ref Json, key: str) -> own Json {
 }
 
 // ---------- serialize ----------
-
 fn jescape(s: str) -> str {
     out := ""
     i := 0
@@ -171,11 +169,7 @@ fn tojson(j: ref Json) -> str {
 }
 
 // ---------- parse ----------
-
-struct JCur {
-    src: str,
-    pos: int
-}
+struct JCur { src: str, pos: int }
 
 fn jskipws(p: mut JCur) {
     for p.pos < len(p.src) {
@@ -226,7 +220,7 @@ fn jparse_num(p: mut JCur) -> own Json {
     for p.pos < len(p.src) {
         c := byteat(p.src, p.pos)
         // digits, sign, '.', exponent
-        if (c >= 48 && c <= 57) || c == 45 || c == 43 {
+        if c >= 48 && c <= 57 || c == 45 || c == 43 {
             p.pos = p.pos + 1
             continue
         }

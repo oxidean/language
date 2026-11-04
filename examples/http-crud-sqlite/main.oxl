@@ -5,9 +5,10 @@
 //   oxl run examples/http-crud-sqlite/main.oxl
 //   curl localhost:8080/items             → list rows
 //   curl -d 'widget' localhost:8080/items → insert row
-
 import "std/http"
+
 import "std/json"
+
 import "std/strings"
 
 // one shared connection for the whole process — sqlite's serialized

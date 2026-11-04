@@ -3,10 +3,7 @@
 // byte-level iteration. Import with `import "std/strings"`.
 
 /// StrList is the split()-style result list: own-linked nodes.
-struct StrList {
-    v: str
-    next: own StrList
-}
+struct StrList { v: str, next: own StrList }
 
 /// does s start with pre?
 fn startswith(s: str, pre: str) -> bool {

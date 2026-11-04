@@ -3,7 +3,6 @@
 //
 //   oxl run examples/cli/main.oxl -- Jesse extra
 //   → "hello, Jesse" / "2 args after name"
-
 fn greet(name: str) -> str {
     return "hello, " + name
 }

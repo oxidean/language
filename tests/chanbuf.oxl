@@ -17,7 +17,7 @@ fn main() {
         spawn producer(c, done)
         time.sleep_ms(30) // producer must be parked on send #4
         v := recv(c)
-        assert(v == 1)   // FIFO: oldest first; frees the 4th send
+        assert(v == 1) // FIFO: oldest first; frees the 4th send
         assert(recv(done) == 1)
         assert(recv(c) == 2)
         assert(recv(c) == 3)
@@ -42,13 +42,21 @@ fn main() {
     send(c3, 6)
     scope {
         select {
-            v := recv(c3) => { got = v }
-            else => { got = -1 }
+            v := recv(c3) => {
+                got = v
+            }
+            else => {
+                got = -1
+            }
         }
         assert(got == 5)
         select {
-            v := recv(c3) => { got = v }
-            timeout(50) => { got = -1 }
+            v := recv(c3) => {
+                got = v
+            }
+            timeout(50) => {
+                got = -1
+            }
         }
         assert(got == 6)
         println("chanbuf select ok")

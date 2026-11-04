@@ -116,7 +116,7 @@ stdlib grows further.
 
 `items/e1-lsp-hover.md`. The remaining DX gap.
 
-### Task E2: AST-printer formatter [not started]
+### Task E2: AST-printer formatter [done]
 
 `items/e2-ast-fmt.md`. Replaces the lexical normalizer with a real
 pretty-printer over the AST. Cheap once B-landed (could even be written

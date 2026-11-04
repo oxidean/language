@@ -7,17 +7,24 @@
 //
 // `h.route` is dispatched per request on the blocking pool; whatever it
 // returns is sent as a text/plain 200 response.
-
 extern fn socket(domain: int, ty: int, proto: int) -> int
+
 extern fn bind(fd: int, addr: ref sockaddr, len: int) -> int
+
 extern fn listen(fd: int, backlog: int) -> int
+
 extern fn accept(fd: int, addr: mut sockaddr, len: mut intp) -> int
+
 extern fn read(fd: int, buf: mut void, n: int) -> int
+
 extern fn write(fd: int, buf: cstr, n: int) -> int
+
 extern fn close(fd: int) -> int
+
 extern fn setsockopt(fd: int, lvl: int, opt: int, v: ref intp, n: int) -> int
 
-struct sockaddr { a: int, b: int }   // 16 bytes: sockaddr_in fits
+struct sockaddr { a: int, b: int } // 16 bytes: sockaddr_in fits
+
 struct intp { v: int }
 
 /// request handler — implement `route` on your app struct and pass it
@@ -25,8 +32,7 @@ struct intp { v: int }
 interface Handler { route(method: str, path: str, body: str) -> str }
 
 fn http_ok(body: str) -> str {
-    return "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: "
-        + itoa(len(body)) + "\r\n\r\n" + body
+    return "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: " + itoa(len(body)) + "\r\n\r\n" + body
 }
 
 fn handle_conn(h: Handler, fd: int) {
@@ -58,17 +64,17 @@ fn handle_conn(h: Handler, fd: int) {
 
 /// listen+serve on port; dispatches `h.route` per request
 fn serve(port: int, h: Handler) {
-    srv := socket(2, 1, 0)            // AF_INET, SOCK_STREAM
+    srv := socket(2, 1, 0) // AF_INET, SOCK_STREAM
     one := new(intp)
     one.v = 1
-    setsockopt(srv, 1, 2, one, 4)     // SOL_SOCKET, SO_REUSEADDR
+    setsockopt(srv, 1, 2, one, 4) // SOL_SOCKET, SO_REUSEADDR
 
     addr := new(sockaddr)
     // sockaddr_in: family (host order) | port (network order) | addr | zero
-    poke8(addr, 0, 2)                 // sin_family = AF_INET (LE pair 02 00)
+    poke8(addr, 0, 2) // sin_family = AF_INET (LE pair 02 00)
     poke8(addr, 1, 0)
-    poke16(addr, 2, port)             // sin_port = htons(port)
-    poke32(addr, 4, 0)                // sin_addr = INADDR_ANY
+    poke16(addr, 2, port) // sin_port = htons(port)
+    poke32(addr, 4, 0) // sin_addr = INADDR_ANY
     bind(srv, addr, 16)
     listen(srv, 64)
     println("listening on :" + itoa(port))

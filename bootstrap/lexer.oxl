@@ -1,6 +1,5 @@
 // bootstrap/lexer.oxl — token dump driver over bootstrap/lexlib.
 //   oxl run bootstrap/lexer.oxl -- examples/hello.oxl
-
 import "lexlib"
 
 fn main() {

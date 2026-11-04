@@ -8,35 +8,90 @@
 // AST-subset boundary: the bootstrap parser does not produce generics
 // (fn f[T any]), interface decls, select arms, closures, import aliases,
 // or float literals — files using them fail parse-side before checking.
-
 import "lexlib"
+
 import "parser"
+
 import "std/collections"
+
 import "std/strings"
 
 // ---------- interned types ----------
+fn k_unk() -> int {
+    return 0
+}
 
-fn k_unk() -> int { return 0 }
-fn k_void() -> int { return 1 }
-fn k_int() -> int { return 2 }
-fn k_str() -> int { return 3 }
-fn k_bool() -> int { return 4 }
-fn k_err() -> int { return 5 }
-fn k_cstr() -> int { return 6 }
-fn k_float() -> int { return 7 }
-fn k_chan() -> int { return 8 }
-fn k_own() -> int { return 9 }
-fn k_ref() -> int { return 10 }
-fn k_mut() -> int { return 11 }
-fn k_slice() -> int { return 12 }
-fn k_fn() -> int { return 13 }
-fn k_var() -> int { return 14 }
-fn k_struct() -> int { return 15 }
-fn k_enum() -> int { return 16 }
-fn k_shared() -> int { return 17 }
+fn k_void() -> int {
+    return 1
+}
+
+fn k_int() -> int {
+    return 2
+}
+
+fn k_str() -> int {
+    return 3
+}
+
+fn k_bool() -> int {
+    return 4
+}
+
+fn k_err() -> int {
+    return 5
+}
+
+fn k_cstr() -> int {
+    return 6
+}
+
+fn k_float() -> int {
+    return 7
+}
+
+fn k_chan() -> int {
+    return 8
+}
+
+fn k_own() -> int {
+    return 9
+}
+
+fn k_ref() -> int {
+    return 10
+}
+
+fn k_mut() -> int {
+    return 11
+}
+
+fn k_slice() -> int {
+    return 12
+}
+
+fn k_fn() -> int {
+    return 13
+}
+
+fn k_var() -> int {
+    return 14
+}
+
+fn k_struct() -> int {
+    return 15
+}
+
+fn k_enum() -> int {
+    return 16
+}
+
+fn k_shared() -> int {
+    return 17
+}
 
 // one pool record; i/r are ty handles (-1 unused), args an int list
 struct T { k: int, i: int, args: own IList, r: int, name: str }
+
 struct IList { v: int, next: own IList }
 
 fn icons(v: int, next: own IList) -> own IList {
@@ -45,6 +100,7 @@ fn icons(v: int, next: own IList) -> own IList {
     c.next = next
     return c
 }
+
 fn irev(l: own IList) -> own IList {
     let out: own IList = nil
     for l != nil {
@@ -55,6 +111,7 @@ fn irev(l: own IList) -> own IList {
     }
     return out
 }
+
 fn ilen(l: ref IList) -> int {
     n := 0
     for l != nil {
@@ -65,8 +122,8 @@ fn ilen(l: ref IList) -> int {
 }
 
 // ---------- tables ----------
+struct FEnt { n: str, t: int } // (field/variant-arg name, ty)
 
-struct FEnt { n: str, t: int }            // (field/variant-arg name, ty)
 struct FList { v: own FEnt, next: own FList }
 
 fn fcons(n: str, t: int, next: own FList) -> own FList {
@@ -77,10 +134,13 @@ fn fcons(n: str, t: int, next: own FList) -> own FList {
     c.next = next
     return c
 }
+
 // deep copy — the same field list is shared between the struct
 // registry and the enum variant entry; each needs its own cells
 fn fclone(l: ref FList) -> own FList {
-    if l == nil { return nil }
+    if l == nil {
+        return nil
+    }
     e := new(FEnt)
     e.n = l.v.n
     e.t = l.v.t
@@ -89,6 +149,7 @@ fn fclone(l: ref FList) -> own FList {
     c.next = fclone(l.next)
     return c
 }
+
 fn frev(l: own FList) -> own FList {
     let out: own FList = nil
     for l != nil {
@@ -99,14 +160,18 @@ fn frev(l: own FList) -> own FList {
     }
     return out
 }
+
 // ty of field `n`, or -1
 fn ffind(l: ref FList, n: str) -> int {
     for l != nil {
-        if l.v.n == n { return l.v.t }
+        if l.v.n == n {
+            return l.v.t
+        }
         l = l.next
     }
     return -1
 }
+
 fn flen(l: ref FList) -> int {
     n := 0
     for l != nil {
@@ -115,15 +180,20 @@ fn flen(l: ref FList) -> int {
     }
     return n
 }
+
 fn fall_positional(l: ref FList) -> bool {
     // all fields named fN — positional-payload ctor
     for l != nil {
         w := l.v.n
-        if len(w) < 2 || byteat(w, 0) != 102 { return false }
+        if len(w) < 2 || byteat(w, 0) != 102 {
+            return false
+        }
         i := 1
         for i < len(w) {
             c := byteat(w, i)
-            if c < 48 || c > 57 { return false }
+            if c < 48 || c > 57 {
+                return false
+            }
             i = i + 1
         }
         l = l.next
@@ -131,10 +201,13 @@ fn fall_positional(l: ref FList) -> bool {
     return true
 }
 
-struct SEnt { n: str, fields: own FList }  // struct entry
-struct EVar { n: str, fields: own FList }  // one variant
+struct SEnt { n: str, fields: own FList } // struct entry
+
+struct EVar { n: str, fields: own FList } // one variant
+
 struct VList { v: own EVar, next: own VList }
-struct EEnt { n: str, vars: own VList }    // enum entry
+
+struct EEnt { n: str, vars: own VList } // enum entry
 
 fn vcons(n: str, fields: own FList, next: own VList) -> own VList {
     c := new(VList)
@@ -144,6 +217,7 @@ fn vcons(n: str, fields: own FList, next: own VList) -> own VList {
     c.next = next
     return c
 }
+
 fn vrev(l: own VList) -> own VList {
     let out: own VList = nil
     for l != nil {
@@ -154,63 +228,73 @@ fn vrev(l: own VList) -> own VList {
     }
     return out
 }
+
 // variant lookup is inlined at each call site — `vl` walks `vars` until
 // `vl.v.n` matches (ref returns are banned, so this can't be a helper)
-
 struct FnSig {
-    params: own IList   // ty handles
-    retk: int           // 0 void, 1 one, 2 pair
-    ret1: int           // ty handle for retk 1/2
-    is_extern: int
+    params: own IList, // ty handles
+    retk: int, // 0 void, 1 one, 2 pair
+    ret1: int, // ty handle for retk 1/2
+    is_extern: int,
 }
 
 struct SList { v: str, next: own SList }
+
 fn scons(v: str, next: own SList) -> own SList {
     c := new(SList)
     c.v = v
     c.next = next
     return c
 }
+
 fn sl_has(ll: ref SList, ss: str) -> bool {
     for ll != nil {
-        if ll.v == ss { return true }
+        if ll.v == ss {
+            return true
+        }
         ll = ll.next
     }
     return false
 }
 
 struct Edge { a: str, b: str, next: own Edge }
+
 struct DBox { kind: str, msg: str }
+
 struct ClChk { callees: own SList, seeded: int, next: own ClChk }
+
 struct It { node: own parser.Node, mod: str }
+
 struct Scope { m: own collections.Map }
+
 struct Env { scopes: []Scope }
+
 struct Loader { items: []It }
 
 struct Ck {
-    tyv: []T                            // interned type records
-    fns: own collections.Map            // name -> idx into fnsv
-    fnsv: []FnSig
-    structs: own collections.Map        // name -> idx into structsv
-    structsv: []SEnt
-    enums: own collections.Map          // name -> idx into enumsv
-    enumsv: []EEnt
-    globals: own collections.Map        // name -> ty handle
-    diags: []DBox
-    edges: own Edge                     // caller -> callee call graph
-    susp: own SList                     // suspend-capable fn names
-    loaded: own SList                   // resolved import paths
-    fnvals: own SList                   // named fns used as values
-    cur_fn: str
-    cur_mod: str                        // module stem while checking
-    retk: int                           // current fn's return kind
-    ret1: int
-    in_let2: int
-    in_cl: int                            // inside `{ |..| }` — ret feeds cl_ret
-    cl_ret: int                           // inferred closure return ty (-1 none)
-    clcks: own ClChk                      // deferred closure susp checks
-    loop_depth: int
-    nerr: int
+    tyv: []T, // interned type records
+    fns: own collections.Map, // name -> idx into fnsv
+    fnsv: []FnSig,
+    structs: own collections.Map, // name -> idx into structsv
+    structsv: []SEnt,
+    enums: own collections.Map, // name -> idx into enumsv
+    enumsv: []EEnt,
+    globals: own collections.Map, // name -> ty handle
+    diags: []DBox,
+    edges: own Edge, // caller -> callee call graph
+    susp: own SList, // suspend-capable fn names
+    loaded: own SList, // resolved import paths
+    fnvals: own SList, // named fns used as values
+    cur_fn: str,
+    cur_mod: str, // module stem while checking
+    retk: int, // current fn's return kind
+    ret1: int,
+    in_let2: int,
+    in_cl: int, // inside `{ |..| }` — ret feeds cl_ret
+    cl_ret: int, // inferred closure return ty (-1 none)
+    clcks: own ClChk, // deferred closure susp checks
+    loop_depth: int,
+    nerr: int,
 }
 
 fn env_new() -> own Env {
@@ -218,28 +302,36 @@ fn env_new() -> own Env {
     e.scopes = push(e.scopes, Scope{m: collections.map_new()})
     return new(e)
 }
+
 fn env_push(e: mut Env) {
     e.scopes = push(e.scopes, Scope{m: collections.map_new()})
 }
+
 fn env_pop(e: mut Env) {
     e.scopes = e.scopes[0:len(e.scopes) - 1]
 }
+
 fn env_set(e: mut Env, n: str, t: int) {
     collections.map_set(e.scopes[len(e.scopes) - 1].m, n, t)
 }
+
 // ty handle or -1
 fn env_get(ck: ref Ck, e: ref Env, n: str) -> int {
     i := len(e.scopes) - 1
     for i >= 0 {
         if collections.map_has(e.scopes[i].m, n) {
             [v, err] = collections.map_get(e.scopes[i].m, n)
-            if err == nil { return v }
+            if err == nil {
+                return v
+            }
         }
         i = i - 1
     }
     if collections.map_has(ck.globals, n) {
         [v2, err2] = collections.map_get(ck.globals, n)
-        if err2 == nil { return v2 }
+        if err2 == nil {
+            return v2
+        }
     }
     return -1
 }
@@ -250,24 +342,52 @@ fn diag(ck: mut Ck, kind: str, msg: str) {
 }
 
 // ---------- ty handles ----------
-
 fn tm(ck: mut Ck, k: int, i: int, args: own IList, r: int, name: str) -> int {
     ck.tyv = push(ck.tyv, T{k: k, i: i, args: args, r: r, name: name})
     return len(ck.tyv) - 1
 }
-fn tk(ck: mut Ck, k: int) -> int { return tm(ck, k, -1, nil, -1, "") }
-fn tn(ck: mut Ck, k: int, name: str) -> int { return tm(ck, k, -1, nil, -1, name) }
-fn ti(ck: mut Ck, k: int, i: int) -> int { return tm(ck, k, i, nil, -1, "") }
-fn t_int(ck: mut Ck) -> int { return tk(ck, k_int()) }
-fn t_str(ck: mut Ck) -> int { return tk(ck, k_str()) }
-fn t_bool(ck: mut Ck) -> int { return tk(ck, k_bool()) }
-fn t_err(ck: mut Ck) -> int { return tk(ck, k_err()) }
-fn t_void(ck: mut Ck) -> int { return tk(ck, k_void()) }
-fn t_unk(ck: mut Ck) -> int { return tk(ck, k_unk()) }
+
+fn tk(ck: mut Ck, k: int) -> int {
+    return tm(ck, k, -1, nil, -1, "")
+}
+
+fn tn(ck: mut Ck, k: int, name: str) -> int {
+    return tm(ck, k, -1, nil, -1, name)
+}
+
+fn ti(ck: mut Ck, k: int, i: int) -> int {
+    return tm(ck, k, i, nil, -1, "")
+}
+
+fn t_int(ck: mut Ck) -> int {
+    return tk(ck, k_int())
+}
+
+fn t_str(ck: mut Ck) -> int {
+    return tk(ck, k_str())
+}
+
+fn t_bool(ck: mut Ck) -> int {
+    return tk(ck, k_bool())
+}
+
+fn t_err(ck: mut Ck) -> int {
+    return tk(ck, k_err())
+}
+
+fn t_void(ck: mut Ck) -> int {
+    return tk(ck, k_void())
+}
+
+fn t_unk(ck: mut Ck) -> int {
+    return tk(ck, k_unk())
+}
 
 fn il_eq(ck: ref Ck, a: ref IList, b: ref IList) -> bool {
     for a != nil && b != nil {
-        if !ty_eq(ck, a.v, b.v) { return false }
+        if !ty_eq(ck, a.v, b.v) {
+            return false
+        }
         a = a.next
         b = b.next
     }
@@ -275,45 +395,91 @@ fn il_eq(ck: ref Ck, a: ref IList, b: ref IList) -> bool {
 }
 
 fn ty_eq(ck: ref Ck, a: int, b: int) -> bool {
-    if a == b { return true }
+    if a == b {
+        return true
+    }
     ta := ck.tyv[a]
     tb := ck.tyv[b]
-    if ta.k != tb.k { return false }
-    if ta.name != tb.name { return false }
+    if ta.k != tb.k {
+        return false
+    }
+    if ta.name != tb.name {
+        return false
+    }
     if ta.i >= 0 || tb.i >= 0 {
-        if ta.i < 0 || tb.i < 0 { return false }
-        if !ty_eq(ck, ta.i, tb.i) { return false }
+        if ta.i < 0 || tb.i < 0 {
+            return false
+        }
+        if !ty_eq(ck, ta.i, tb.i) {
+            return false
+        }
     }
     if ta.r >= 0 || tb.r >= 0 {
-        if ta.r < 0 || tb.r < 0 { return false }
-        if !ty_eq(ck, ta.r, tb.r) { return false }
+        if ta.r < 0 || tb.r < 0 {
+            return false
+        }
+        if !ty_eq(ck, ta.r, tb.r) {
+            return false
+        }
     }
     return il_eq(ck, ta.args, tb.args)
 }
 
 fn ty_name(ck: ref Ck, t: int) -> str {
     k := ck.tyv[t].k
-    if k == k_unk() { return "?" }
-    if k == k_int() { return "int" }
-    if k == k_float() { return "float" }
-    if k == k_bool() { return "bool" }
-    if k == k_str() { return "str" }
-    if k == k_cstr() { return "cstr" }
-    if k == k_void() { return "void" }
-    if k == k_err() { return "err" }
-    if k == k_chan() { return "chan" }
-    if k == k_shared() { return "shared" }
-    if k == k_var() || k == k_struct() || k == k_enum() { return ck.tyv[t].name }
-    if k == k_own() { return "own " + ty_name(ck, ck.tyv[t].i) }
-    if k == k_ref() { return "ref " + ty_name(ck, ck.tyv[t].i) }
-    if k == k_mut() { return "mut " + ty_name(ck, ck.tyv[t].i) }
-    if k == k_slice() { return "[]" + ty_name(ck, ck.tyv[t].i) }
+    if k == k_unk() {
+        return "?"
+    }
+    if k == k_int() {
+        return "int"
+    }
+    if k == k_float() {
+        return "float"
+    }
+    if k == k_bool() {
+        return "bool"
+    }
+    if k == k_str() {
+        return "str"
+    }
+    if k == k_cstr() {
+        return "cstr"
+    }
+    if k == k_void() {
+        return "void"
+    }
+    if k == k_err() {
+        return "err"
+    }
+    if k == k_chan() {
+        return "chan"
+    }
+    if k == k_shared() {
+        return "shared"
+    }
+    if k == k_var() || k == k_struct() || k == k_enum() {
+        return ck.tyv[t].name
+    }
+    if k == k_own() {
+        return "own " + ty_name(ck, ck.tyv[t].i)
+    }
+    if k == k_ref() {
+        return "ref " + ty_name(ck, ck.tyv[t].i)
+    }
+    if k == k_mut() {
+        return "mut " + ty_name(ck, ck.tyv[t].i)
+    }
+    if k == k_slice() {
+        return "[]" + ty_name(ck, ck.tyv[t].i)
+    }
     if k == k_fn() {
         s := "fn("
         l := ck.tyv[t].args
         first := true
         for l != nil {
-            if !first { s = s + ", " }
+            if !first {
+                s = s + ", "
+            }
             first = false
             s = s + ty_name(ck, l.v)
             l = l.next
@@ -332,20 +498,26 @@ fn ty_name(ck: ref Ck, t: int) -> str {
 fn assignable(ck: mut Ck, want: int, got: int) {
     wk := ck.tyv[want].k
     gk := ck.tyv[got].k
-    if wk == k_unk() || gk == k_unk() { return }
+    if wk == k_unk() || gk == k_unk() {
+        return
+    }
     ok := ty_eq(ck, want, got)
     if !ok && wk == k_own() {
         // `own T` accepts `own ?` (untyped boxes like mkbuf)
-        ok = gk == k_own() && ck.tyv[got].i >= 0
-            && ck.tyv[ck.tyv[got].i].k == k_unk()
+        ok = gk == k_own() && ck.tyv[got].i >= 0 && ck.tyv[ck.tyv[got].i].k == k_unk()
     }
-    if !ok && wk == k_cstr() { ok = gk == k_str() }
-    if !ok && wk == k_err() { ok = gk == k_int() }
-    if !ok && wk == k_int() { ok = gk == k_err() }
+    if !ok && wk == k_cstr() {
+        ok = gk == k_str()
+    }
+    if !ok && wk == k_err() {
+        ok = gk == k_int()
+    }
+    if !ok && wk == k_int() {
+        ok = gk == k_err()
+    }
     if !ok && gk == k_err() {
         // nil is the null pointer for owned/borrowed refs, chans, slices
-        ok = wk == k_own() || wk == k_ref() || wk == k_mut()
-            || wk == k_chan() || wk == k_slice() || wk == k_shared()
+        ok = wk == k_own() || wk == k_ref() || wk == k_mut() || wk == k_chan() || wk == k_slice() || wk == k_shared()
     }
     if !ok && wk == k_ref() {
         if gk == k_own() || gk == k_mut() || gk == k_ref() {
@@ -354,8 +526,7 @@ fn assignable(ck: mut Ck, want: int, got: int) {
     }
     if !ok && (wk == k_ref() || wk == k_mut()) {
         // `ref T`/`mut T` accept `own ?` (untyped boxes like mkbuf)
-        ok = gk == k_own() && ck.tyv[got].i >= 0
-            && ck.tyv[ck.tyv[got].i].k == k_unk()
+        ok = gk == k_own() && ck.tyv[got].i >= 0 && ck.tyv[ck.tyv[got].i].k == k_unk()
     }
     if !ok && wk == k_mut() {
         if gk == k_own() || gk == k_mut() {
@@ -363,15 +534,13 @@ fn assignable(ck: mut Ck, want: int, got: int) {
         }
     }
     if !ok {
-        diag(ck, "type", "expected `" + ty_name(ck, want)
-            + "`, found `" + ty_name(ck, got) + "`")
+        diag(ck, "type", "expected `" + ty_name(ck, want) + "`, found `" + ty_name(ck, got) + "`")
     }
 }
 
 fn is_word(ck: ref Ck, t: int) -> bool {
     k := ck.tyv[t].k
-    return k == k_int() || k == k_bool() || k == k_chan() || k == k_own()
-        || k == k_shared()
+    return k == k_int() || k == k_bool() || k == k_chan() || k == k_own() || k == k_shared()
 }
 
 // ---------- node helpers ----------
@@ -379,64 +548,66 @@ fn is_word(ck: ref Ck, t: int) -> bool {
 // node tag — one compiler-checked mapping for every `kind()` use site
 fn nk(n: ref parser.Node) -> int {
     i := match n {
-        parser.Node.JInt(_) => 0,
-        parser.Node.JFloat(_) => 42,
-        parser.Node.JStr(_) => 1,
-        parser.Node.Name(_) => 2,
-        parser.Node.Ty(_) => 3,
-        parser.Node.NamedField{name} => 4,
-        parser.Node.Param{name} => 5,
-        parser.Node.FieldDef{name} => 6,
-        parser.Node.Lit{obj} => 7,
-        parser.Node.Call{f} => 8,
-        parser.Node.Field{obj} => 9,
-        parser.Node.Let{name} => 10,
-        parser.Node.Ret{vals} => 11,
-        parser.Node.Break => 12,
-        parser.Node.Continue => 13,
-        parser.Node.Scope{body} => 14,
-        parser.Node.Spawn{e} => 15,
-        parser.Node.SpawnBlocking{e} => 16,
-        parser.Node.Go{e} => 17,
-        parser.Node.Let2{names} => 18,
-        parser.Node.Bind{name} => 19,
-        parser.Node.ExprStmt{e} => 20,
-        parser.Node.If{cond} => 21,
-        parser.Node.For{cond} => 22,
-        parser.Node.List{items} => 23,
-        parser.Node.Fn{name} => 24,
-        parser.Node.Import{path} => 25,
-        parser.Node.Struct{name} => 26,
-        parser.Node.Skip{text} => 27,
-        parser.Node.Root{items} => 28,
-        parser.Node.Enum{name} => 29,
-        parser.Node.Variant{name} => 30,
-        parser.Node.As{e} => 31,
-        parser.Node.Match{e} => 32,
-        parser.Node.MArm{pat} => 33,
-        parser.Node.Pat{path} => 34,
-        parser.Node.PatWild => 35,
-        parser.Node.PatLit{v} => 36,
-        parser.Node.Assign{target} => 37,
-        parser.Node.Index{obj} => 38,
-        parser.Node.Slice{obj} => 39,
-        parser.Node.Defer{call} => 40,
-        parser.Node.Unsafe{body} => 41,
-        parser.Node.Select{arms} => 43,
-        parser.Node.SArm{kind} => 44,
-        parser.Node.Closure{params} => 45,
-        parser.Node.PatBind{name} => 46,
-        _ => -1,
+        parser.Node.JInt(_) => 0
+        parser.Node.JFloat(_) => 42
+        parser.Node.JStr(_) => 1
+        parser.Node.Name(_) => 2
+        parser.Node.Ty(_) => 3
+        parser.Node.NamedField{name} => 4
+        parser.Node.Param{name} => 5
+        parser.Node.FieldDef{name} => 6
+        parser.Node.Lit{obj} => 7
+        parser.Node.Call{f} => 8
+        parser.Node.Field{obj} => 9
+        parser.Node.Let{name} => 10
+        parser.Node.Ret{vals} => 11
+        parser.Node.Break => 12
+        parser.Node.Continue => 13
+        parser.Node.Scope{body} => 14
+        parser.Node.Spawn{e} => 15
+        parser.Node.SpawnBlocking{e} => 16
+        parser.Node.Go{e} => 17
+        parser.Node.Let2{names} => 18
+        parser.Node.Bind{name} => 19
+        parser.Node.ExprStmt{e} => 20
+        parser.Node.If{cond} => 21
+        parser.Node.For{cond} => 22
+        parser.Node.List{items} => 23
+        parser.Node.Fn{name} => 24
+        parser.Node.Import{path} => 25
+        parser.Node.Struct{name} => 26
+        parser.Node.Skip{text} => 27
+        parser.Node.Root{items} => 28
+        parser.Node.Enum{name} => 29
+        parser.Node.Variant{name} => 30
+        parser.Node.As{e} => 31
+        parser.Node.Match{e} => 32
+        parser.Node.MArm{pat} => 33
+        parser.Node.Pat{path} => 34
+        parser.Node.PatWild => 35
+        parser.Node.PatLit{v} => 36
+        parser.Node.Assign{target} => 37
+        parser.Node.Index{obj} => 38
+        parser.Node.Slice{obj} => 39
+        parser.Node.Defer{call} => 40
+        parser.Node.Unsafe{body} => 41
+        parser.Node.Select{arms} => 43
+        parser.Node.SArm{kind} => 44
+        parser.Node.Closure{params} => 45
+        parser.Node.PatBind{name} => 46
+        _ => -1
     }
     return i
 }
 
 // `Node.Ty` payload string ("" when not a Ty node)
 fn ty_str(n: ref parser.Node) -> str {
-    if n == nil { return "" }
+    if n == nil {
+        return ""
+    }
     s := match n {
-        parser.Node.Ty(v) => v,
-        _ => "",
+        parser.Node.Ty(v) => v
+        _ => ""
     }
     return s
 }
@@ -444,14 +615,17 @@ fn ty_str(n: ref parser.Node) -> str {
 // callee name for Call nodes: `f()` bare or `a.b()` field path
 fn path_join(obj: ref parser.Node, name: str) -> str {
     b := callee_name(obj)
-    if len(b) == 0 { return "" }
+    if len(b) == 0 {
+        return ""
+    }
     return b + "." + name
 }
+
 fn callee_name(f: ref parser.Node) -> str {
     n := match f {
-        parser.Node.Name(v) => v,
-        parser.Node.Field{obj, name} => path_join(obj, name),
-        _ => "",
+        parser.Node.Name(v) => v
+        parser.Node.Field{obj, name} => path_join(obj, name)
+        _ => ""
     }
     return n
 }
@@ -471,7 +645,9 @@ fn last_dot(s: str) -> int {
     for i >= 0 {
         last = i
         i = find(substr(s, last + 1, len(s)), ".")
-        if i >= 0 { i = i + last + 1 }
+        if i >= 0 {
+            i = i + last + 1
+        }
     }
     return last
 }
@@ -482,27 +658,33 @@ fn last_slash(s: str) -> int {
     for i >= 0 {
         last = i
         i = find(substr(s, last + 1, len(s)), "/")
-        if i >= 0 { i = i + last + 1 }
+        if i >= 0 {
+            i = i + last + 1
+        }
     }
     return last
 }
 
 fn qname(mod: str, n: str) -> str {
-    if len(mod) == 0 { return n }
+    if len(mod) == 0 {
+        return n
+    }
     return mod + "." + n
 }
 
 // the Rust driver qualifies decls `mod.name` at load; lookups here try
 // `cur_mod.head` first for bare and dotted names alike
 fn resolve_named(ck: ref Ck, s: str) -> str {
-    if len(ck.cur_mod) == 0 { return s }
+    if len(ck.cur_mod) == 0 {
+        return s
+    }
     head := s
     i := find(s, ".")
-    if i >= 0 { head = substr(s, 0, i) }
+    if i >= 0 {
+        head = substr(s, 0, i)
+    }
     cand := ck.cur_mod + "." + head
-    if collections.map_has(ck.structs, cand)
-        || collections.map_has(ck.enums, cand)
-        || collections.map_has(ck.fns, cand) {
+    if collections.map_has(ck.structs, cand) || collections.map_has(ck.enums, cand) || collections.map_has(ck.fns, cand) {
         return ck.cur_mod + "." + s
     }
     return s
@@ -510,14 +692,22 @@ fn resolve_named(ck: ref Ck, s: str) -> str {
 
 // parse a `Node.Ty` string into a ty handle
 fn ty_parse(ck: mut Ck, s: str) -> int {
-    if len(s) == 0 { return t_unk(ck) }
+    if len(s) == 0 {
+        return t_unk(ck)
+    }
     i := find(s, " ")
     if i > 0 {
         q := substr(s, 0, i)
         rest := strings.trim(substr(s, i + 1, len(s)))
-        if q == "own" { return ti(ck, k_own(), ty_parse(ck, rest)) }
-        if q == "ref" { return ti(ck, k_ref(), ty_parse(ck, rest)) }
-        if q == "mut" { return ti(ck, k_mut(), ty_parse(ck, rest)) }
+        if q == "own" {
+            return ti(ck, k_own(), ty_parse(ck, rest))
+        }
+        if q == "ref" {
+            return ti(ck, k_ref(), ty_parse(ck, rest))
+        }
+        if q == "mut" {
+            return ti(ck, k_mut(), ty_parse(ck, rest))
+        }
     }
     if len(s) > 2 && substr(s, 0, 2) == "[]" {
         return ti(ck, k_slice(), ty_parse(ck, substr(s, 2, len(s))))
@@ -531,9 +721,14 @@ fn ty_parse(ck: mut Ck, s: str) -> int {
         j := 0
         for j < len(inner) {
             ch := byteat(inner, j)
-            if ch == 40 { d = d + 1 }
+            if ch == 40 {
+                d = d + 1
+            }
             if ch == 41 {
-                if d == 0 { close = j; break }
+                if d == 0 {
+                    close = j
+                    break
+                }
                 d = d - 1
             }
             j = j + 1
@@ -555,32 +750,60 @@ fn ty_parse(ck: mut Ck, s: str) -> int {
             a := 0
             j = 0
             for j <= len(argtxt) {
-                if j == len(argtxt) || (byteat(argtxt, j) == 44 && d == 0) {
+                if j == len(argtxt) || byteat(argtxt, j) == 44 && d == 0 {
                     args = icons(ty_parse(ck, strings.trim(substr(argtxt, a, j))), args)
                     a = j + 1
                 } else {
-                    if byteat(argtxt, j) == 40 { d = d + 1 }
-                    if byteat(argtxt, j) == 41 { d = d - 1 }
+                    if byteat(argtxt, j) == 40 {
+                        d = d + 1
+                    }
+                    if byteat(argtxt, j) == 41 {
+                        d = d - 1
+                    }
                 }
                 j = j + 1
             }
             args = irev(args)
         }
-        if ret < 0 { ret = t_void(ck) }
+        if ret < 0 {
+            ret = t_void(ck)
+        }
         return tm(ck, k_fn(), -1, args, ret, "")
     }
-    if s == "int" { return t_int(ck) }
-    if s == "float" { return tk(ck, k_float()) }
-    if s == "bool" { return t_bool(ck) }
-    if s == "str" { return t_str(ck) }
-    if s == "cstr" { return tk(ck, k_cstr()) }
-    if s == "void" { return t_void(ck) }
-    if s == "err" { return t_err(ck) }
-    if s == "chan" { return tk(ck, k_chan()) }
-    if s == "shared" { return tk(ck, k_shared()) }
+    if s == "int" {
+        return t_int(ck)
+    }
+    if s == "float" {
+        return tk(ck, k_float())
+    }
+    if s == "bool" {
+        return t_bool(ck)
+    }
+    if s == "str" {
+        return t_str(ck)
+    }
+    if s == "cstr" {
+        return tk(ck, k_cstr())
+    }
+    if s == "void" {
+        return t_void(ck)
+    }
+    if s == "err" {
+        return t_err(ck)
+    }
+    if s == "chan" {
+        return tk(ck, k_chan())
+    }
+    if s == "shared" {
+        return tk(ck, k_shared())
+    }
     n := resolve_named(ck, s)
-    if collections.map_has(ck.structs, n) { return tn(ck, k_struct(), n) }
-    if collections.map_has(ck.enums, n) { return tn(ck, k_enum(), n) }
+    if collections.map_has(ck.structs, n) {
+        return tn(ck, k_struct(), n)
+    }
+    if collections.map_has(ck.enums, n) {
+        return tn(ck, k_enum(), n)
+    }
     diag(ck, "check", "unknown type `" + s + "`")
     return t_unk(ck)
 }
@@ -588,23 +811,32 @@ fn ty_parse(ck: mut Ck, s: str) -> int {
 // variant ctor lookup `E.V` — returns the enum-table idx or -1
 fn enum_variant(ck: ref Ck, path: str) -> int {
     ld := last_dot(path)
-    if ld < 0 { return -1 }
+    if ld < 0 {
+        return -1
+    }
     en := resolve_named(ck, substr(path, 0, ld))
     vn := substr(path, ld + 1, len(path))
-    if !collections.map_has(ck.enums, en) { return -1 }
+    if !collections.map_has(ck.enums, en) {
+        return -1
+    }
     [ei, err] = collections.map_get(ck.enums, en)
-    if err != nil { return -1 }
+    if err != nil {
+        return -1
+    }
     vl := ck.enumsv[ei].vars
     for vl != nil {
-        if vl.v.n == vn { break }
+        if vl.v.n == vn {
+            break
+        }
         vl = vl.next
     }
-    if vl == nil { return -1 }
+    if vl == nil {
+        return -1
+    }
     return ei
 }
 
 // ---------- registration ----------
-
 fn reg_tynames(ck: mut Ck, its: []It) {
     // pass 0: type names first so self-refs and forward use resolve
     i := 0
@@ -624,7 +856,8 @@ fn reg_tynames(ck: mut Ck, its: []It) {
                     ck.enumsv = push(ck.enumsv, EEnt{n: en, vars: nil})
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         i = i + 1
     }
@@ -651,7 +884,8 @@ fn reg_variant(ck: mut Ck, en: str, ei: int, vars: ref parser.NList) {
                                 parser.Node.Param{name, ty} => {
                                     fields = fcons(name, ty_parse(ck, ty_str(ty)), fields)
                                 }
-                                _ => {}
+                                _ => {
+                                }
                             }
                         } else {
                             fields = fcons("f" + itoa(fi), ty_parse(ck, ty_str(al.v)), fields)
@@ -667,7 +901,8 @@ fn reg_variant(ck: mut Ck, en: str, ei: int, vars: ref parser.NList) {
                     out = vcons(name, fields, out)
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         vl = vl.next
     }
@@ -688,7 +923,8 @@ fn reg_struct(ck: mut Ck, sn: str, si: int, fields: ref parser.NList) {
                 }
                 out = fcons(name, t, out)
             }
-            _ => {}
+            _ => {
+            }
         }
         fl = fl.next
     }
@@ -704,17 +940,22 @@ fn reg_fields(ck: mut Ck, its: []It) {
                 en := qname(its[i].mod, name)
                 if collections.map_has(ck.enums, en) {
                     [ei, err] = collections.map_get(ck.enums, en)
-                    if err == nil { reg_variant(ck, en, ei, vars) }
+                    if err == nil {
+                        reg_variant(ck, en, ei, vars)
+                    }
                 }
             }
             parser.Node.Struct{name, fields} => {
                 sn := qname(its[i].mod, name)
                 if collections.map_has(ck.structs, sn) {
                     [si, err] = collections.map_get(ck.structs, sn)
-                    if err == nil { reg_struct(ck, sn, si, fields) }
+                    if err == nil {
+                        reg_struct(ck, sn, si, fields)
+                    }
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         i = i + 1
     }
@@ -723,7 +964,9 @@ fn reg_fields(ck: mut Ck, its: []It) {
 fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, params: ref parser.NList, ret: ref parser.Node) {
     // pass 2 fn: params + ret resolve into a signature
     qn := name
-    if !ex { qn = qname(mod, name) }
+    if !ex {
+        qn = qname(mod, name)
+    }
     let ps: own IList = nil
     pl := params
     for pl != nil {
@@ -731,7 +974,8 @@ fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, params: ref parser.NList, r
             parser.Node.Param{name, ty} => {
                 ps = icons(ty_parse(ck, ty_str(ty)), ps)
             }
-            _ => {}
+            _ => {
+            }
         }
         pl = pl.next
     }
@@ -747,9 +991,12 @@ fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, params: ref parser.NList, r
             match ret {
                 parser.Node.List{items} => {
                     rk = 2
-                    if items != nil { r1 = ty_parse(ck, ty_str(items.v)) }
+                    if items != nil {
+                        r1 = ty_parse(ck, ty_str(items.v))
+                    }
                 }
-                _ => {}
+                _ => {
+                }
             }
         }
     }
@@ -768,7 +1015,9 @@ fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, params: ref parser.NList, r
     }
     if ex {
         [idx, err2] = collections.map_get(ck.fns, qn)
-        if err2 == nil { ck.fnsv[idx].is_extern = 1 }
+        if err2 == nil {
+            ck.fnsv[idx].is_extern = 1
+        }
     }
 }
 
@@ -796,7 +1045,8 @@ fn reg_sigs(ck: mut Ck, its: []It) {
             parser.Node.Let{name, ty, init} => {
                 reg_global(ck, name, ty, init)
             }
-            _ => {}
+            _ => {
+            }
         }
         i = i + 1
     }
@@ -810,20 +1060,8 @@ fn register(ck: mut Ck, its: []It) {
 }
 
 // ---------- builtins ----------
-
 fn is_builtin(n: str) -> bool {
-    return n == "print" || n == "println" || n == "mkchan" || n == "send"
-        || n == "recv" || n == "close" || n == "sleep" || n == "new"
-        || n == "mkslice" || n == "push" || n == "assert" || n == "itoa"
-        || n == "argc" || n == "argv" || n == "len" || n == "byteat"
-        || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf"
-        || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32"
-        || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open"
-        || n == "sqlite_exec" || n == "sqlite_query" || n == "sqlite_close"
-        || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared"
-        || n == "sget" || n == "sset" || n == "scas" || n == "sadd"
-        || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi"
-        || n == "itof" || n == "atof" || n == "ftoa"
+    return n == "print" || n == "println" || n == "mkchan" || n == "send" || n == "recv" || n == "close" || n == "sleep" || n == "new" || n == "mkslice" || n == "push" || n == "assert" || n == "itoa" || n == "argc" || n == "argv" || n == "len" || n == "byteat" || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf" || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32" || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open" || n == "sqlite_exec" || n == "sqlite_query" || n == "sqlite_close" || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared" || n == "sget" || n == "sset" || n == "scas" || n == "sadd" || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi" || n == "itof" || n == "atof" || n == "ftoa"
 }
 
 fn is_susp_builtin(n: str) -> bool {
@@ -831,26 +1069,27 @@ fn is_susp_builtin(n: str) -> bool {
 }
 
 // ---------- expressions ----------
-
 fn expr(ck: mut Ck, e: ref parser.Node, env: mut Env) -> int {
-    if e == nil { return t_unk(ck) }
+    if e == nil {
+        return t_unk(ck)
+    }
     t := match e {
-        parser.Node.JInt(_) => t_int(ck),
-        parser.Node.JFloat(_) => tk(ck, k_float()),
-        parser.Node.JStr(_) => t_str(ck),
-        parser.Node.Name(n) => ident(ck, n, env),
-        parser.Node.Call{f, args} => call(ck, f, args, env),
-        parser.Node.Field{obj, name} => field_expr(ck, obj, name, env),
-        parser.Node.Un{op, e} => un_expr(ck, op, e, env),
-        parser.Node.Bin{op, l, r} => bin_expr(ck, op, l, r, env),
-        parser.Node.Lit{obj, fields} => lit_expr(ck, obj, fields, env),
-        parser.Node.As{e, ty} => as_expr(ck, e, ty, env),
-        parser.Node.Match{e, arms} => match_expr(ck, e, arms, env),
-        parser.Node.Closure{params, body} => closure_expr(ck, params, body, env),
-        parser.Node.Index{obj, idx} => index_expr(ck, obj, idx, env),
-        parser.Node.Slice{obj, lo, hi} => slice_expr(ck, obj, lo, hi, env),
-        parser.Node.Ty(_) => tylit_bad(ck),
-        _ => t_unk(ck),
+        parser.Node.JInt(_) => t_int(ck)
+        parser.Node.JFloat(_) => tk(ck, k_float())
+        parser.Node.JStr(_) => t_str(ck)
+        parser.Node.Name(n) => ident(ck, n, env)
+        parser.Node.Call{f, args} => call(ck, f, args, env)
+        parser.Node.Field{obj, name} => field_expr(ck, obj, name, env)
+        parser.Node.Un{op, e} => un_expr(ck, op, e, env)
+        parser.Node.Bin{op, l, r} => bin_expr(ck, op, l, r, env)
+        parser.Node.Lit{obj, fields} => lit_expr(ck, obj, fields, env)
+        parser.Node.As{e, ty} => as_expr(ck, e, ty, env)
+        parser.Node.Match{e, arms} => match_expr(ck, e, arms, env)
+        parser.Node.Closure{params, body} => closure_expr(ck, params, body, env)
+        parser.Node.Index{obj, idx} => index_expr(ck, obj, idx, env)
+        parser.Node.Slice{obj, lo, hi} => slice_expr(ck, obj, lo, hi, env)
+        parser.Node.Ty(_) => tylit_bad(ck)
+        _ => t_unk(ck)
     }
     return t
 }
@@ -862,10 +1101,16 @@ fn tylit_bad(ck: mut Ck) -> int {
 
 fn ident(ck: mut Ck, n: str, env: mut Env) -> int {
     // `nil`/`true`/`false` parse as Name in the bootstrap AST
-    if n == "nil" { return t_err(ck) }
-    if n == "true" || n == "false" { return t_bool(ck) }
+    if n == "nil" {
+        return t_err(ck)
+    }
+    if n == "true" || n == "false" {
+        return t_bool(ck)
+    }
     t := env_get(ck, env, n)
-    if t >= 0 { return t }
+    if t >= 0 {
+        return t
+    }
     qn := resolve_named(ck, n)
     if collections.map_has(ck.fns, qn) {
         [fi, err] = collections.map_get(ck.fns, qn)
@@ -876,7 +1121,9 @@ fn ident(ck: mut Ck, n: str, env: mut Env) -> int {
             } else {
                 ck.fnvals = scons(qn, ck.fnvals)
                 r1 := sig.ret1
-                if sig.retk == 0 { r1 = t_void(ck) }
+                if sig.retk == 0 {
+                    r1 = t_void(ck)
+                }
                 return tm(ck, k_fn(), -1, sig.params, r1, "")
             }
         }
@@ -900,7 +1147,9 @@ fn field_expr(ck: mut Ck, obj: ref parser.Node, name: str, env: mut Env) -> int 
             if err == nil {
                 vl := ck.enumsv[ei].vars
                 for vl != nil {
-                    if vl.v.n == name { break }
+                    if vl.v.n == name {
+                        break
+                    }
                     vl = vl.next
                 }
                 if vl == nil {
@@ -918,7 +1167,9 @@ fn field_expr(ck: mut Ck, obj: ref parser.Node, name: str, env: mut Env) -> int 
     t := expr(ck, obj, env)
     sn := ""
     tk2 := ck.tyv[t].k
-    if tk2 == k_struct() { sn = ck.tyv[t].name }
+    if tk2 == k_struct() {
+        sn = ck.tyv[t].name
+    }
     if tk2 == k_own() || tk2 == k_ref() || tk2 == k_mut() {
         inner := ck.tyv[t].i
         if inner >= 0 && ck.tyv[inner].k == k_struct() {
@@ -931,9 +1182,13 @@ fn field_expr(ck: mut Ck, obj: ref parser.Node, name: str, env: mut Env) -> int 
         }
         return t_unk(ck)
     }
-    if !collections.map_has(ck.structs, sn) { return t_unk(ck) }
+    if !collections.map_has(ck.structs, sn) {
+        return t_unk(ck)
+    }
     [si, err] = collections.map_get(ck.structs, sn)
-    if err != nil { return t_unk(ck) }
+    if err != nil {
+        return t_unk(ck)
+    }
     ft := ffind(ck.structsv[si].fields, name)
     if ft < 0 {
         diag(ck, "type", "`" + sn + "` has no field `" + name + "`")
@@ -956,7 +1211,8 @@ fn lit_fields(ck: mut Ck, path: str, want: ref FList, fields: ref parser.NList, 
                     assignable(ck, wt, gt)
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         fl = fl.next
     }
@@ -967,9 +1223,12 @@ fn lit_fields(ck: mut Ck, path: str, want: ref FList, fields: ref parser.NList, 
         for fl != nil {
             match fl.v {
                 parser.Node.NamedField{name, val} => {
-                    if name == w.v.n { found = true }
+                    if name == w.v.n {
+                        found = true
+                    }
                 }
-                _ => {}
+                _ => {
+                }
             }
             fl = fl.next
         }
@@ -991,7 +1250,9 @@ fn lit_expr(ck: mut Ck, obj: ref parser.Node, fields: ref parser.NList, env: mut
         en := substr(path, 0, ld)
         vl := ck.enumsv[ei].vars
         for vl != nil {
-            if vl.v.n == vn { break }
+            if vl.v.n == vn {
+                break
+            }
             vl = vl.next
         }
         want := vl.v.fields
@@ -1000,8 +1261,7 @@ fn lit_expr(ck: mut Ck, obj: ref parser.Node, fields: ref parser.NList, env: mut
         } else {
             given := nl_len(fields)
             if given != flen(want) {
-                diag(ck, "type", "`" + path + "` takes " + itoa(flen(want))
-                    + " payload field(s), found " + itoa(given))
+                diag(ck, "type", "`" + path + "` takes " + itoa(flen(want)) + " payload field(s), found " + itoa(given))
             } else {
                 lit_fields(ck, path, want, fields, env)
             }
@@ -1013,7 +1273,9 @@ fn lit_expr(ck: mut Ck, obj: ref parser.Node, fields: ref parser.NList, env: mut
         return t_unk(ck)
     }
     [si, err] = collections.map_get(ck.structs, path)
-    if err != nil { return t_unk(ck) }
+    if err != nil {
+        return t_unk(ck)
+    }
     lit_fields(ck, path, ck.structsv[si].fields, fields, env)
     return tn(ck, k_struct(), path)
 }
@@ -1023,7 +1285,9 @@ fn as_expr(ck: mut Ck, inner: ref parser.Node, ty: ref parser.Node, env: mut Env
     wt := ty_parse(ck, ty_str(ty))
     ok := ck.tyv[ot].k
     oname := ""
-    if ok == k_enum() { oname = ck.tyv[ot].name }
+    if ok == k_enum() {
+        oname = ck.tyv[ot].name
+    }
     if ok == k_own() {
         inner2 := ck.tyv[ot].i
         if inner2 >= 0 && ck.tyv[inner2].k == k_enum() {
@@ -1041,9 +1305,10 @@ fn as_expr(ck: mut Ck, inner: ref parser.Node, ty: ref parser.Node, env: mut Env
         diag(ck, "type", "`" + ck.tyv[wt].name + "` is not a variant of `" + oname + "`")
         return t_unk(ck)
     }
-    if ok == k_unk() || wk == k_unk() { return t_unk(ck) }
-    diag(ck, "type", "`as` casts enum values to variant payloads — `"
-        + ty_name(ck, ot) + " as " + ty_name(ck, wt) + "` invalid")
+    if ok == k_unk() || wk == k_unk() {
+        return t_unk(ck)
+    }
+    diag(ck, "type", "`as` casts enum values to variant payloads — `" + ty_name(ck, ot) + " as " + ty_name(ck, wt) + "` invalid")
     return t_unk(ck)
 }
 
@@ -1052,7 +1317,9 @@ fn index_expr(ck: mut Ck, obj: ref parser.Node, idx: ref parser.Node, env: mut E
     it := expr(ck, idx, env)
     assignable(ck, t_int(ck), it)
     ok := ck.tyv[ot].k
-    if ok == k_slice() { return ck.tyv[ot].i }
+    if ok == k_slice() {
+        return ck.tyv[ot].i
+    }
     if ok == k_own() || ok == k_ref() || ok == k_mut() {
         inner := ck.tyv[ot].i
         if inner >= 0 && ck.tyv[inner].k == k_slice() {
@@ -1067,13 +1334,21 @@ fn index_expr(ck: mut Ck, obj: ref parser.Node, idx: ref parser.Node, env: mut E
 
 fn slice_expr(ck: mut Ck, obj: ref parser.Node, lo: ref parser.Node, hi: ref parser.Node, env: mut Env) -> int {
     ot := expr(ck, obj, env)
-    if lo != nil { assignable(ck, t_int(ck), expr(ck, lo, env)) }
-    if hi != nil { assignable(ck, t_int(ck), expr(ck, hi, env)) }
+    if lo != nil {
+        assignable(ck, t_int(ck), expr(ck, lo, env))
+    }
+    if hi != nil {
+        assignable(ck, t_int(ck), expr(ck, hi, env))
+    }
     ok := ck.tyv[ot].k
-    if ok == k_slice() { return ot }
+    if ok == k_slice() {
+        return ot
+    }
     if ok == k_own() || ok == k_ref() || ok == k_mut() {
         inner := ck.tyv[ot].i
-        if inner >= 0 && ck.tyv[inner].k == k_slice() { return inner }
+        if inner >= 0 && ck.tyv[inner].k == k_slice() {
+            return inner
+        }
     }
     if ok != k_unk() {
         diag(ck, "type", "`[..]` on `" + ty_name(ck, ot) + "` — not a slice")
@@ -1087,7 +1362,9 @@ fn un_expr(ck: mut Ck, op: str, e: ref parser.Node, env: mut Env) -> int {
         assignable(ck, t_bool(ck), t)
         return t_bool(ck)
     }
-    if ck.tyv[t].k == k_float() { return t }
+    if ck.tyv[t].k == k_float() {
+        return t
+    }
     assignable(ck, t_int(ck), t)
     return t_int(ck)
 }
@@ -1121,7 +1398,9 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
         return t_bool(ck)
     }
     if op == "+" {
-        if lk == k_str() && rk == k_str() { return t_str(ck) }
+        if lk == k_str() && rk == k_str() {
+            return t_str(ck)
+        }
         if lk == k_float() || rk == k_float() {
             assignable(ck, tk(ck, k_float()), lt)
             assignable(ck, tk(ck, k_float()), rt)
@@ -1148,17 +1427,21 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
 }
 
 // ---------- match ----------
-
 fn pat_lit(ck: mut Ck, v: ref parser.Node, st: int, env: mut Env, sk: int, saw: []int) {
     // literal pattern: `1`, `"x"`, true/false; saw[0]=saw_t, saw[1]=saw_f
     lt := expr(ck, v, env)
     if sk == k_bool() && ck.tyv[lt].k == k_bool() {
         match v {
             parser.Node.Name(nm) => {
-                if nm == "true" { saw[0] = 1 }
-                if nm == "false" { saw[1] = 1 }
+                if nm == "true" {
+                    saw[0] = 1
+                }
+                if nm == "false" {
+                    saw[1] = 1
+                }
             }
-            _ => {}
+            _ => {
+            }
         }
         return
     }
@@ -1179,14 +1462,17 @@ fn pat_variant(ck: mut Ck, path: str, binds: ref parser.NList, en: str, covered:
     ven := ck.enumsv[vei].n
     vl := ck.enumsv[vei].vars
     for vl != nil {
-        if vl.v.n == vn { break }
+        if vl.v.n == vn {
+            break
+        }
         vl = vl.next
     }
     if len(en) == 0 || ven != en {
         se := en
-        if len(se) == 0 { se = "non-enum" }
-        diag(ck, "check", "`" + qpath + "` is a variant of `" + ven
-            + "` — scrutinee is `" + se + "`")
+        if len(se) == 0 {
+            se = "non-enum"
+        }
+        diag(ck, "check", "`" + qpath + "` is a variant of `" + ven + "` — scrutinee is `" + se + "`")
         return
     }
     if vl.v.fields == nil {
@@ -1199,8 +1485,7 @@ fn pat_variant(ck: mut Ck, path: str, binds: ref parser.NList, en: str, covered:
     covered.l = scons(vn, covered.l)
     if fall_positional(vl.v.fields) {
         if binds == nil || nl_len(binds) != flen(vl.v.fields) {
-            diag(ck, "check", "`" + qpath + "` takes " + itoa(flen(vl.v.fields))
-                + " binds, got " + itoa(nl_len(binds)))
+            diag(ck, "check", "`" + qpath + "` takes " + itoa(flen(vl.v.fields)) + " binds, got " + itoa(nl_len(binds)))
             return
         }
         wl := vl.v.fields
@@ -1208,9 +1493,12 @@ fn pat_variant(ck: mut Ck, path: str, binds: ref parser.NList, en: str, covered:
         for bl != nil && wl != nil {
             match bl.v {
                 parser.Node.Name(bn) => {
-                    if bn != "_" { env_set(env, bn, wl.v.t) }
+                    if bn != "_" {
+                        env_set(env, bn, wl.v.t)
+                    }
                 }
-                _ => {}
+                _ => {
+                }
             }
             wl = wl.next
             bl = bl.next
@@ -1230,7 +1518,8 @@ fn pat_variant(ck: mut Ck, path: str, binds: ref parser.NList, en: str, covered:
                     }
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         bl = bl.next
     }
@@ -1243,7 +1532,9 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
     st := expr(ck, scrut, env)
     sk := ck.tyv[st].k
     en := ""
-    if sk == k_enum() { en = ck.tyv[st].name }
+    if sk == k_enum() {
+        en = ck.tyv[st].name
+    }
     if sk == k_own() || sk == k_ref() || sk == k_mut() {
         inner := ck.tyv[st].i
         if inner >= 0 && ck.tyv[inner].k == k_enum() {
@@ -1253,7 +1544,9 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
     ei := -1
     if len(en) > 0 && collections.map_has(ck.enums, en) {
         [x, err] = collections.map_get(ck.enums, en)
-        if err == nil { ei = x }
+        if err == nil {
+            ei = x
+        }
     }
     cov := new(SListBox{l: nil})
     wild := false
@@ -1267,13 +1560,18 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
             parser.Node.MArm{pat, body} => {
                 env_push(env)
                 pk := nk(pat)
-                if pk == 35 { wild = true }
+                if pk == 35 {
+                    wild = true
+                }
                 if pk == 46 {
                     // Pattern::Bind — matches everything, binds scrutinee
                     wild = true
                     match pat {
-                        parser.Node.PatBind{name} => { env_set(env, name, st) }
-                        _ => {}
+                        parser.Node.PatBind{name} => {
+                            env_set(env, name, st)
+                        }
+                        _ => {
+                        }
                     }
                 }
                 if pk == 36 {
@@ -1281,7 +1579,8 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
                         parser.Node.PatLit{v} => {
                             pat_lit(ck, v, st, env, sk, saw)
                         }
-                        _ => {}
+                        _ => {
+                        }
                     }
                 }
                 if pk == 34 {
@@ -1289,7 +1588,8 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
                         parser.Node.Pat{path, binds} => {
                             pat_variant(ck, path, binds, en, cov, env)
                         }
-                        _ => {}
+                        _ => {
+                        }
                     }
                 }
                 if body != nil && nk(body) == 23 {
@@ -1298,7 +1598,8 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
                         parser.Node.List{items} => {
                             block(ck, items, env)
                         }
-                        _ => {}
+                        _ => {
+                        }
                     }
                 } else {
                     n_expr = n_expr + 1
@@ -1311,7 +1612,8 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
                 }
                 env_pop(env)
             }
-            _ => {}
+            _ => {
+            }
         }
         a = a.next
     }
@@ -1324,7 +1626,9 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
             vl := ck.enumsv[ei].vars
             for vl != nil {
                 if !sl_has(cov.l, vl.v.n) {
-                    if len(missing) > 0 { missing = missing + ", " }
+                    if len(missing) > 0 {
+                        missing = missing + ", "
+                    }
                     missing = missing + vl.v.n
                 }
                 vl = vl.next
@@ -1341,21 +1645,24 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
         }
     }
     if n_expr > 0 {
-        if result < 0 { return t_void(ck) }
+        if result < 0 {
+            return t_void(ck)
+        }
         return result
     }
     return t_void(ck)
 }
 
 // ---------- calls ----------
-
 fn call_kind(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) -> int {
     // `e.kind()` — enum tag accessor
     match f {
         parser.Node.Field{obj, name} => {
             ot := expr(ck, obj, env)
             ok := ck.tyv[ot].k
-            if ok == k_enum() { return t_int(ck) }
+            if ok == k_enum() {
+                return t_int(ck)
+            }
             if ok == k_own() {
                 inner := ck.tyv[ot].i
                 if inner >= 0 && ck.tyv[inner].k == k_enum() {
@@ -1367,7 +1674,8 @@ fn call_kind(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut En
             }
             return t_unk(ck)
         }
-        _ => {}
+        _ => {
+        }
     }
     return t_unk(ck)
 }
@@ -1383,7 +1691,9 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             en := ck.enumsv[ei].n
             vl := ck.enumsv[ei].vars
             for vl != nil {
-                if vl.v.n == vn { break }
+                if vl.v.n == vn {
+                    break
+                }
                 vl = vl.next
             }
             want := vl.v.fields
@@ -1393,8 +1703,7 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
                 given := nl_len(args)
                 wlen := flen(want)
                 if given != wlen {
-                    diag(ck, "type", "`" + name + "` takes " + itoa(wlen)
-                        + " payload field(s), found " + itoa(given))
+                    diag(ck, "type", "`" + name + "` takes " + itoa(wlen) + " payload field(s), found " + itoa(given))
                 } else {
                     wl := want
                     al := args
@@ -1410,7 +1719,9 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
         }
         // `e.kind()` — enum tag accessor
         if len(name) > 5 && substr(name, len(name) - 5, len(name)) == ".kind" {
-            if args == nil { return call_kind(ck, f, args, env) }
+            if args == nil {
+                return call_kind(ck, f, args, env)
+            }
         }
         // local fn value shadows a same-named fn or builtin
         lt := env_get(ck, env, name)
@@ -1418,7 +1729,9 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             return call_fnvalue(ck, ck.tyv[lt].args, ck.tyv[lt].r, args, env)
         }
         qn := resolve_named(ck, name)
-        if collections.map_has(ck.fns, qn) { add_edge(ck, qn) }
+        if collections.map_has(ck.fns, qn) {
+            add_edge(ck, qn)
+        }
         // ---------- builtin table ----------
         if qn == "print" || qn == "println" {
             if nl_len(args) != 1 {
@@ -1426,8 +1739,7 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             } else {
                 t := expr(ck, args.v, env)
                 tk2 := ck.tyv[t].k
-                if tk2 != k_str() && tk2 != k_int() && tk2 != k_bool()
-                    && tk2 != k_err() && tk2 != k_cstr() && tk2 != k_unk() {
+                if tk2 != k_str() && tk2 != k_int() && tk2 != k_bool() && tk2 != k_err() && tk2 != k_cstr() && tk2 != k_unk() {
                     diag(ck, "type", "cannot print `" + ty_name(ck, t) + "`")
                 }
             }
@@ -1437,7 +1749,9 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             if nl_len(args) > 1 {
                 diag(ck, "check", "`mkchan` takes at most one capacity arg")
             }
-            if args != nil { assignable(ck, t_int(ck), expr(ck, args.v, env)) }
+            if args != nil {
+                assignable(ck, t_int(ck), expr(ck, args.v, env))
+            }
             return tk(ck, k_chan())
         }
         if qn == "send" {
@@ -1447,13 +1761,14 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
                 assignable(ck, tk(ck, k_chan()), expr(ck, args.v, env))
                 vt := expr(ck, args.next.v, env)
                 if !is_word(ck, vt) {
-                    diag(ck, "own", "channels carry word-sized owned values (v0), not `"
-                        + ty_name(ck, vt) + "`")
+                    diag(ck, "own", "channels carry word-sized owned values (v0), not `" + ty_name(ck, vt) + "`")
                 }
             }
             return t_void(ck)
         }
-        if qn == "recv" { return t_int(ck) }
+        if qn == "recv" {
+            return t_int(ck)
+        }
         if qn == "close" {
             al := args
             for al != nil {
@@ -1463,7 +1778,9 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             return t_void(ck)
         }
         if qn == "sleep" {
-            if args != nil { assignable(ck, t_int(ck), expr(ck, args.v, env)) }
+            if args != nil {
+                assignable(ck, t_int(ck), expr(ck, args.v, env))
+            }
             return t_void(ck)
         }
         if qn == "new" {
@@ -1477,7 +1794,8 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
                                 return ti(ck, k_own(), tn(ck, k_struct(), sn))
                             }
                         }
-                        _ => {}
+                        _ => {
+                        }
                     }
                 }
                 t := expr(ck, a, env)
@@ -1487,15 +1805,23 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             return t_unk(ck)
         }
         if qn == "itoa" {
-            if args != nil { assignable(ck, t_int(ck), expr(ck, args.v, env)) }
+            if args != nil {
+                assignable(ck, t_int(ck), expr(ck, args.v, env))
+            }
             return t_str(ck)
         }
         if qn == "assert" {
-            if args != nil { assignable(ck, t_bool(ck), expr(ck, args.v, env)) }
+            if args != nil {
+                assignable(ck, t_bool(ck), expr(ck, args.v, env))
+            }
             return t_void(ck)
         }
-        if qn == "argc" { return t_int(ck) }
-        if qn == "argv" { return t_str(ck) }
+        if qn == "argc" {
+            return t_int(ck)
+        }
+        if qn == "argv" {
+            return t_str(ck)
+        }
         if qn == "len" {
             if args != nil {
                 t := expr(ck, args.v, env)
@@ -1520,7 +1846,8 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
                         parser.Node.Name(an) => {
                             et = ty_parse(ck, an)
                         }
-                        _ => {}
+                        _ => {
+                        }
                     }
                 } else if nk(a) == 3 {
                     et = ty_parse(ck, ty_str(a))
@@ -1538,7 +1865,9 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             return ti(ck, k_slice(), et)
         }
         if qn == "push" {
-            if args == nil { return t_unk(ck) }
+            if args == nil {
+                return t_unk(ck)
+            }
             st := expr(ck, args.v, env)
             if ck.tyv[st].k == k_slice() {
                 if args.next != nil {
@@ -1549,7 +1878,9 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
                 }
                 return st
             }
-            if ck.tyv[st].k == k_unk() { return st }
+            if ck.tyv[st].k == k_unk() {
+                return st
+            }
             diag(ck, "type", "`push` on `" + ty_name(ck, st) + "` — not a slice")
             return t_unk(ck)
         }
@@ -1562,19 +1893,27 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             return t_int(ck)
         }
         if qn == "ftoi" {
-            if args != nil { assignable(ck, tk(ck, k_float()), expr(ck, args.v, env)) }
+            if args != nil {
+                assignable(ck, tk(ck, k_float()), expr(ck, args.v, env))
+            }
             return t_int(ck)
         }
         if qn == "itof" {
-            if args != nil { assignable(ck, t_int(ck), expr(ck, args.v, env)) }
+            if args != nil {
+                assignable(ck, t_int(ck), expr(ck, args.v, env))
+            }
             return tk(ck, k_float())
         }
         if qn == "atof" {
-            if args != nil { assignable(ck, t_str(ck), expr(ck, args.v, env)) }
+            if args != nil {
+                assignable(ck, t_str(ck), expr(ck, args.v, env))
+            }
             return tk(ck, k_float())
         }
         if qn == "ftoa" {
-            if args != nil { assignable(ck, tk(ck, k_float()), expr(ck, args.v, env)) }
+            if args != nil {
+                assignable(ck, tk(ck, k_float()), expr(ck, args.v, env))
+            }
             return t_str(ck)
         }
         if qn == "substr" || qn == "bufstr" {
@@ -1647,7 +1986,9 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
                 expr(ck, al.v, env)
                 al = al.next
             }
-            if qn == "writefile" { return t_int(ck) }
+            if qn == "writefile" {
+                return t_int(ck)
+            }
             return t_void(ck)
         }
         if qn == "readfile" {
@@ -1688,23 +2029,23 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             return t_unk(ck)
         }
         [fi, err] = collections.map_get(ck.fns, qn)
-        if err != nil { return t_unk(ck) }
+        if err != nil {
+            return t_unk(ck)
+        }
         sig := ck.fnsv[fi]
         if sig.is_extern == 1 {
             al := args
             for al != nil {
                 t := expr(ck, al.v, env)
                 tk2 := ck.tyv[t].k
-                if tk2 != k_int() && tk2 != k_bool() && tk2 != k_cstr() && tk2 != k_str()
-                    && tk2 != k_own() && tk2 != k_chan() && tk2 != k_unk() {
+                if tk2 != k_int() && tk2 != k_bool() && tk2 != k_cstr() && tk2 != k_str() && tk2 != k_own() && tk2 != k_chan() && tk2 != k_unk() {
                     diag(ck, "ffi", "`" + ty_name(ck, t) + "` cannot cross the FFI boundary")
                 }
                 al = al.next
             }
         }
         if nl_len(args) != ilen(sig.params) {
-            diag(ck, "check", "`" + name + "` takes " + itoa(ilen(sig.params))
-                + " args, got " + itoa(nl_len(args)))
+            diag(ck, "check", "`" + name + "` takes " + itoa(ilen(sig.params)) + " args, got " + itoa(nl_len(args)))
         }
         wl := sig.params
         al := args
@@ -1714,8 +2055,12 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             wl = wl.next
             al = al.next
         }
-        if sig.retk == 0 { return t_void(ck) }
-        if sig.retk == 1 { return sig.ret1 }
+        if sig.retk == 0 {
+            return t_void(ck)
+        }
+        if sig.retk == 1 {
+            return sig.ret1
+        }
         if ck.in_let2 == 0 {
             diag(ck, "check", "`[T, err]` result must be bound with `[v, err] =` or returned")
         }
@@ -1749,19 +2094,30 @@ fn call_fnvalue(ck: mut Ck, ps: ref IList, r: int, args: ref parser.NList, env: 
 
 // ret kind for the `[T, err]` binding rules (-1 = not a declared call)
 fn call_retk(ck: mut Ck, e: ref parser.Node) -> int {
-    if e == nil { return -1 }
-    if nk(e) != 8 { return -1 }
+    if e == nil {
+        return -1
+    }
+    if nk(e) != 8 {
+        return -1
+    }
     match e {
         parser.Node.Call{f, args} => {
             n := callee_name(f)
-            if len(n) == 0 { return -1 }
+            if len(n) == 0 {
+                return -1
+            }
             qn := resolve_named(ck, n)
-            if !collections.map_has(ck.fns, qn) { return -1 }
+            if !collections.map_has(ck.fns, qn) {
+                return -1
+            }
             [fi, err] = collections.map_get(ck.fns, qn)
-            if err != nil { return -1 }
+            if err != nil {
+                return -1
+            }
             return ck.fnsv[fi].retk
         }
-        _ => {}
+        _ => {
+        }
     }
     return -1
 }
@@ -1773,16 +2129,18 @@ fn call_ret1(ck: mut Ck, e: ref parser.Node) -> int {
             qn := resolve_named(ck, callee_name(f))
             if collections.map_has(ck.fns, qn) {
                 [fi, err] = collections.map_get(ck.fns, qn)
-                if err == nil { return ck.fnsv[fi].ret1 }
+                if err == nil {
+                    return ck.fnsv[fi].ret1
+                }
             }
         }
-        _ => {}
+        _ => {
+        }
     }
     return -1
 }
 
 // ---------- statements ----------
-
 fn block(ck: mut Ck, items: ref parser.NList, env: mut Env) {
     env_push(env)
     l := items
@@ -1794,12 +2152,15 @@ fn block(ck: mut Ck, items: ref parser.NList, env: mut Env) {
 }
 
 fn block_node(ck: mut Ck, body: ref parser.Node, env: mut Env) {
-    if body == nil { return }
+    if body == nil {
+        return
+    }
     match body {
         parser.Node.List{items} => {
             block(ck, items, env)
         }
-        _ => {}
+        _ => {
+        }
     }
 }
 
@@ -1832,7 +2193,9 @@ fn stmt(ck: mut Ck, s: ref parser.Node, env: mut Env) {
                 an = substr(names, 0, i)
                 bn = substr(names, i + 1, len(names))
             }
-            if an != "_" { env_set(env, an, val_ty) }
+            if an != "_" {
+                env_set(env, an, val_ty)
+            }
             if bn == "_" {
                 diag(ck, "check", "cannot discard `err` — handle it or pass it up")
             } else if len(bn) > 0 {
@@ -1860,14 +2223,22 @@ fn stmt(ck: mut Ck, s: ref parser.Node, env: mut Env) {
                     diag(ck, "check", "`[T, err]` returns aren't supported in closures")
                 } else {
                     t0 := t_void(ck)
-                    if n0 == 1 { t0 = expr(ck, vals.v, env) }
-                    if ck.cl_ret < 0 { ck.cl_ret = t0 } else { assignable(ck, ck.cl_ret, t0) }
+                    if n0 == 1 {
+                        t0 = expr(ck, vals.v, env)
+                    }
+                    if ck.cl_ret < 0 {
+                        ck.cl_ret = t0
+                    } else {
+                        assignable(ck, ck.cl_ret, t0)
+                    }
                 }
                 return
             }
             n := nl_len(vals)
             if ck.retk == 0 {
-                if n > 0 { diag(ck, "check", "function returns void") }
+                if n > 0 {
+                    diag(ck, "check", "function returns void")
+                }
             } else if ck.retk == 1 {
                 if n != 1 {
                     diag(ck, "check", "expected one return value")
@@ -1875,25 +2246,25 @@ fn stmt(ck: mut Ck, s: ref parser.Node, env: mut Env) {
                     t := expr(ck, vals.v, env)
                     assignable(ck, ck.ret1, t)
                 }
-            } else {
-                if n == 2 {
-                    t := expr(ck, vals.v, env)
-                    assignable(ck, ck.ret1, t)
-                    e2 := expr(ck, vals.next.v, env)
-                    assignable(ck, t_err(ck), e2)
-                } else if n == 1 {
-                    ck.in_let2 = 1
-                    expr(ck, vals.v, env)
-                    ck.in_let2 = 0
-                    if call_retk(ck, vals.v) == 2 {
-                        rt1 := call_ret1(ck, vals.v)
-                        if rt1 >= 0 { assignable(ck, ck.ret1, rt1) }
-                    } else {
-                        diag(ck, "check", "`[T, err]` function must `return v, err` or forward a `[T, err]` call")
+            } else if n == 2 {
+                t := expr(ck, vals.v, env)
+                assignable(ck, ck.ret1, t)
+                e2 := expr(ck, vals.next.v, env)
+                assignable(ck, t_err(ck), e2)
+            } else if n == 1 {
+                ck.in_let2 = 1
+                expr(ck, vals.v, env)
+                ck.in_let2 = 0
+                if call_retk(ck, vals.v) == 2 {
+                    rt1 := call_ret1(ck, vals.v)
+                    if rt1 >= 0 {
+                        assignable(ck, ck.ret1, rt1)
                     }
                 } else {
-                    diag(ck, "check", "expected `return v, err`")
+                    diag(ck, "check", "`[T, err]` function must `return v, err` or forward a `[T, err]` call")
                 }
+            } else {
+                diag(ck, "check", "expected `return v, err`")
             }
         }
         parser.Node.If{cond, then, els} => {
@@ -1916,10 +2287,14 @@ fn stmt(ck: mut Ck, s: ref parser.Node, env: mut Env) {
             ck.loop_depth = ck.loop_depth - 1
         }
         parser.Node.Break => {
-            if ck.loop_depth == 0 { diag(ck, "check", "break/continue outside loop") }
+            if ck.loop_depth == 0 {
+                diag(ck, "check", "break/continue outside loop")
+            }
         }
         parser.Node.Continue => {
-            if ck.loop_depth == 0 { diag(ck, "check", "break/continue outside loop") }
+            if ck.loop_depth == 0 {
+                diag(ck, "check", "break/continue outside loop")
+            }
         }
         parser.Node.Scope{body} => {
             block_node(ck, body, env)
@@ -1960,9 +2335,12 @@ fn spawn_stmt(ck: mut Ck, e: ref parser.Node, env: mut Env) {
         match e {
             parser.Node.Call{f, args} => {
                 n := callee_name(f)
-                if len(n) > 0 { add_edge(ck, resolve_named(ck, n)) }
+                if len(n) > 0 {
+                    add_edge(ck, resolve_named(ck, n))
+                }
             }
-            _ => {}
+            _ => {
+            }
         }
         expr(ck, e, env)
         return
@@ -1984,7 +2362,9 @@ fn add_edge(ck: mut Ck, callee: str) {
 fn args_susp(ck: ref Ck, args: ref parser.NList) -> bool {
     al := args
     for al != nil {
-        if expr_susp(ck, al.v) { return true }
+        if expr_susp(ck, al.v) {
+            return true
+        }
         al = al.next
     }
     return false
@@ -1995,9 +2375,12 @@ fn lit_susp(ck: ref Ck, fields: ref parser.NList) -> bool {
     for fl != nil {
         match fl.v {
             parser.Node.NamedField{val} => {
-                if expr_susp(ck, val) { return true }
+                if expr_susp(ck, val) {
+                    return true
+                }
             }
-            _ => {}
+            _ => {
+            }
         }
         fl = fl.next
     }
@@ -2005,7 +2388,9 @@ fn lit_susp(ck: ref Ck, fields: ref parser.NList) -> bool {
 }
 
 fn match_susp(ck: ref Ck, scrut: ref parser.Node, arms: ref parser.NList) -> bool {
-    if expr_susp(ck, scrut) { return true }
+    if expr_susp(ck, scrut) {
+        return true
+    }
     a := arms
     for a != nil {
         match a.v {
@@ -2013,25 +2398,32 @@ fn match_susp(ck: ref Ck, scrut: ref parser.Node, arms: ref parser.NList) -> boo
                 if pat != nil && nk(pat) == 36 {
                     match pat {
                         parser.Node.PatLit{v} => {
-                            if expr_susp(ck, v) { return true }
+                            if expr_susp(ck, v) {
+                                return true
+                            }
                         }
-                        _ => {}
+                        _ => {
+                        }
                     }
                 }
                 if body != nil {
                     if nk(body) == 23 {
                         match body {
                             parser.Node.List{items} => {
-                                if block_susp(ck, items) { return true }
+                                if block_susp(ck, items) {
+                                    return true
+                                }
                             }
-                            _ => {}
+                            _ => {
+                            }
                         }
-                    } else {
-                        if expr_susp(ck, body) { return true }
+                    } else if expr_susp(ck, body) {
+                        return true
                     }
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         a = a.next
     }
@@ -2040,57 +2432,74 @@ fn match_susp(ck: ref Ck, scrut: ref parser.Node, arms: ref parser.NList) -> boo
 
 // structural seeds — scope sites and susp builtins in bodies
 fn expr_susp(ck: ref Ck, e: ref parser.Node) -> bool {
-    if e == nil { return false }
+    if e == nil {
+        return false
+    }
     s := match e {
-        parser.Node.Call{f, args} => call_seeds(ck, f, args),
-        parser.Node.Bin{l, r} => expr_susp(ck, l) || expr_susp(ck, r),
-        parser.Node.Un{e} => expr_susp(ck, e),
-        parser.Node.Field{obj} => expr_susp(ck, obj),
-        parser.Node.As{e} => expr_susp(ck, e),
-        parser.Node.Lit{fields} => lit_susp(ck, fields),
-        parser.Node.Match{e, arms} => match_susp(ck, e, arms),
-        parser.Node.Index{obj, idx} => expr_susp(ck, obj) || expr_susp(ck, idx),
-        parser.Node.Slice{obj, lo, hi} => expr_susp(ck, obj)
-            || expr_susp(ck, lo) || expr_susp(ck, hi),
-        _ => false,
+        parser.Node.Call{f, args} => call_seeds(ck, f, args)
+        parser.Node.Bin{l, r} => expr_susp(ck, l) || expr_susp(ck, r)
+        parser.Node.Un{e} => expr_susp(ck, e)
+        parser.Node.Field{obj} => expr_susp(ck, obj)
+        parser.Node.As{e} => expr_susp(ck, e)
+        parser.Node.Lit{fields} => lit_susp(ck, fields)
+        parser.Node.Match{e, arms} => match_susp(ck, e, arms)
+        parser.Node.Index{obj, idx} => expr_susp(ck, obj) || expr_susp(ck, idx)
+        parser.Node.Slice{obj, lo, hi} => expr_susp(ck, obj) || expr_susp(ck, lo) || expr_susp(ck, hi)
+        _ => false
     }
     return s
 }
 
 fn call_seeds(ck: ref Ck, f: ref parser.Node, args: ref parser.NList) -> bool {
     n := callee_name(f)
-    if is_susp_builtin(resolve_named(ck, n)) { return true }
+    if is_susp_builtin(resolve_named(ck, n)) {
+        return true
+    }
     // Rust sees qualified `mod.f` calls as plain Ident callees; a Field
     // callee here is either that (edge handles it) or an indirect call
     // through a fn-valued field — the latter may suspend
-    if nk(f) == 8 { return true }
-    if nk(f) == 9 && !collections.map_has(ck.fns, resolve_named(ck, n)) { return true }
+    if nk(f) == 8 {
+        return true
+    }
+    if nk(f) == 9 && !collections.map_has(ck.fns, resolve_named(ck, n)) {
+        return true
+    }
     return args_susp(ck, args)
 }
 
 fn block_susp(ck: ref Ck, items: ref parser.NList) -> bool {
     l := items
     for l != nil {
-        if stmt_susp(ck, l.v) { return true }
+        if stmt_susp(ck, l.v) {
+            return true
+        }
         l = l.next
     }
     return false
 }
 
 fn block_susp_node(ck: ref Ck, body: ref parser.Node) -> bool {
-    if body == nil { return false }
+    if body == nil {
+        return false
+    }
     b := match body {
-        parser.Node.List{items} => block_susp(ck, items),
-        _ => false,
+        parser.Node.List{items} => block_susp(ck, items)
+        _ => false
     }
     return b
 }
 
 fn if_susp(ck: ref Ck, cond: ref parser.Node, then: ref parser.Node, els: ref parser.Node) -> bool {
-    if expr_susp(ck, cond) { return true }
-    if block_susp_node(ck, then) { return true }
+    if expr_susp(ck, cond) {
+        return true
+    }
+    if block_susp_node(ck, then) {
+        return true
+    }
     if els != nil {
-        if nk(els) == 23 { return block_susp_node(ck, els) }
+        if nk(els) == 23 {
+            return block_susp_node(ck, els)
+        }
         return stmt_susp(ck, els)
     }
     return false
@@ -2099,7 +2508,9 @@ fn if_susp(ck: ref Ck, cond: ref parser.Node, then: ref parser.Node, els: ref pa
 fn ret_susp(ck: ref Ck, vals: ref parser.NList) -> bool {
     vl := vals
     for vl != nil {
-        if expr_susp(ck, vl.v) { return true }
+        if expr_susp(ck, vl.v) {
+            return true
+        }
         vl = vl.next
     }
     return false
@@ -2109,7 +2520,6 @@ fn ret_susp(ck: ref Ck, vals: ref parser.NList) -> bool {
 // port of `ExprKind::Closure` in oxl/src/check.rs (B4). Return type is
 // inferred from `return` stmts via ck.cl_ret; susp checks are deferred to
 // check_closures because the susp set only exists post-fixpoint.
-
 fn closure_expr(ck: mut Ck, params: ref parser.NList, body: ref parser.Node, env: mut Env) -> int {
     // deferred susp scan — collect callees + seeded before checking body
     cc := new(ClChk{callees: nil, seeded: 0, next: nil})
@@ -2123,7 +2533,8 @@ fn closure_expr(ck: mut Ck, params: ref parser.NList, body: ref parser.Node, env
             parser.Node.Param{name, ty} => {
                 ps = icons(ty_parse(ck, ty_str(ty)), ps)
             }
-            _ => {}
+            _ => {
+            }
         }
         pl = pl.next
     }
@@ -2140,7 +2551,8 @@ fn closure_expr(ck: mut Ck, params: ref parser.NList, body: ref parser.Node, env
             parser.Node.Param{name, ty} => {
                 env_set(env, name, wl.v)
             }
-            _ => {}
+            _ => {
+            }
         }
         wl = wl.next
         pl = pl.next
@@ -2150,21 +2562,27 @@ fn closure_expr(ck: mut Ck, params: ref parser.NList, body: ref parser.Node, env
     r := ck.cl_ret
     ck.in_cl = s_in
     ck.cl_ret = s_ret
-    if r < 0 { r = t_void(ck) }
+    if r < 0 {
+        r = t_void(ck)
+    }
     return tm(ck, k_fn(), -1, ps, r, "")
 }
 
 // BodyScan port: callee names + seeded (scope/select/spawn/go/defer or a
 // susp-builtin call) for the deferred no-susp rule.
 fn cl_scan_expr(ck: mut Ck, e: ref parser.Node, cc: mut ClChk) {
-    if e == nil { return }
+    if e == nil {
+        return
+    }
     match e {
         parser.Node.Call{f, args} => {
             bn := callee_name(f)
             if len(bn) > 0 {
                 qn := resolve_named(ck, bn)
                 cc.callees = scons(qn, cc.callees)
-                if is_susp_builtin(qn) { cc.seeded = 1 }
+                if is_susp_builtin(qn) {
+                    cc.seeded = 1
+                }
             } else {
                 cl_scan_expr(ck, f, cc)
             }
@@ -2178,24 +2596,37 @@ fn cl_scan_expr(ck: mut Ck, e: ref parser.Node, cc: mut ClChk) {
             cl_scan_expr(ck, l, cc)
             cl_scan_expr(ck, r, cc)
         }
-        parser.Node.Un{e} => { cl_scan_expr(ck, e, cc) }
-        parser.Node.As{e} => { cl_scan_expr(ck, e, cc) }
-        parser.Node.Field{obj} => { cl_scan_expr(ck, obj, cc) }
+        parser.Node.Un{e} => {
+            cl_scan_expr(ck, e, cc)
+        }
+        parser.Node.As{e} => {
+            cl_scan_expr(ck, e, cc)
+        }
+        parser.Node.Field{obj} => {
+            cl_scan_expr(ck, obj, cc)
+        }
         parser.Node.Index{obj, idx} => {
             cl_scan_expr(ck, obj, cc)
             cl_scan_expr(ck, idx, cc)
         }
         parser.Node.Slice{obj, lo, hi} => {
             cl_scan_expr(ck, obj, cc)
-            if lo != nil { cl_scan_expr(ck, lo, cc) }
-            if hi != nil { cl_scan_expr(ck, hi, cc) }
+            if lo != nil {
+                cl_scan_expr(ck, lo, cc)
+            }
+            if hi != nil {
+                cl_scan_expr(ck, hi, cc)
+            }
         }
         parser.Node.Lit{fields} => {
             fl := fields
             for fl != nil {
                 match fl.v {
-                    parser.Node.NamedField{val} => { cl_scan_expr(ck, val, cc) }
-                    _ => {}
+                    parser.Node.NamedField{val} => {
+                        cl_scan_expr(ck, val, cc)
+                    }
+                    _ => {
+                    }
                 }
                 fl = fl.next
             }
@@ -2205,8 +2636,11 @@ fn cl_scan_expr(ck: mut Ck, e: ref parser.Node, cc: mut ClChk) {
             a := arms
             for a != nil {
                 match a.v {
-                    parser.Node.MArm{body} => { cl_scan_node(ck, body, cc) }
-                    _ => {}
+                    parser.Node.MArm{body} => {
+                        cl_scan_node(ck, body, cc)
+                    }
+                    _ => {
+                    }
                 }
                 a = a.next
             }
@@ -2214,12 +2648,15 @@ fn cl_scan_expr(ck: mut Ck, e: ref parser.Node, cc: mut ClChk) {
         parser.Node.Closure{body} => {
             cl_scan_node(ck, body, cc)
         }
-        _ => {}
+        _ => {
+        }
     }
 }
 
 fn cl_scan_node(ck: mut Ck, body: ref parser.Node, cc: mut ClChk) {
-    if body == nil { return }
+    if body == nil {
+        return
+    }
     match body {
         parser.Node.List{items} => {
             l := items
@@ -2228,20 +2665,30 @@ fn cl_scan_node(ck: mut Ck, body: ref parser.Node, cc: mut ClChk) {
                 l = l.next
             }
         }
-        _ => { cl_scan_expr(ck, body, cc) }
+        _ => {
+            cl_scan_expr(ck, body, cc)
+        }
     }
 }
 
 fn cl_scan_stmt(ck: mut Ck, s: ref parser.Node, cc: mut ClChk) {
     match s {
-        parser.Node.Let{init} => { cl_scan_expr(ck, init, cc) }
-        parser.Node.Bind{init} => { cl_scan_expr(ck, init, cc) }
+        parser.Node.Let{init} => {
+            cl_scan_expr(ck, init, cc)
+        }
+        parser.Node.Bind{init} => {
+            cl_scan_expr(ck, init, cc)
+        }
         parser.Node.Assign{target, val} => {
             cl_scan_expr(ck, target, cc)
             cl_scan_expr(ck, val, cc)
         }
-        parser.Node.ExprStmt{e} => { cl_scan_expr(ck, e, cc) }
-        parser.Node.Let2{call} => { cl_scan_expr(ck, call, cc) }
+        parser.Node.ExprStmt{e} => {
+            cl_scan_expr(ck, e, cc)
+        }
+        parser.Node.Let2{call} => {
+            cl_scan_expr(ck, call, cc)
+        }
         parser.Node.Ret{vals} => {
             vl := vals
             for vl != nil {
@@ -2262,7 +2709,9 @@ fn cl_scan_stmt(ck: mut Ck, s: ref parser.Node, cc: mut ClChk) {
             cc.seeded = 1
             cl_scan_node(ck, body, cc)
         }
-        parser.Node.Unsafe{body} => { cl_scan_node(ck, body, cc) }
+        parser.Node.Unsafe{body} => {
+            cl_scan_node(ck, body, cc)
+        }
         parser.Node.Defer{call} => {
             cc.seeded = 1
             cl_scan_expr(ck, call, cc)
@@ -2289,20 +2738,26 @@ fn cl_scan_stmt(ck: mut Ck, s: ref parser.Node, cc: mut ClChk) {
                         cl_scan_expr(ck, ms, cc)
                         cl_scan_node(ck, body, cc)
                     }
-                    _ => {}
+                    _ => {
+                    }
                 }
                 a = a.next
             }
         }
-        _ => {}
+        _ => {
+        }
     }
 }
 
 fn clchk_bad(ck: ref Ck, c: ref ClChk) -> bool {
-    if c.seeded == 1 { return true }
+    if c.seeded == 1 {
+        return true
+    }
     l := c.callees
     for l != nil {
-        if sl_has(ck.susp, l.v) { return true }
+        if sl_has(ck.susp, l.v) {
+            return true
+        }
         l = l.next
     }
     return false
@@ -2321,7 +2776,6 @@ fn check_closures(ck: mut Ck) {
 
 // ---------- select ----------
 // port of `Stmt::Select` in oxl/src/check.rs
-
 fn sel_stmt(ck: mut Ck, arms: ref parser.NList, env: mut Env) {
     if arms == nil {
         diag(ck, "check", "`select` needs at least one arm")
@@ -2339,7 +2793,9 @@ fn sel_stmt(ck: mut Ck, arms: ref parser.NList, env: mut Env) {
                         diag(ck, "check", "select arm must be `recv(ch)`, `timeout(ms)`, or `else`")
                     } else {
                         assignable(ck, tk(ck, k_chan()), expr(ck, ch, env))
-                        if len(bind) > 0 { env_set(env, bind, t_int(ck)) }
+                        if len(bind) > 0 {
+                            env_set(env, bind, t_int(ck))
+                        }
                     }
                 }
                 if kind == "timeout" {
@@ -2361,7 +2817,8 @@ fn sel_stmt(ck: mut Ck, arms: ref parser.NList, env: mut Env) {
                 }
                 block_node(ck, body, env)
             }
-            _ => {}
+            _ => {
+            }
         }
         env_pop(env)
         l = l.next
@@ -2376,24 +2833,24 @@ fn sel_stmt(ck: mut Ck, arms: ref parser.NList, env: mut Env) {
 
 fn stmt_susp(ck: ref Ck, s: ref parser.Node) -> bool {
     r := match s {
-        parser.Node.Scope{body} => true,
-        parser.Node.Spawn{e} => expr_susp(ck, e),
-        parser.Node.SpawnBlocking{e} => expr_susp(ck, e),
-        parser.Node.Go{e} => expr_susp(ck, e),
-        parser.Node.Defer{call} => expr_susp(ck, call),
-        parser.Node.ExprStmt{e} => expr_susp(ck, e),
-        parser.Node.Assign{val} => expr_susp(ck, val),
-        parser.Node.Let{init} => expr_susp(ck, init),
-        parser.Node.Bind{init} => expr_susp(ck, init),
-        parser.Node.Let2{call} => expr_susp(ck, call),
-        parser.Node.Ret{vals} => ret_susp(ck, vals),
-        parser.Node.If{cond, then, els} => if_susp(ck, cond, then, els),
-        parser.Node.For{cond, body} => expr_susp(ck, cond) || block_susp_node(ck, body),
-        parser.Node.Unsafe{body} => block_susp_node(ck, body),
-        parser.Node.Select{arms} => true,
-        parser.Node.List{items} => block_susp(ck, items),
-        parser.Node.Match{e} => expr_susp(ck, s),
-        _ => false,
+        parser.Node.Scope{body} => true
+        parser.Node.Spawn{e} => expr_susp(ck, e)
+        parser.Node.SpawnBlocking{e} => expr_susp(ck, e)
+        parser.Node.Go{e} => expr_susp(ck, e)
+        parser.Node.Defer{call} => expr_susp(ck, call)
+        parser.Node.ExprStmt{e} => expr_susp(ck, e)
+        parser.Node.Assign{val} => expr_susp(ck, val)
+        parser.Node.Let{init} => expr_susp(ck, init)
+        parser.Node.Bind{init} => expr_susp(ck, init)
+        parser.Node.Let2{call} => expr_susp(ck, call)
+        parser.Node.Ret{vals} => ret_susp(ck, vals)
+        parser.Node.If{cond, then, els} => if_susp(ck, cond, then, els)
+        parser.Node.For{cond, body} => expr_susp(ck, cond) || block_susp_node(ck, body)
+        parser.Node.Unsafe{body} => block_susp_node(ck, body)
+        parser.Node.Select{arms} => true
+        parser.Node.List{items} => block_susp(ck, items)
+        parser.Node.Match{e} => expr_susp(ck, s)
+        _ => false
     }
     return r
 }
@@ -2409,7 +2866,8 @@ fn susp_seeds(ck: mut Ck, its: []It) {
                         ck.susp = scons(qname(its[i].mod, name), ck.susp)
                     }
                 }
-                _ => {}
+                _ => {
+                }
             }
         }
         i = i + 1
@@ -2436,7 +2894,9 @@ fn susp_fixpoint(ck: mut Ck) {
 fn args_has_susp(ck: mut Ck, args: ref parser.NList) -> bool {
     al := args
     for al != nil {
-        if expr_has_susp(ck, al.v) { return true }
+        if expr_has_susp(ck, al.v) {
+            return true
+        }
         al = al.next
     }
     return false
@@ -2447,9 +2907,12 @@ fn lit_has_susp(ck: mut Ck, fields: ref parser.NList) -> bool {
     for fl != nil {
         match fl.v {
             parser.Node.NamedField{val} => {
-                if expr_has_susp(ck, val) { return true }
+                if expr_has_susp(ck, val) {
+                    return true
+                }
             }
-            _ => {}
+            _ => {
+            }
         }
         fl = fl.next
     }
@@ -2457,7 +2920,9 @@ fn lit_has_susp(ck: mut Ck, fields: ref parser.NList) -> bool {
 }
 
 fn match_has_susp(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList) -> bool {
-    if expr_has_susp(ck, scrut) { return true }
+    if expr_has_susp(ck, scrut) {
+        return true
+    }
     a := arms
     for a != nil {
         match a.v {
@@ -2465,25 +2930,32 @@ fn match_has_susp(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList) ->
                 if pat != nil && nk(pat) == 36 {
                     match pat {
                         parser.Node.PatLit{v} => {
-                            if expr_has_susp(ck, v) { return true }
+                            if expr_has_susp(ck, v) {
+                                return true
+                            }
                         }
-                        _ => {}
+                        _ => {
+                        }
                     }
                 }
                 if body != nil {
                     if nk(body) == 23 {
                         match body {
                             parser.Node.List{items} => {
-                                if blk_has_susp(ck, items) { return true }
+                                if blk_has_susp(ck, items) {
+                                    return true
+                                }
                             }
-                            _ => {}
+                            _ => {
+                            }
                         }
-                    } else {
-                        if expr_has_susp(ck, body) { return true }
+                    } else if expr_has_susp(ck, body) {
+                        return true
                     }
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         a = a.next
     }
@@ -2493,27 +2965,34 @@ fn match_has_susp(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList) ->
 fn call_has_susp(ck: mut Ck, f: ref parser.Node, args: ref parser.NList) -> bool {
     n := callee_name(f)
     qn := resolve_named(ck, n)
-    if is_susp_builtin(qn) || (len(n) > 0 && sl_has(ck.susp, qn)) { return true }
-    if nk(f) == 8 { return true }
+    if is_susp_builtin(qn) || len(n) > 0 && sl_has(ck.susp, qn) {
+        return true
+    }
+    if nk(f) == 8 {
+        return true
+    }
     // indirect call through a fn-valued field — may suspend
-    if nk(f) == 9 && !collections.map_has(ck.fns, qn) { return true }
+    if nk(f) == 9 && !collections.map_has(ck.fns, qn) {
+        return true
+    }
     return args_has_susp(ck, args)
 }
 
 fn expr_has_susp(ck: mut Ck, e: ref parser.Node) -> bool {
-    if e == nil { return false }
+    if e == nil {
+        return false
+    }
     s := match e {
-        parser.Node.Call{f, args} => call_has_susp(ck, f, args),
-        parser.Node.Bin{l, r} => expr_has_susp(ck, l) || expr_has_susp(ck, r),
-        parser.Node.Un{e} => expr_has_susp(ck, e),
-        parser.Node.Field{obj} => expr_has_susp(ck, obj),
-        parser.Node.As{e} => expr_has_susp(ck, e),
-        parser.Node.Lit{fields} => lit_has_susp(ck, fields),
-        parser.Node.Match{e, arms} => match_has_susp(ck, e, arms),
-        parser.Node.Index{obj, idx} => expr_has_susp(ck, obj) || expr_has_susp(ck, idx),
-        parser.Node.Slice{obj, lo, hi} => expr_has_susp(ck, obj)
-            || expr_has_susp(ck, lo) || expr_has_susp(ck, hi),
-        _ => false,
+        parser.Node.Call{f, args} => call_has_susp(ck, f, args)
+        parser.Node.Bin{l, r} => expr_has_susp(ck, l) || expr_has_susp(ck, r)
+        parser.Node.Un{e} => expr_has_susp(ck, e)
+        parser.Node.Field{obj} => expr_has_susp(ck, obj)
+        parser.Node.As{e} => expr_has_susp(ck, e)
+        parser.Node.Lit{fields} => lit_has_susp(ck, fields)
+        parser.Node.Match{e, arms} => match_has_susp(ck, e, arms)
+        parser.Node.Index{obj, idx} => expr_has_susp(ck, obj) || expr_has_susp(ck, idx)
+        parser.Node.Slice{obj, lo, hi} => expr_has_susp(ck, obj) || expr_has_susp(ck, lo) || expr_has_susp(ck, hi)
+        _ => false
     }
     return s
 }
@@ -2521,26 +3000,36 @@ fn expr_has_susp(ck: mut Ck, e: ref parser.Node) -> bool {
 fn blk_has_susp(ck: mut Ck, items: ref parser.NList) -> bool {
     l := items
     for l != nil {
-        if stmt_has_susp(ck, l.v) { return true }
+        if stmt_has_susp(ck, l.v) {
+            return true
+        }
         l = l.next
     }
     return false
 }
 
 fn blk_susp_node(ck: mut Ck, body: ref parser.Node) -> bool {
-    if body == nil { return false }
+    if body == nil {
+        return false
+    }
     b := match body {
-        parser.Node.List{items} => blk_has_susp(ck, items),
-        _ => false,
+        parser.Node.List{items} => blk_has_susp(ck, items)
+        _ => false
     }
     return b
 }
 
 fn if_has_susp(ck: mut Ck, cond: ref parser.Node, then: ref parser.Node, els: ref parser.Node) -> bool {
-    if expr_has_susp(ck, cond) { return true }
-    if blk_susp_node(ck, then) { return true }
+    if expr_has_susp(ck, cond) {
+        return true
+    }
+    if blk_susp_node(ck, then) {
+        return true
+    }
     if els != nil {
-        if nk(els) == 23 { return blk_susp_node(ck, els) }
+        if nk(els) == 23 {
+            return blk_susp_node(ck, els)
+        }
         return stmt_has_susp(ck, els)
     }
     return false
@@ -2549,7 +3038,9 @@ fn if_has_susp(ck: mut Ck, cond: ref parser.Node, then: ref parser.Node, els: re
 fn ret_has_susp(ck: mut Ck, vals: ref parser.NList) -> bool {
     vl := vals
     for vl != nil {
-        if expr_has_susp(ck, vl.v) { return true }
+        if expr_has_susp(ck, vl.v) {
+            return true
+        }
         vl = vl.next
     }
     return false
@@ -2557,31 +3048,33 @@ fn ret_has_susp(ck: mut Ck, vals: ref parser.NList) -> bool {
 
 fn stmt_has_susp(ck: mut Ck, s: ref parser.Node) -> bool {
     r := match s {
-        parser.Node.Scope{body} => true,
-        parser.Node.Defer{call} => expr_has_susp(ck, call),
-        parser.Node.Spawn{e} => expr_has_susp(ck, e),
-        parser.Node.SpawnBlocking{e} => expr_has_susp(ck, e),
-        parser.Node.Go{e} => expr_has_susp(ck, e),
-        parser.Node.ExprStmt{e} => expr_has_susp(ck, e),
-        parser.Node.Assign{val} => expr_has_susp(ck, val),
-        parser.Node.Let{init} => expr_has_susp(ck, init),
-        parser.Node.Bind{init} => expr_has_susp(ck, init),
-        parser.Node.Let2{call} => expr_has_susp(ck, call),
-        parser.Node.Ret{vals} => ret_has_susp(ck, vals),
-        parser.Node.If{cond, then, els} => if_has_susp(ck, cond, then, els),
-        parser.Node.For{cond, body} => expr_has_susp(ck, cond) || blk_susp_node(ck, body),
-        parser.Node.Unsafe{body} => blk_susp_node(ck, body),
-        parser.Node.Select{arms} => true,
-        parser.Node.List{items} => blk_has_susp(ck, items),
-        parser.Node.Match{e} => expr_has_susp(ck, s),
-        _ => false,
+        parser.Node.Scope{body} => true
+        parser.Node.Defer{call} => expr_has_susp(ck, call)
+        parser.Node.Spawn{e} => expr_has_susp(ck, e)
+        parser.Node.SpawnBlocking{e} => expr_has_susp(ck, e)
+        parser.Node.Go{e} => expr_has_susp(ck, e)
+        parser.Node.ExprStmt{e} => expr_has_susp(ck, e)
+        parser.Node.Assign{val} => expr_has_susp(ck, val)
+        parser.Node.Let{init} => expr_has_susp(ck, init)
+        parser.Node.Bind{init} => expr_has_susp(ck, init)
+        parser.Node.Let2{call} => expr_has_susp(ck, call)
+        parser.Node.Ret{vals} => ret_has_susp(ck, vals)
+        parser.Node.If{cond, then, els} => if_has_susp(ck, cond, then, els)
+        parser.Node.For{cond, body} => expr_has_susp(ck, cond) || blk_susp_node(ck, body)
+        parser.Node.Unsafe{body} => blk_susp_node(ck, body)
+        parser.Node.Select{arms} => true
+        parser.Node.List{items} => blk_has_susp(ck, items)
+        parser.Node.Match{e} => expr_has_susp(ck, s)
+        _ => false
     }
     return r
 }
 
 // match-position rules (port of scan_match)
 fn scan_arm(ck: mut Ck, body: ref parser.Node, stmt_pos: bool) {
-    if body == nil { return }
+    if body == nil {
+        return
+    }
     if nk(body) == 23 {
         match body {
             parser.Node.List{items} => {
@@ -2590,7 +3083,8 @@ fn scan_arm(ck: mut Ck, body: ref parser.Node, stmt_pos: bool) {
                 }
                 walk_block(ck, items)
             }
-            _ => {}
+            _ => {
+            }
         }
         return
     }
@@ -2600,12 +3094,12 @@ fn scan_arm(ck: mut Ck, body: ref parser.Node, stmt_pos: bool) {
             match body {
                 parser.Node.Call{f, args} => {
                     bn := callee_name(f)
-                    if is_susp_builtin(resolve_named(ck, bn))
-                        || (len(bn) > 0 && sl_has(ck.susp, resolve_named(ck, bn))) {
+                    if is_susp_builtin(resolve_named(ck, bn)) || len(bn) > 0 && sl_has(ck.susp, resolve_named(ck, bn)) {
                         top = true
                     }
                 }
-                _ => {}
+                _ => {
+                }
             }
         }
         if !(stmt_pos && top) {
@@ -2616,7 +3110,9 @@ fn scan_arm(ck: mut Ck, body: ref parser.Node, stmt_pos: bool) {
 }
 
 fn scan_match(ck: mut Ck, e: ref parser.Node, stmt_pos: bool) {
-    if e == nil { return }
+    if e == nil {
+        return
+    }
     if nk(e) == 32 {
         match e {
             parser.Node.Match{e, arms} => {
@@ -2627,12 +3123,14 @@ fn scan_match(ck: mut Ck, e: ref parser.Node, stmt_pos: bool) {
                         parser.Node.MArm{pat, body} => {
                             scan_arm(ck, body, stmt_pos)
                         }
-                        _ => {}
+                        _ => {
+                        }
                     }
                     a = a.next
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         return
     }
@@ -2649,29 +3147,43 @@ fn scan_match(ck: mut Ck, e: ref parser.Node, stmt_pos: bool) {
             scan_match(ck, l, false)
             scan_match(ck, r, false)
         }
-        parser.Node.Un{e} => { scan_match(ck, e, false) }
-        parser.Node.As{e} => { scan_match(ck, e, false) }
-        parser.Node.Field{obj} => { scan_match(ck, obj, false) }
+        parser.Node.Un{e} => {
+            scan_match(ck, e, false)
+        }
+        parser.Node.As{e} => {
+            scan_match(ck, e, false)
+        }
+        parser.Node.Field{obj} => {
+            scan_match(ck, obj, false)
+        }
         parser.Node.Index{obj, idx} => {
             scan_match(ck, obj, false)
             scan_match(ck, idx, false)
         }
         parser.Node.Slice{obj, lo, hi} => {
             scan_match(ck, obj, false)
-            if lo != nil { scan_match(ck, lo, false) }
-            if hi != nil { scan_match(ck, hi, false) }
+            if lo != nil {
+                scan_match(ck, lo, false)
+            }
+            if hi != nil {
+                scan_match(ck, hi, false)
+            }
         }
         parser.Node.Lit{fields} => {
             fl := fields
             for fl != nil {
                 match fl.v {
-                    parser.Node.NamedField{val} => { scan_match(ck, val, false) }
-                    _ => {}
+                    parser.Node.NamedField{val} => {
+                        scan_match(ck, val, false)
+                    }
+                    _ => {
+                    }
                 }
                 fl = fl.next
             }
         }
-        _ => {}
+        _ => {
+        }
     }
 }
 
@@ -2686,14 +3198,30 @@ fn walk_block(ck: mut Ck, items: ref parser.NList) {
                 }
                 scan_match(ck, call, false)
             }
-            parser.Node.ExprStmt{e} => { scan_match(ck, e, true) }
-            parser.Node.Let{init} => { scan_match(ck, init, false) }
-            parser.Node.Bind{init} => { scan_match(ck, init, false) }
-            parser.Node.Assign{val} => { scan_match(ck, val, false) }
-            parser.Node.Let2{call} => { scan_match(ck, call, false) }
-            parser.Node.Spawn{e} => { scan_match(ck, e, false) }
-            parser.Node.SpawnBlocking{e} => { scan_match(ck, e, false) }
-            parser.Node.Go{e} => { scan_match(ck, e, false) }
+            parser.Node.ExprStmt{e} => {
+                scan_match(ck, e, true)
+            }
+            parser.Node.Let{init} => {
+                scan_match(ck, init, false)
+            }
+            parser.Node.Bind{init} => {
+                scan_match(ck, init, false)
+            }
+            parser.Node.Assign{val} => {
+                scan_match(ck, val, false)
+            }
+            parser.Node.Let2{call} => {
+                scan_match(ck, call, false)
+            }
+            parser.Node.Spawn{e} => {
+                scan_match(ck, e, false)
+            }
+            parser.Node.SpawnBlocking{e} => {
+                scan_match(ck, e, false)
+            }
+            parser.Node.Go{e} => {
+                scan_match(ck, e, false)
+            }
             parser.Node.Ret{vals} => {
                 vl := vals
                 for vl != nil {
@@ -2710,32 +3238,48 @@ fn walk_block(ck: mut Ck, items: ref parser.NList) {
                 scan_match(ck, cond, false)
                 walk_block_node(ck, body)
             }
-            parser.Node.Scope{body} => { walk_block_node(ck, body) }
-            parser.Node.Unsafe{body} => { walk_block_node(ck, body) }
+            parser.Node.Scope{body} => {
+                walk_block_node(ck, body)
+            }
+            parser.Node.Unsafe{body} => {
+                walk_block_node(ck, body)
+            }
             parser.Node.Select{arms} => {
                 sa := arms
                 for sa != nil {
                     match sa.v {
                         parser.Node.SArm{ch, ms, body} => {
-                            if ch != nil { scan_match(ck, ch, false) }
-                            if ms != nil { scan_match(ck, ms, false) }
+                            if ch != nil {
+                                scan_match(ck, ch, false)
+                            }
+                            if ms != nil {
+                                scan_match(ck, ms, false)
+                            }
                             walk_block_node(ck, body)
                         }
-                        _ => {}
+                        _ => {
+                        }
                     }
                     sa = sa.next
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         l = l.next
     }
 }
 
 fn walk_else(ck: mut Ck, els: ref parser.Node) {
-    if els == nil { return }
-    if nk(els) == 23 { walk_block_node(ck, els) }
-    if nk(els) == 21 { walk_if(ck, els) }
+    if els == nil {
+        return
+    }
+    if nk(els) == 23 {
+        walk_block_node(ck, els)
+    }
+    if nk(els) == 21 {
+        walk_if(ck, els)
+    }
 }
 
 fn walk_if(ck: mut Ck, s: ref parser.Node) {
@@ -2746,20 +3290,25 @@ fn walk_if(ck: mut Ck, s: ref parser.Node) {
             walk_block_node(ck, then)
             walk_else(ck, els)
         }
-        _ => {}
+        _ => {
+        }
     }
 }
 
 fn walk_block_node(ck: mut Ck, body: ref parser.Node) {
-    if body == nil { return }
+    if body == nil {
+        return
+    }
     match body {
-        parser.Node.List{items} => { walk_block(ck, items) }
-        _ => {}
+        parser.Node.List{items} => {
+            walk_block(ck, items)
+        }
+        _ => {
+        }
     }
 }
 
 // ---------- per-fn checking ----------
-
 fn check_fn(ck: mut Ck, mod: str, name: str, params: ref parser.NList, body: ref parser.Node) {
     qn := qname(mod, name)
     ck.cur_fn = qn
@@ -2784,7 +3333,8 @@ fn check_fn(ck: mut Ck, mod: str, name: str, params: ref parser.NList, body: ref
                     parser.Node.Param{name, ty} => {
                         env_set(env, name, wl.v)
                     }
-                    _ => {}
+                    _ => {
+                    }
                 }
                 wl = wl.next
                 pl = pl.next
@@ -2796,7 +3346,8 @@ fn check_fn(ck: mut Ck, mod: str, name: str, params: ref parser.NList, body: ref
             parser.Node.List{items} => {
                 block(ck, items, env)
             }
-            _ => {}
+            _ => {
+            }
         }
     }
 }
@@ -2812,7 +3363,8 @@ fn check_items(ck: mut Ck, its: []It) {
                         check_fn(ck, its[i].mod, name, params, body)
                     }
                 }
-                _ => {}
+                _ => {
+                }
             }
         }
         i = i + 1
@@ -2828,12 +3380,12 @@ fn check_skips(ck: mut Ck, its: []It) {
             parser.Node.Skip{text} => {
                 diag(ck, "parse", "unparsed `" + text + "`")
             }
-            _ => {}
+            _ => {
+            }
         }
         i = i + 1
     }
 }
-
 
 // susp rules that need the full set: defer + global inits + match pos
 fn check_suspend_rules(ck: mut Ck, its: []It) {
@@ -2851,7 +3403,8 @@ fn check_suspend_rules(ck: mut Ck, its: []It) {
                     diag(ck, "check", "global initializer cannot suspend — move it into fn main")
                 }
             }
-            _ => {}
+            _ => {
+            }
         }
         i = i + 1
     }
@@ -2870,20 +3423,27 @@ fn check_fnvals(ck: mut Ck) {
 }
 
 // ---------- driver: load + import resolution ----------
-
 fn dir_of(path: str) -> str {
     ls := last_slash(path)
-    if ls < 0 { return "." }
-    if ls == 0 { return "/" }
+    if ls < 0 {
+        return "."
+    }
+    if ls == 0 {
+        return "/"
+    }
     return substr(path, 0, ls)
 }
 
 fn file_stem(path: str) -> str {
     ls := last_slash(path)
     base := path
-    if ls >= 0 { base = substr(path, ls + 1, len(path)) }
+    if ls >= 0 {
+        base = substr(path, ls + 1, len(path))
+    }
     d := last_dot(base)
-    if d >= 0 { base = substr(base, 0, d) }
+    if d >= 0 {
+        base = substr(base, 0, d)
+    }
     return base
 }
 
@@ -2894,23 +3454,35 @@ fn exists(path: str) -> bool {
 // mirrors resolve_import: dir-relative first, then ancestors' stdlib/
 fn resolve_imp(from_file: str, imp: str) -> str {
     cand := imp
-    if !strings.endswith(cand, ".oxl") { cand = cand + ".oxl" }
+    if !strings.endswith(cand, ".oxl") {
+        cand = cand + ".oxl"
+    }
     rel := dir_of(from_file) + "/" + cand
-    if exists(rel) { return rel }
+    if exists(rel) {
+        return rel
+    }
     stripped := cand
-    if strings.startswith(cand, "std/") { stripped = substr(cand, 4, len(cand)) }
+    if strings.startswith(cand, "std/") {
+        stripped = substr(cand, 4, len(cand))
+    }
     d := dir_of(from_file)
     for len(d) > 0 {
         p := d + "/stdlib/" + stripped
-        if exists(p) { return p }
-        if d == "." || d == "/" { break }
+        if exists(p) {
+            return p
+        }
+        if d == "." || d == "/" {
+            break
+        }
         d = dir_of(d)
     }
     return ""
 }
 
 fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
-    if sl_has(ck.loaded, file) { return }
+    if sl_has(ck.loaded, file) {
+        return
+    }
     ck.loaded = scons(file, ck.loaded)
     src := readfile(file)
     if len(src) == 0 {
@@ -2918,7 +3490,9 @@ fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
         return
     }
     ast := parser.parse(lexlib.lex(src))
-    if ast == nil || nk(ast) != 28 { return }
+    if ast == nil || nk(ast) != 28 {
+        return
+    }
     match ast {
         parser.Node.Root{items} => {
             l := items
@@ -2939,12 +3513,14 @@ fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
                             load_mod(ck, ld, p, file_stem(p))
                         }
                     }
-                    _ => {}
+                    _ => {
+                    }
                 }
                 l = l.next
             }
         }
-        _ => {}
+        _ => {
+        }
     }
 }
 

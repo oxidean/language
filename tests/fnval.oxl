@@ -1,14 +1,24 @@
 // B4: function values + closures
-fn add(a: int, b: int) -> int { return a + b }
-fn sub(a: int, b: int) -> int { return a - b }
-fn zero() -> int { return 42 }
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn sub(a: int, b: int) -> int {
+    return a - b
+}
+
+fn zero() -> int {
+    return 42
+}
 
 fn apply(f: fn(int, int) -> int, x: int, y: int) -> int {
     return f(x, y)
 }
 
 fn pick(which: int) -> fn(int, int) -> int {
-    if which == 0 { return add }
+    if which == 0 {
+        return add
+    }
     return sub
 }
 
@@ -50,7 +60,9 @@ fn main() {
     assert(apply({ |x: int, y: int| return x * y }, 6, 7) == 42)
     // closure with inferred return through if/else
     neg := { |x: int|
-        if x > 0 { return 0 - x }
+        if x > 0 {
+            return 0 - x
+        }
         return x
     }
     assert(neg(9) == -9)

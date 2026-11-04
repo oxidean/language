@@ -3,8 +3,14 @@
 // --- value + pointer receivers, both call shapes ---
 struct Point { x: int, y: int }
 
-fn (p Point) norm() -> int { return p.x * p.x + p.y * p.y }
-fn (p: Point) sum() -> int { return p.x + p.y }
+fn (p Point) norm() -> int {
+    return p.x * p.x + p.y * p.y
+}
+
+fn (p Point) sum() -> int {
+    return p.x + p.y
+}
+
 fn (p mut Point) shift(dx: int, dy: int) {
     p.x = p.x + dx
     p.y = p.y + dy
@@ -14,44 +20,70 @@ fn (p mut Point) shift(dx: int, dy: int) {
 interface Writer { write(s: str) -> int }
 
 struct Upper { n: int }
-fn (u Upper) write(s: str) -> int { return u.n + len(s) }
+
+fn (u Upper) write(s: str) -> int {
+    return u.n + len(s)
+}
 
 struct Lower { k: int }
-fn (l Lower) write(s: str) -> int { return l.k - len(s) }
 
-fn emit(w: Writer, s: str) -> int { return w.write(s) }
+fn (l Lower) write(s: str) -> int {
+    return l.k - len(s)
+}
+
+fn emit(w: Writer, s: str) -> int {
+    return w.write(s)
+}
 
 // --- generic with a method constraint: dispatch through the bound ---
-fn use[T Writer](v: T, s: str) -> int { return v.write(s) }
+fn use[T Writer](v: T, s: str) -> int {
+    return v.write(s)
+}
 
 // --- iface return + pair-typed method ---
 interface Counter { next() -> [int, err] }
 
 struct Seq { i: int }
+
 fn (s mut Seq) next() -> [int, err] {
     s.i = s.i + 1
     return s.i, nil
 }
 
-fn bump(c: Counter) -> [int, err] { return c.next() }
+fn bump(c: Counter) -> [int, err] {
+    return c.next()
+}
 
 // --- enum receivers, own receivers, generic methods pinned by a sig ---
 enum Shape { Circle(int), Square, }
+
 fn (s Shape) area() -> int {
     return match s {
-        Shape.Circle(r) => r * r * 3,
-        Shape.Square => 0,
+        Shape.Circle(r) => r * r * 3
+        Shape.Square => 0
     }
 }
+
 interface Area { area() -> int }
 
 struct Res { n: int }
-fn (r own Res) consume() -> int { return r.n }
-fn (r Res) get() -> int { return r.n }
+
+fn (r own Res) consume() -> int {
+    return r.n
+}
+
+fn (r Res) get() -> int {
+    return r.n
+}
+
 interface Getter { get() -> int }
 
 struct Id { n: int }
-fn (i Id) ident[T any](x: T) -> T { return x }
+
+fn (i Id) ident[T any](x: T) -> T {
+    return x
+}
+
 interface Ident { ident(x: int) -> int }
 
 fn main() {

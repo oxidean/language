@@ -6,7 +6,9 @@ import "std/time"
 
 fn parker(c: chan) {
     select {
-        v := recv(c) => { println(v) }
+        v := recv(c) => {
+            println(v)
+        }
     }
 }
 

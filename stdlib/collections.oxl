@@ -7,19 +7,11 @@
 // v0 payloads are int only — `own`/`str` values wait on payload
 // generics; word-sized ints cover the bootstrap checker (env ids,
 // fn indices, counts).
-
-struct MapNode {
-    key: str,
-    val: int,
-    next: own MapNode
-}
+struct MapNode { key: str, val: int, next: own MapNode }
 
 struct Bucket { head: own MapNode }
 
-struct Map {
-    bs: []Bucket,
-    size: int
-}
+struct Map { bs: []Bucket, size: int }
 
 struct Set { m: own Map }
 
@@ -44,7 +36,9 @@ fn map_new() -> own Map {
     return m
 }
 
-fn map_len(m: ref Map) -> int { return m.size }
+fn map_len(m: ref Map) -> int {
+    return m.size
+}
 
 fn map_set(m: mut Map, k: str, v: int) {
     mask := len(m.bs) - 1
@@ -72,7 +66,7 @@ fn map_set(m: mut Map, k: str, v: int) {
 
 // map_get(m, k) -> [v, err] — err != nil on miss
 fn map_get(m: ref Map, k: str) -> [int, err] {
-    h := fnv(k) & (len(m.bs) - 1)
+    h := fnv(k) & len(m.bs) - 1
     p := m.bs[h].head
     for p != nil {
         if p.key == k {
@@ -89,7 +83,7 @@ fn map_has(m: ref Map, k: str) -> bool {
 }
 
 fn map_del(m: mut Map, k: str) {
-    h := fnv(k) & (len(m.bs) - 1)
+    h := fnv(k) & len(m.bs) - 1
     p := m.bs[h].head
     if p == nil {
         return

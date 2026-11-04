@@ -1,4 +1,5 @@
 import "std/strings"
+
 import "std/testing"
 
 fn test_strings() {
@@ -17,8 +18,12 @@ fn test_loops() {
     n := 0
     for i < 10 {
         i = i + 1
-        if i == 3 { continue }
-        if i > 6 { break }
+        if i == 3 {
+            continue
+        }
+        if i > 6 {
+            break
+        }
         n = n + i
     }
     testing.expect_eq(n, 18, "break/continue")

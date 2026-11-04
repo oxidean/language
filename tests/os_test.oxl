@@ -1,4 +1,5 @@
 import "std/os"
+
 import "std/testing"
 
 fn test_args() {

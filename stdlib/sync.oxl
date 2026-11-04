@@ -11,8 +11,7 @@ fn mutex() -> shared {
 
 /// acquire — spins until the cell CASes 0 → 1
 fn mlock(m: shared) {
-    for scas(m, 0, 1) != 0 {
-    }
+    for scas(m, 0, 1) != 0 {}
 }
 
 /// release
