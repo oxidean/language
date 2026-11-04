@@ -31,8 +31,9 @@ n = 200
 assert(addn(5) == 105)   // captures are by value — env snapshot
 ```
 
-Captures are **copied** into a heap-allocated environment at closure
-creation; later writes to the outer variable don't reach the closure
+Captures are **copied** into a heap-allocated environment
+(`rt_alloc_own` — escaping storage, so a closure may outlive its
+creating scope) at closure creation; later writes to the outer variable don't reach the closure
 (and vice versa). A closure may not re-bind a captured name — the
 checker reports the shadow instead of silently aliasing.
 

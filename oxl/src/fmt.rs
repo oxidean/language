@@ -442,6 +442,13 @@ impl<'a> Fmt<'a> {
     /// `{` was just emitted — stmts at ind+1 then `}` at ind
     fn block(&mut self, b: &Block, ind: usize) {
         if b.stmts.is_empty() {
+            // comments inside `{ }` stay inside — the `}` is the
+            // token before the overshot span.hi
+            let close = self.prev_tok_end(b.span.hi);
+            if self.comments.get(self.ci).map_or(false, |c| c.hi <= close) {
+                self.drain(close, ind + 1);
+                self.nl(ind);
+            }
             self.out.push('}');
             return;
         }

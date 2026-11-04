@@ -1724,7 +1724,7 @@ impl<'a> Gen<'a> {
         self.cur_ret_pair = saved_ret_pair;
         self.defers = saved_defers;
         self.cur_fn = saved_fn;
-        // the value: heap-free env populated from the enclosing scope
+        // the value: escaping-heap env populated from the enclosing scope
         let mut inits = String::new();
         for (n, _) in &captures {
             let v = self.expr(&Expr {
@@ -1734,7 +1734,7 @@ impl<'a> Gen<'a> {
             inits += &format!(" _e->{} = {v};", cname(n));
         }
         format!(
-            "({{ struct o_env_{id} *_e = rt_alloc(sizeof(struct o_env_{id}));{inits} \
+            "({{ struct o_env_{id} *_e = rt_alloc_own(sizeof(struct o_env_{id}));{inits} \
              (RtFnv){{ _e, (void*)o_cl_{id} }}; }})")
     }
 
@@ -2222,9 +2222,9 @@ impl<'a> Gen<'a> {
                 format!("(RtIface){{ (void*)({v}), {vt} }}")
             }
             Ty::Iface(_) => format!(
-                "({{ RtIface *_iw = rt_alloc(sizeof(RtIface)); *_iw = ({v});                  (RtIface){{ (void*)_iw, {vt} }}; }})"),
+                "({{ RtIface *_iw = rt_alloc_own(sizeof(RtIface)); *_iw = ({v});                  (RtIface){{ (void*)_iw, {vt} }}; }})"),
             _ => format!(
-                "({{ {ct} *_iw = rt_alloc(sizeof({ct})); *_iw = ({v});                  (RtIface){{ (void*)_iw, {vt} }}; }})",
+                "({{ {ct} *_iw = rt_alloc_own(sizeof({ct})); *_iw = ({v});                  (RtIface){{ (void*)_iw, {vt} }}; }})",
                 ct = self.cty(&got)),
         }
     }
@@ -2371,7 +2371,7 @@ impl<'a> Gen<'a> {
                     if let ExprKind::Ident(sn) = &args[0].kind {
                         if self.structs.contains_key(sn.as_str()) {
                             // zero-init: field presence is tested with `== nil`
-                            return format!("({{ struct o_s_{0} *_nb = rt_alloc(sizeof(struct o_s_{0})); __builtin_memset(_nb, 0, sizeof(struct o_s_{0})); _nb; }})", cname(&sn));
+                            return format!("({{ struct o_s_{0} *_nb = rt_alloc_own(sizeof(struct o_s_{0})); __builtin_memset(_nb, 0, sizeof(struct o_s_{0})); _nb; }})", cname(&sn));
                         }
                     }
                     // new(slice) — deep-copy header+backing to heap so the
@@ -2385,7 +2385,7 @@ impl<'a> Gen<'a> {
                     let ct = self.cty(&self.expr_ty(&args[0]));
                     let v = self.expr(&args[0]);
                     return format!(
-                        "({{ {ct} *_nb = rt_alloc(sizeof({ct})); *_nb = ({v}); _nb; }})");
+                        "({{ {ct} *_nb = rt_alloc_own(sizeof({ct})); *_nb = ({v}); _nb; }})");
                 }
                 "mkslice" => {
                     // mkslice(T, n) — element C type from the type-name arg

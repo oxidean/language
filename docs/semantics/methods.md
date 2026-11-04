@@ -56,8 +56,10 @@ their old role as generic constraints; interfaces with methods are
 additionally *types*.
 
 An interface value is an `RtIface { void *data, void **vtab }` pair.
-Value impls are boxed so the data outlives the stack slot (mut
-receivers write through the box); pointer impls (`own`/`ref`/`mut`)
+Value impls are boxed into escaping heap storage
+(`rt_alloc_own`) so the data outlives the stack slot and the
+creating scope (mut receivers write through the box); the box
+follows `own` release discipline; pointer impls (`own`/`ref`/`mut`)
 hand the pointer over directly. `w == nil` compares the data pointer;
 comparing two non-nil ifaces is a compile error.
 

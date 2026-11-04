@@ -244,6 +244,7 @@ pub struct Checker<'a> {
     calls: HashMap<String, HashSet<String>>, // caller -> callee fn names
     cur_fn: String,
     in_let2: bool,
+    in_spawn: bool,
     ty_scope: HashSet<String>, // type params in scope (current generic fn)
     cur_ty_params: Vec<(String, String)>,
     loop_depth: i32,
@@ -284,6 +285,7 @@ pub fn check(c: &Crate, files: &[String], diags: &mut Diags) -> Checked {
         calls: HashMap::new(),
         cur_fn: String::new(),
         in_let2: false,
+        in_spawn: false,
         ty_scope: HashSet::new(),
         cur_ty_params: Vec::new(),
         loop_depth: 0,
@@ -727,6 +729,10 @@ impl<'a> Checker<'a> {
                     } else {
                         self.expr(&vals[0], env)
                     };
+                    if matches!(t, Ty::Slice(_)) {
+                        self.diags.push(Diag::err(vals[0].span, "check",
+                            "`return` of `[]T` escapes its arena scope — return `own []T` (new(slice))"));
+                    }
                     let prev = self.closure_ret.as_mut().unwrap();
                     match prev {
                         None => *prev = Some(t),
@@ -751,6 +757,10 @@ impl<'a> Checker<'a> {
                             let t = self.expr(&vals[0], env);
                             self.assignable(want, &t, vals[0].span);
                             self.move_for(&vals[0], want, env);
+                            if matches!(want, Ty::Slice(_)) || matches!(t, Ty::Slice(_)) {
+                                self.diags.push(Diag::err(vals[0].span, "check",
+                                    "`return` of `[]T` escapes its arena scope — return `own []T` (new(slice))"));
+                            }
                         }
                     }
                     Ret::Pair(want) => {
@@ -758,6 +768,10 @@ impl<'a> Checker<'a> {
                             let t = self.expr(&vals[0], env);
                             self.assignable(want, &t, vals[0].span);
                             self.move_for(&vals[0], want, env);
+                            if matches!(want, Ty::Slice(_)) || matches!(t, Ty::Slice(_)) {
+                                self.diags.push(Diag::err(vals[0].span, "check",
+                                    "`return` of `[]T` escapes its arena scope — return `own []T` (new(slice))"));
+                            }
                             let e = self.expr(&vals[1], env);
                             self.assignable(&Ty::Err, &e, vals[1].span);
                         } else if vals.len() == 1 {
@@ -834,7 +848,9 @@ impl<'a> Checker<'a> {
                         if let ExprKind::Ident(n) = &f.kind {
                             self.calls.entry(self.cur_fn.clone()).or_default().insert(n.clone());
                         }
+                        self.in_spawn = true;
                         self.expr(call, env);
+                        self.in_spawn = false;
                     }
                     _ => self.diags.push(Diag::err(call.span, "check", "`spawn` requires a call")),
                 }
@@ -2208,7 +2224,10 @@ impl<'a> Checker<'a> {
                 }
             }
             for (i, (a, want)) in args.iter().zip(sig.params.iter()).enumerate() {
+                let sp = self.in_spawn;
+                self.in_spawn = false;
                 let got = self.expr(a, env);
+                self.in_spawn = sp;
                 // extern fns get the raw C type; ref/mut params emit borrow checks
                 let want = subst_ty(want, &bind);
                 let got = if i == 0 && recv.is_some() {
@@ -2226,6 +2245,10 @@ impl<'a> Checker<'a> {
                 };
                 self.assignable(&want, &got, a.span);
                 self.move_for(a, &want, env);
+                if sp && matches!(want, Ty::Slice(_)) {
+                    self.diags.push(Diag::err(a.span, "check",
+                        "`spawn` arg of `[]T` escapes into the task — arena backing dies with the scope; pass `own []T`"));
+                }
             }
             let ret = subst_ret(&sig.ret, &bind);
             return match ret {
@@ -2259,9 +2282,16 @@ impl<'a> Checker<'a> {
                 format!("fn value takes {} args, got {}", ps.len(), args.len())));
         }
         for (a, want) in args.iter().zip(ps.iter()) {
+            let sp = self.in_spawn;
+            self.in_spawn = false;
             let got = self.expr(a, env);
+            self.in_spawn = sp;
             self.assignable(want, &got, a.span);
             self.move_for(a, want, env);
+            if sp && matches!(want, Ty::Slice(_)) {
+                self.diags.push(Diag::err(a.span, "check",
+                    "`spawn` arg of `[]T` escapes into the task — arena backing dies with the scope; pass `own []T`"));
+            }
         }
         r.clone()
     }

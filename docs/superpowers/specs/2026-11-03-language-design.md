@@ -118,7 +118,9 @@ one shot when the scope closes. Colorless-ish surface (Zig-style):
 blocking-looking code, no mandatory `async`/`await` ceremony.
 
 The suspend-capable set is determined by compiler reachability analysis
-from `spawn`/`scope`/`go` sites — the surface stays uncolored; if this
+from `spawn`/`scope`/`go` sites and explicit suspend operations
+(`send`, `recv`, `sleep`, and `select`) — see
+`docs/semantics/concurrency.md`; the surface stays uncolored; if this
 proves infeasible at acceptable compile cost, the fallback (an opt-in
 marker) is decided in the semantics phase, not silently. Because this
 transform is the hardest feature in the spec, it gets a dedicated
@@ -129,7 +131,8 @@ Known costs the builder must design for: the state-machine transform is
 the hardest compiler feature in this spec; debugging through suspended
 tasks needs tooling attention; blocking C FFI/syscalls can't suspend —
 a blocking-thread escape hatch is required (Go solves the same problem).
-`select`-style multi-channel wait: desired, design TBD.
+`select`-style multi-channel wait: defined in
+`docs/semantics/concurrency.md`.
 
 ### 4. Error handling — DECIDED
 

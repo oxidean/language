@@ -910,6 +910,26 @@ fn json_str<'a>(body: &'a str, key: &str) -> Option<String> {
 }
 
 /// reads the four hex digits of a `\uXXXX` escape
+/// `file://` URI -> filesystem path (LSP clients percent-encode)
+fn uri_to_path(uri: &str) -> String {
+    let s = uri.strip_prefix("file://").unwrap_or(uri);
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn hex4(it: &mut std::str::Chars) -> Option<u32> {
     let s: String = it.by_ref().take(4).collect();
     u32::from_str_radix(&s, 16).ok()
@@ -1033,8 +1053,8 @@ fn cmd_lsp() {
         }
         if body.contains("didOpen") || body.contains("didChange") {
             if let (Some(uri), Some(text)) = (json_str(&body, "uri"), json_str(&body, "text")) {
-                let path = Path::new(uri.strip_prefix("file://").unwrap_or(&uri));
-                let a = analyze(path, &text);
+                let p = uri_to_path(&uri);
+                let a = analyze(Path::new(&p), &text);
                 publish_diags(&mut stdout, &uri, &a.diags);
                 docs.insert(uri, (text, a));
             }
@@ -1060,7 +1080,7 @@ fn cmd_lsp() {
                 json_num(&body, "character").unwrap_or(0),
             );
             let def = body.contains("textDocument/definition");
-            let file = uri.strip_prefix("file://").unwrap_or(&uri).to_string();
+            let file = uri_to_path(&uri);
             let hit = docs.get(&uri).and_then(|(src, a)| {
                 index_at(a, &file, lsp_offset(src, line, col))
             });

@@ -64,8 +64,9 @@ Bounds may be omitted: `s[:b]`, `s[a:]`, `s[:]`. The invariant
   domain (`push` reallocs with `malloc`, never into the arena).
 - Ordinary (non-`own`) slices keep arena backing: escaping one past its
   scope is unsafe for the same reason escaping any arena allocation is.
-  There is no general escape check yet — the `own`-move tracking work
-  (D2) is where that discipline lands.
+  The checker rejects `[]T` at the `return` and `spawn` boundaries
+  (pass `own []T` instead); a general intra-scope escape check still
+  lands with the `own`-move tracking work (D2).
 - `nil` assigns to `[]T` and produces the empty header
   `{ nil, 0, 0, 0 }`.
 

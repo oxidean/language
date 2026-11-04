@@ -22,8 +22,8 @@ scope {
 ## Suspendability
 
 A call is **suspend-capable** if its call graph transitively reaches
-`spawn`, `scope`, `send`, `recv`, `sleep`, `select`, or any `extern`
-marked `blocking`.
+`scope`, `send`, `recv`, `sleep`, `select`, or a `spawn` whose call
+arguments are suspend-capable.
 The compiler computes the suspend set by reachability; only
 suspend-capable functions get the state-machine transform. User writes
 blocking-looking code; no `async`/`await` keywords exist.
