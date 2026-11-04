@@ -1697,9 +1697,9 @@ int64_t rt_writefile(OxlStr path, OxlStr data) {
     cp[path.n] = 0;
     FILE *f = fopen(cp, "wb");
     if (!f) return -1;
-    fwrite(data.p, 1, (size_t)data.n, f);
-    fclose(f);
-    return 0;
+    size_t w = fwrite(data.p, 1, (size_t)data.n, f);
+    int cerr = fclose(f);
+    return (w == (size_t)data.n && cerr == 0) ? 0 : -1;
 }
 
 void rt_exit(int64_t code) { exit((int)code); }
