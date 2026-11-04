@@ -65,13 +65,19 @@ fn map_name(
     renames: &std::collections::HashMap<String, String>,
     aliases: &std::collections::HashMap<String, String>,
 ) -> String {
+    if let Some(r) = renames.get(n) {
+        return r.clone();
+    }
     if let Some((head, rest)) = n.split_once('.') {
         if let Some(stem) = aliases.get(head) {
             return format!("{stem}.{rest}");
         }
+        if let Some(stem) = renames.get(head) {
+            return format!("{stem}.{rest}");
+        }
         n.to_string()
     } else {
-        renames.get(n).cloned().unwrap_or_else(|| n.to_string())
+        n.to_string()
     }
 }
 
@@ -107,6 +113,10 @@ fn qualify_expr(
             qualify_expr(r, renames, aliases);
         }
         ast::ExprKind::Un { e, .. } => qualify_expr(e, renames, aliases),
+        ast::ExprKind::As { e, ty } => {
+            qualify_expr(e, renames, aliases);
+            qualify_ty(ty, renames, aliases);
+        }
         _ => {}
     }
 }
@@ -223,6 +233,7 @@ fn load_mod(
             let n = match it {
                 ast::Item::Fn(f) => Some(&f.name),
                 ast::Item::Struct(s) => Some(&s.name),
+                ast::Item::Enum(e) => Some(&e.name),
                 ast::Item::Interface(i) => Some(&i.name),
                 ast::Item::Global(g) => Some(&g.name),
                 _ => None,
@@ -299,6 +310,26 @@ fn qualify_item(
             }
             for p in &mut s.fields {
                 qualify_ty(&mut p.ty, renames, aliases);
+            }
+        }
+        ast::Item::Enum(e) => {
+            if let Some(n) = renames.get(&e.name) {
+                e.name = n.clone();
+            }
+            for v in &mut e.variants {
+                match &mut v.payload {
+                    ast::VariantPayload::Pos(tys) => {
+                        for t in tys {
+                            qualify_ty(t, renames, aliases);
+                        }
+                    }
+                    ast::VariantPayload::Named(fs) => {
+                        for (_, t) in fs {
+                            qualify_ty(t, renames, aliases);
+                        }
+                    }
+                    ast::VariantPayload::Unit => {}
+                }
             }
         }
         ast::Item::Interface(i) => {

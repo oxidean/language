@@ -38,6 +38,10 @@ if "$OXL" build /tmp/floatmix.oxl -o /tmp/floatmix 2>/dev/null; then
     echo "FAIL: int+float compiled (should be a type error)"; exit 1
 fi
 
+echo "== enum (b1) =="
+out=$("$OXL" run tests/enum_test.oxl)
+[ "$(tail -1 <<<"$out")" = "enum fns ok" ] || { echo "FAIL enum: $out"; exit 1; }
+
 echo "== defer (b5) =="
 out=$("$OXL" run tests/defer_test.oxl)
 [ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }

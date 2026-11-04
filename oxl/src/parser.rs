@@ -119,6 +119,9 @@ impl<'a> Parser<'a> {
         if self.eat_kw(Kw::Struct) {
             return self.parse_struct().map(Item::Struct);
         }
+        if self.eat_kw(Kw::Enum) {
+            return self.parse_enum().map(Item::Enum);
+        }
         if self.eat_kw(Kw::Interface) {
             // interface Name { eq, ordered, add }
             let (name, sp) = self.ident()?;
@@ -211,6 +214,45 @@ impl<'a> Parser<'a> {
             self.eat_p(P::Semi);
         }
         Some(Struct { name, fields, span: sp })
+    }
+
+    /// enum Name { V(t, ..), W {a: t, ..}, U }
+    fn parse_enum(&mut self) -> Option<EnumDef> {
+        let (name, sp) = self.ident()?;
+        self.expect_p(P::LBrace, "`{`");
+        let mut variants = Vec::new();
+        while !self.eat_p(P::RBrace) && !self.at_eof() {
+            let (vname, vsp) = self.ident()?;
+            let payload = if self.eat_p(P::LParen) {
+                let mut tys = Vec::new();
+                while !self.eat_p(P::RParen) && !self.at_eof() {
+                    tys.push(self.ty()?);
+                    if !self.eat_p(P::Comma) {
+                        self.expect_p(P::RParen, "`)`");
+                        break;
+                    }
+                }
+                VariantPayload::Pos(tys)
+            } else if self.eat_p(P::LBrace) {
+                let mut fields = Vec::new();
+                while !self.eat_p(P::RBrace) && !self.at_eof() {
+                    let (fname, _) = self.ident()?;
+                    self.expect_p(P::Colon, "`:`");
+                    fields.push((fname, self.ty()?));
+                    if !self.eat_p(P::Comma) {
+                        self.expect_p(P::RBrace, "`}`");
+                        break;
+                    }
+                }
+                VariantPayload::Named(fields)
+            } else {
+                VariantPayload::Unit
+            };
+            variants.push(Variant { name: vname, payload, span: vsp });
+            self.eat_p(P::Comma);
+            self.eat_p(P::Semi);
+        }
+        Some(EnumDef { name, variants, span: sp })
     }
 
     fn parse_fn_tail(&mut self) -> Option<Fn> {
@@ -608,6 +650,13 @@ impl<'a> Parser<'a> {
                     let (name, _) = self.ident()?;
                     let span = Span::join(e.span, self.span());
                     e = Expr { kind: ExprKind::Field { obj: Box::new(e), name }, span };
+                }
+                // `e as T` — postfix cast; v0.2 only `E.V` payload extract
+                Tok::Ident(ref n) if n == "as" => {
+                    self.bump();
+                    let ty = self.ty()?;
+                    let span = Span::join(e.span, self.span());
+                    e = Expr { kind: ExprKind::As { e: Box::new(e), ty }, span };
                 }
                 _ => break,
             }

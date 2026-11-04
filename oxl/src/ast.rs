@@ -9,10 +9,34 @@ pub struct Crate {
 pub enum Item {
     Fn(Fn),
     Struct(Struct),
+    Enum(EnumDef),
     Extern(Fn),
     Interface(Interface),
     Import(Import),
     Global(Global),
+}
+
+/// `enum Name { V(t, ..), W {a: t}, U }` — tagged union. Variant payload
+/// key `E.V` (module-qualified enums qualify only the enum part).
+#[derive(Clone, Debug)]
+pub struct EnumDef {
+    pub name: String,
+    pub variants: Vec<Variant>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Variant {
+    pub name: String,
+    pub payload: VariantPayload,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum VariantPayload {
+    Unit,
+    Pos(Vec<TyRef>),
+    Named(Vec<(String, TyRef)>),
 }
 
 /// `import "path" [as alias] [.{name, ...}]`
@@ -165,6 +189,8 @@ pub enum ExprKind {
     StructLit { name: String, fields: Vec<(String, Expr)> },
     Bin { op: BinOp, l: Box<Expr>, r: Box<Expr> },
     Un { op: UnOp, e: Box<Expr> },
+    /// `e as T` — v0.2 only `E.V` (enum variant payload extraction)
+    As { e: Box<Expr>, ty: TyRef },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

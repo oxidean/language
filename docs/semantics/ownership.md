@@ -26,6 +26,10 @@ contract the typechecker, codegen, and runtime are built against.
   reads through it are compile errors where statically visible, runtime
   traps otherwise.
 
+`new(T)` returns zero-initialized memory — `== nil` field checks are
+reliable. `new(expr)` heap-boxes a *value*: `new(E.V(...))` yields
+`own E`, `new(42)` yields `own int`.
+
 ## Borrow rules (dynamic)
 
 1. While a `mut T` borrow is live: no other `mut` or `ref` borrow of the

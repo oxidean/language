@@ -10,6 +10,15 @@ pub fn runtime_files() -> (&'static str, &'static str) {
     (RT_H, RT_C)
 }
 
+/// flatten `a.b.c` Field chains to a dotted string (enum/module paths)
+fn field_path(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Ident(n) => Some(n.clone()),
+        ExprKind::Field { obj, name } => Some(format!("{}.{}", field_path(obj)?, name)),
+        _ => None,
+    }
+}
+
 /// oxl `mod.name` -> C identifier `mod_name`
 fn cname(n: &str) -> String {
     n.replace('.', "_")
@@ -40,6 +49,10 @@ struct Gen<'a> {
     scope_id: usize,
     env: Vec<HashMap<String, Ty>>,
     structs: HashMap<String, Vec<(String, Ty)>>,
+    /// enum name -> ordered variant names (tag = index)
+    enums: HashMap<String, Vec<String>>,
+    /// "E.V" -> payload field types (also mirrored into `structs`)
+    enum_fields: HashMap<String, Vec<(String, Ty)>>,
     fns: HashMap<String, (Vec<Ty>, crate::check::Ret)>,
     ty_params: HashMap<String, Vec<(String, String)>>,
     ast_fns: HashMap<String, &'a Fn>,
@@ -95,6 +108,8 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         scope_id: 0,
         env: vec![HashMap::new()],
         structs: HashMap::new(),
+        enums: HashMap::new(),
+        enum_fields: HashMap::new(),
         fns: HashMap::new(),
         ty_params: HashMap::new(),
         ast_fns: HashMap::new(),
@@ -121,6 +136,13 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         frame_head: String::new(),
         frame_out: String::new(),
     };
+    // enum names first: `ty_of_ref`/`enum_variant` need them regardless of
+    // declaration order relative to fns and structs
+    for it in &c.items {
+        if let Item::Enum(e) = it {
+            g.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect());
+        }
+    }
     for it in &c.items {
         match it {
             Item::Struct(s) => {
@@ -128,6 +150,23 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
                     s.name.clone(),
                     s.fields.iter().map(|f| (f.name.clone(), g.ty_of_ref(&f.ty))).collect(),
                 );
+            }
+            Item::Enum(e) => {
+                let mut vnames = Vec::new();
+                for v in &e.variants {
+                    let fields: Vec<(String, Ty)> = match &v.payload {
+                        VariantPayload::Unit => Vec::new(),
+                        VariantPayload::Pos(tys) => tys.iter().enumerate()
+                            .map(|(i, t)| (format!("f{i}"), g.ty_of_ref(t))).collect(),
+                        VariantPayload::Named(fs) => fs.iter()
+                            .map(|(n, t)| (n.clone(), g.ty_of_ref(t))).collect(),
+                    };
+                    let key = format!("{}.{}", e.name, v.name);
+                    g.enum_fields.insert(key.clone(), fields.clone());
+                    g.structs.insert(key, fields);
+                    vnames.push(v.name.clone());
+                }
+                g.enums.insert(e.name.clone(), vnames);
             }
             Item::Fn(f) | Item::Extern(f) => {
                 g.cur_tyvars = f.ty_params.iter().map(|(t, _)| t.clone()).collect();
@@ -161,6 +200,32 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
     }
 
     let mut out = String::from("#include \"rt.h\"\n\n");
+
+    // enum defs first: variant payload structs + the tagged union —
+    // a user struct or another variant may embed an enum by value
+    for it in &c.items {
+        if let Item::Enum(en) = it {
+            let mut members = String::new();
+            for (i, v) in en.variants.iter().enumerate() {
+                let key = format!("{}.{}", en.name, v.name);
+                let fields = g.enum_fields.get(&key).cloned().unwrap_or_default();
+                if fields.is_empty() {
+                    continue;
+                }
+                let _ = writeln!(out, "struct o_s_{} {{", cname(&key));
+                for (fname, fty) in &fields {
+                    let _ = writeln!(out, "    {} f_{};", g.cty(fty), fname);
+                }
+                let _ = writeln!(out, "}};");
+                members.push_str(&format!(" struct o_s_{} v{i};", cname(&key)));
+            }
+            if members.is_empty() {
+                members.push_str(" char _pad;");
+            }
+            let _ = writeln!(out,
+                "struct o_en_{} {{ int tag; union {{{} }} u; }};\n", cname(&en.name), members);
+        }
+    }
 
     // struct defs
     for it in &c.items {
@@ -324,6 +389,8 @@ impl<'a> Gen<'a> {
                         b.clone()
                     } else if self.cur_tyvars.contains(s) {
                         Ty::Var(s.to_string())
+                    } else if self.enums.contains_key(s) {
+                        Ty::Enum(s.to_string())
                     } else {
                         Ty::Struct(s.to_string())
                     }
@@ -346,6 +413,7 @@ impl<'a> Gen<'a> {
             Ty::Void => "void".into(),
             Ty::Chan => "RtChan*".into(),
             Ty::Struct(n) => format!("struct o_s_{}", cname(n)),
+            Ty::Enum(n) => format!("struct o_en_{}", cname(n)),
             Ty::Var(v) => self
                 .subst
                 .get(v)
@@ -353,6 +421,7 @@ impl<'a> Gen<'a> {
                 .unwrap_or_else(|| "int64_t".into()),
             Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
                 Ty::Struct(n) => format!("struct o_s_{}*", cname(n)),
+                Ty::Enum(n) => format!("struct o_en_{}*", cname(n)),
                 Ty::Var(v) => match self.subst.get(v) {
                     Some(Ty::Struct(n)) => format!("struct o_s_{}*", cname(n)),
                     _ => "void*".into(),
@@ -543,6 +612,17 @@ impl<'a> Gen<'a> {
             ExprKind::Ident(n) => self.lookup(n),
             ExprKind::Call { f, args } => {
                 if let ExprKind::Ident(n) = &f.kind {
+                    // enum variant ctor → the enum type; `.kind()` → int
+                    if let Some((en, _, _)) = self.enum_variant(n) {
+                        return Ty::Enum(en.to_string());
+                    }
+                    if let Some((obj, "kind")) = n.rsplit_once('.') {
+                        if matches!(self.expr_ty(&Expr {
+                            kind: ExprKind::Ident(obj.to_string()), span: e.span,
+                        }), Ty::Enum(_)) {
+                            return Ty::Int;
+                        }
+                    }
                     if let Some((_, r)) = self.fns.get(n) {
                         return match r {
                             crate::check::Ret::One(t) => {
@@ -579,8 +659,13 @@ impl<'a> Gen<'a> {
                         "mkbuf" | "sqlite_open" | "mkshared" => return Ty::Own(Box::new(Ty::Unknown)),
                         "new" => {
                             if let ExprKind::Call { args, .. } = &e.kind {
-                                if let Some(Expr { kind: ExprKind::Ident(sn), .. }) = args.first() {
-                                    return Ty::Own(Box::new(Ty::Struct(sn.clone())));
+                                if let Some(a) = args.first() {
+                                    if let Expr { kind: ExprKind::Ident(sn), .. } = a {
+                                        if self.structs.contains_key(sn.as_str()) {
+                                            return Ty::Own(Box::new(Ty::Struct(sn.clone())));
+                                        }
+                                    }
+                                    return Ty::Own(Box::new(self.expr_ty(a)));
                                 }
                             }
                             return Ty::Own(Box::new(Ty::Unknown));
@@ -591,6 +676,11 @@ impl<'a> Gen<'a> {
                 Ty::Unknown
             }
             ExprKind::Field { obj, name } => {
+                if let Some(on) = field_path(obj) {
+                    if let Some((en, _, _)) = self.enum_variant(&format!("{on}.{name}")) {
+                        return Ty::Enum(en.to_string());
+                    }
+                }
                 let ot = self.expr_ty(obj);
                 let sn = match &ot {
                     Ty::Struct(n) => Some(n.clone()),
@@ -609,7 +699,17 @@ impl<'a> Gen<'a> {
                 }
                 Ty::Unknown
             }
-            ExprKind::StructLit { name, .. } => Ty::Struct(name.clone()),
+            ExprKind::StructLit { name, .. } => {
+                if let Some((en, _, _)) = self.enum_variant(name) {
+                    Ty::Enum(en.to_string())
+                } else {
+                    Ty::Struct(name.clone())
+                }
+            }
+            ExprKind::As { ty, .. } => match &ty.kind {
+                TyKind::Named(n) if self.enum_variant(n).is_some() => Ty::Struct(n.clone()),
+                _ => Ty::Unknown,
+            },
             ExprKind::Bin { op, l, r } => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                 | BinOp::And | BinOp::Or => Ty::Bool,
@@ -652,8 +752,11 @@ impl<'a> Gen<'a> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Let { name, init, .. } => {
-                let t = self.expr_ty(init);
+            Stmt::Let { name, ty, init, .. } => {
+                let t = match ty {
+                    Some(tr) => self.ty_of_ref(tr),
+                    None => self.expr_ty(init),
+                };
                 let ct = self.cty(&t);
                 let v = self.expr(init);
                 let _ = writeln!(self.out, "    {ct} {name} = {v};");
@@ -886,6 +989,12 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Call { f, args } => self.call(f, args),
             ExprKind::Field { obj, name } => {
+                // unit variant value: `ExprKind.Nil` (dotted/module path)
+                if let Some(on) = field_path(obj) {
+                    if let Some((en, _v, i)) = self.enum_variant(&format!("{on}.{name}")) {
+                        return format!("(struct o_en_{}){{ .tag = {} }}", cname(&en), i);
+                    }
+                }
                 let o = self.expr(obj);
                 match self.expr_ty(obj) {
                     Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) => format!("{o}->f_{name}"),
@@ -893,12 +1002,44 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::StructLit { name, fields } => {
+                // named variant construction: `ExprKind.Bin{op, l, r}`
+                if let Some((en, _v, i)) = self.enum_variant(name) {
+                    let init = fields
+                        .iter()
+                        .map(|(n, fe)| format!(".f_{n} = {}", self.expr(fe)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return format!(
+                        "(struct o_en_{}){{ .tag = {}, .u.v{} = (struct o_s_{}){{ {} }} }}",
+                        cname(&en), i, i, cname(name), init);
+                }
                 let init = fields
                     .iter()
                     .map(|(n, fe)| format!(".f_{n} = {}", self.expr(fe)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("(struct o_s_{}){{ {init} }}", cname(&name))
+            }
+            ExprKind::As { e: inner, ty } => {
+                // `e as E.V` — extract the variant payload struct
+                let tn = match &ty.kind {
+                    TyKind::Named(n) => n.clone(),
+                    _ => "?".into(),
+                };
+                match self.enum_variant(&tn) {
+                    Some((en, _v, i)) => {
+                        let e = self.expr(inner);
+                        let ec = cname(&en);
+                        // tag-checked payload extraction — a wrong-variant
+                        // `as` traps instead of reading the union raw
+                        if matches!(self.expr_ty(inner), Ty::Own(_)) {
+                            format!("({{ struct o_en_{ec} *_ev = ({e}); if ((*_ev).tag != {i}) rt_trap(9); (*_ev).u.v{i}; }})")
+                        } else {
+                            format!("({{ struct o_en_{ec} _ev = ({e}); if (_ev.tag != {i}) rt_trap(9); _ev.u.v{i}; }})")
+                        }
+                    }
+                    None => format!("({})", self.expr(inner)),
+                }
             }
             ExprKind::Bin { op, l, r } => {
                 let lt = self.expr_ty(l);
@@ -960,9 +1101,39 @@ impl<'a> Gen<'a> {
         })
     }
 
+    /// `E.V` — enum name + variant index (tag = declaration order)
+    fn enum_variant(&self, path: &str) -> Option<(String, String, usize)> {
+        let (e, v) = path.rsplit_once('.')?;
+        let i = self.enums.get(e)?.iter().position(|n| n == v)?;
+        Some((e.to_string(), v.to_string(), i))
+    }
+
     fn call(&mut self, f: &Expr, args: &[Expr]) -> String {
         let argvs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
         if let ExprKind::Ident(name) = &f.kind {
+            // enum variant construction: `ExprKind.Int(7)`
+            if let Some((en, _v, i)) = self.enum_variant(name) {
+                let key = cname(name);
+                return format!(
+                    "(struct o_en_{}){{ .tag = {}, .u.v{} = (struct o_s_{}){{ {} }} }}",
+                    cname(&en), i, i, key,
+                    argvs.join(", "));
+            }
+            // `e.kind()` — enum tag accessor (deref `own` handles)
+            if let Some((obj, "kind")) = name.rsplit_once('.') {
+                if args.is_empty() {
+                    let oe = Expr {
+                        kind: ExprKind::Ident(obj.to_string()), span: f.span,
+                    };
+                    let ot = self.expr_ty(&oe);
+                    if matches!(ot, Ty::Enum(_)) {
+                        return format!("({}).tag", self.expr(&oe));
+                    }
+                    if matches!(&ot, Ty::Own(b) if matches!(**b, Ty::Enum(_))) {
+                        return format!("(*{}).tag", self.expr(&oe));
+                    }
+                }
+            }
             match name.as_str() {
                 "print" | "println" => {
                     let t = self.expr_ty(&args[0]);
@@ -983,8 +1154,16 @@ impl<'a> Gen<'a> {
                 }
                 "new" => {
                     if let ExprKind::Ident(sn) = &args[0].kind {
-                        return format!("(struct o_s_{0}*)rt_alloc(sizeof(struct o_s_{0}))", cname(&sn));
+                        if self.structs.contains_key(sn.as_str()) {
+                            // zero-init: field presence is tested with `== nil`
+                            return format!("({{ struct o_s_{0} *_nb = rt_alloc(sizeof(struct o_s_{0})); __builtin_memset(_nb, 0, sizeof(struct o_s_{0})); _nb; }})", cname(&sn));
+                        }
                     }
+                    // new(value) — heap-box the value: `own <ty>`
+                    let ct = self.cty(&self.expr_ty(&args[0]));
+                    let v = self.expr(&args[0]);
+                    return format!(
+                        "({{ {ct} *_nb = rt_alloc(sizeof({ct})); *_nb = ({v}); _nb; }})");
                 }
                 _ => {
                     if let Some(b) = self.builtin_emit(name, &argvs) {
@@ -1108,6 +1287,7 @@ impl<'a> Gen<'a> {
             ExprKind::Bin { l, r, .. } => self.expr_has_susp(l) || self.expr_has_susp(r),
             ExprKind::Un { e, .. } => self.expr_has_susp(e),
             ExprKind::Field { obj, .. } => self.expr_has_susp(obj),
+            ExprKind::As { e, .. } => self.expr_has_susp(e),
             ExprKind::StructLit { fields, .. } => {
                 fields.iter().any(|(_, fe)| self.expr_has_susp(fe))
             }
@@ -1206,6 +1386,13 @@ impl<'a> Gen<'a> {
                 kind: ExprKind::Field {
                     obj: Box::new(self.hoist_expr(obj, pre)),
                     name: name.clone(),
+                },
+                span: e.span,
+            },
+            ExprKind::As { e: i, ty } => Expr {
+                kind: ExprKind::As {
+                    e: Box::new(self.hoist_expr(i, pre)),
+                    ty: ty.clone(),
                 },
                 span: e.span,
             },

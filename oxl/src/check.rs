@@ -16,6 +16,7 @@ pub enum Ty {
     Ref(Box<Ty>),
     Mut(Box<Ty>),
     Struct(String),
+    Enum(String),
     Var(String), // generic type parameter (instantiated at call sites)
     Unknown,
 }
@@ -35,6 +36,7 @@ impl Ty {
             Ty::Ref(t) => format!("ref {}", t.name()),
             Ty::Mut(t) => format!("mut {}", t.name()),
             Ty::Struct(n) => n.clone(),
+            Ty::Enum(n) => n.clone(),
             Ty::Var(n) => n.clone(),
             Ty::Unknown => "?".into(),
         }
@@ -88,6 +90,9 @@ pub struct Checker<'a> {
     diags: &'a mut Diags,
     fns: HashMap<String, FnSig>,
     structs: HashMap<String, Vec<(String, Ty)>>,
+    /// enum name -> [(variant, fields)]; fields f0..fn for positional
+    /// payloads. Variant payload structs also live in `structs` as "E.V".
+    enums: HashMap<String, Vec<(String, Vec<(String, Ty)>)>>,
     ifaces: HashMap<String, Vec<String>>,
     cur_ret: Ret,
     calls: HashMap<String, HashSet<String>>, // caller -> callee fn names
@@ -113,6 +118,7 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
         diags,
         fns: HashMap::new(),
         structs: HashMap::new(),
+        enums: HashMap::new(),
         ifaces: HashMap::new(),
         cur_ret: Ret::Void,
         calls: HashMap::new(),
@@ -132,16 +138,42 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
 
 impl<'a> Checker<'a> {
     fn register(&mut self, c: &Crate) {
-        // pass 0: struct names so self-references and forward use resolve
+        // pass 0: struct/enum names so self-references and forward use
+        // resolve (recursive payloads like `own Expr` inside `Expr`)
         for it in &c.items {
             if let Item::Struct(s) = it {
                 self.structs.insert(s.name.clone(), Vec::new());
+            }
+            if let Item::Enum(e) = it {
+                self.enums.insert(e.name.clone(), Vec::new());
             }
             if let Item::Interface(i) = it {
                 self.ifaces.insert(i.name.clone(), i.ops.clone());
             }
         }
         for it in &c.items {
+            if let Item::Enum(e) = it {
+                let mut seen = HashSet::new();
+                let mut variants = Vec::new();
+                for v in &e.variants {
+                    if !seen.insert(v.name.clone()) {
+                        self.diags.push(Diag::err(v.span, "check",
+                            format!("duplicate variant `{}`", v.name)));
+                        continue;
+                    }
+                    let fields: Vec<(String, Ty)> = match &v.payload {
+                        VariantPayload::Unit => Vec::new(),
+                        VariantPayload::Pos(tys) => tys.iter().enumerate()
+                            .map(|(i, t)| (format!("f{i}"), self.resolve(t))).collect(),
+                        VariantPayload::Named(fs) => fs.iter()
+                            .map(|(n, t)| (n.clone(), self.resolve(t))).collect(),
+                    };
+                    // the `as` payload type: `E.V` resolves as a struct
+                    self.structs.insert(format!("{}.{}", e.name, v.name), fields.clone());
+                    variants.push((v.name.clone(), fields));
+                }
+                self.enums.insert(e.name.clone(), variants);
+            }
             if let Item::Struct(s) = it {
                     let mut fields = Vec::new();
                     for f in &s.fields {
@@ -198,7 +230,7 @@ impl<'a> Checker<'a> {
                     };
                     self.globals.insert(g.name.clone(), t);
                 }
-                Item::Struct(_) | Item::Interface(_) => {}
+                Item::Struct(_) | Item::Interface(_) | Item::Enum(_) => {}
             }
         }
     }
@@ -226,6 +258,8 @@ impl<'a> Checker<'a> {
                         Ty::Var(s.to_string())
                     } else if self.structs.contains_key(s) {
                         Ty::Struct(s.to_string())
+                    } else if self.enums.contains_key(s) {
+                        Ty::Enum(s.to_string())
                     } else {
                         self.diags.push(Diag::err(t.span, "check", format!("unknown type `{s}`")));
                         Ty::Unknown
@@ -521,6 +555,39 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `E.V` — split at the last dot: E is the (possibly qualified) enum
+    /// name, V the variant. Returns (enum, variant, fields).
+    fn enum_variant(&self, path: &str) -> Option<(String, String, Vec<(String, Ty)>)> {
+        let (e, v) = path.rsplit_once('.')?;
+        let fields = self.enums.get(e)?
+            .iter().find(|(n, _)| n == v)?.1.clone();
+        Some((e.to_string(), v.to_string(), fields))
+    }
+
+    /// check variant-construction args (positional call or named lit)
+    #[allow(clippy::too_many_arguments)]
+    fn check_ctor(
+        &mut self, e_name: &str, v_name: &str, want: &[(String, Ty)],
+        given: &[(&String, &Expr)], sp: Span, env: &mut Env,
+    ) {
+        if given.len() != want.len() {
+            self.diags.push(Diag::err(sp, "type",
+                format!("`{e_name}.{v_name}` takes {} payload field(s), found {}",
+                    want.len(), given.len())));
+            return;
+        }
+        for ((wn, wt), (gn, ge)) in want.iter().zip(given.iter()) {
+            if wn != *gn {
+                self.diags.push(Diag::err(ge.span, "type",
+                    format!("`{e_name}.{v_name}` field `{wn}` got `{gn}`")));
+                continue;
+            }
+            let gt = self.expr(ge, env);
+            let wt = wt.clone();
+            self.assignable(&wt, &gt, ge.span);
+        }
+    }
+
     fn expr(&mut self, e: &Expr, env: &mut Env) -> Ty {
         match &e.kind {
             ExprKind::Int(_) => Ty::Int,
@@ -541,6 +608,27 @@ impl<'a> Checker<'a> {
             },
             ExprKind::Call { f, args } => self.call(f, args, e.span, env),
             ExprKind::Field { obj, name } => {
+                // unit variant: `ExprKind.Nil` — obj is the enum name
+                // (possibly a module path), not a value expression
+                if let Some(on) = field_path(obj) {
+                    if let Some(vars) = self.enums.get(&on).cloned() {
+                        match vars.iter().find(|(n, _)| n == name) {
+                            Some((_, fields)) if fields.is_empty() => {
+                                return Ty::Enum(on.clone());
+                            }
+                            Some(_) => {
+                                self.diags.push(Diag::err(e.span, "check",
+                                    format!("`{on}.{name}` has a payload — construct it")));
+                                return Ty::Unknown;
+                            }
+                            None => {
+                                self.diags.push(Diag::err(e.span, "check",
+                                    format!("enum `{on}` has no variant `{name}`")));
+                                return Ty::Unknown;
+                            }
+                        }
+                    }
+                }
                 let t = self.expr(obj, env);
                 let base = match &t {
                     Ty::Struct(n) => Some(n.clone()),
@@ -572,6 +660,36 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::StructLit { name, fields } => {
+                // named variant construction: `ExprKind.Bin{op, l, r}`
+                if let Some((en, vn, want)) = self.enum_variant(name) {
+                    if want.iter().any(|(n, _)| !(n.starts_with('f') && n[1..].chars().all(|c| c.is_ascii_digit()))) || want.is_empty() {
+                        let given: Vec<(&String, &Expr)> = want.iter()
+                            .map(|(n, _)| n)
+                            .filter_map(|n| fields.iter().find(|(g, _)| g == n).map(|(g, fe)| (g, fe)))
+                            .collect();
+                        let gv: HashSet<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+                        for (n, fe) in fields {
+                            if !want.iter().any(|(w, _)| w == n) {
+                                self.diags.push(Diag::err(fe.span, "type",
+                                    format!("`{name}` has no field `{n}`")));
+                            }
+                        }
+                        if given.len() != want.len() {
+                            for (n, _) in &want {
+                                if !gv.contains(n.as_str()) {
+                                    self.diags.push(Diag::err(e.span, "type",
+                                        format!("missing field `{n}` in `{name}` literal")));
+                                }
+                            }
+                        }
+                        self.check_ctor(&en, name, &want, &given, e.span, env);
+                    } else {
+                        self.diags.push(Diag::err(e.span, "check",
+                            format!("`{name}` has positional payload — call it `{name}(...)`")));
+                    }
+                    let _ = vn;
+                    return Ty::Enum(en);
+                }
                 match self.structs.get(name).cloned() {
                     Some(want) => {
                         for (fname, fe) in fields {
@@ -596,6 +714,30 @@ impl<'a> Checker<'a> {
                     }
                     None => {
                         self.diags.push(Diag::err(e.span, "type", format!("unknown struct `{name}`")));
+                        Ty::Unknown
+                    }
+                }
+            }
+            ExprKind::As { e: inner, ty } => {
+                let ot = self.expr(inner, env);
+                let wt = self.resolve(ty);
+                // `e as E.V` on an `own E` dereferences the handle
+                let base = match &ot { Ty::Own(b) => &**b, t => t };
+                match (base, &wt) {
+                    (Ty::Enum(en), Ty::Struct(sn)) => {
+                        if self.enum_variant(sn).map(|(e2, _, _)| e2) == Some(en.clone()) {
+                            Ty::Struct(sn.clone())
+                        } else {
+                            self.diags.push(Diag::err(e.span, "type",
+                                format!("`{sn}` is not a variant of `{en}`")));
+                            Ty::Unknown
+                        }
+                    }
+                    (Ty::Unknown, _) | (_, Ty::Unknown) => Ty::Unknown,
+                    _ => {
+                        self.diags.push(Diag::err(e.span, "type",
+                            format!("`as` casts enum values to variant payloads — `{} as {}` invalid",
+                                ot.name(), wt.name())));
                         Ty::Unknown
                     }
                 }
@@ -675,6 +817,37 @@ impl<'a> Checker<'a> {
 
     fn call(&mut self, f: &Expr, args: &[Expr], sp: Span, env: &mut Env) -> Ty {
         if let ExprKind::Ident(name) = &f.kind {
+            // enum variant construction: `ExprKind.Int(7)` qualifies to
+            // an Ident call on the dotted path
+            if let Some((en, vn, fields)) = self.enum_variant(name) {
+                if fields.iter().all(|(n, _)| n.starts_with('f') && n[1..].chars().all(|c| c.is_ascii_digit())) {
+                    // positional payload: args in declaration order
+                    let given: Vec<(&String, &Expr)> = fields.iter().map(|(n, _)| n)
+                        .zip(args.iter()).collect();
+                    self.check_ctor(&en, &vn, &fields, &given, sp, env);
+                } else {
+                    self.diags.push(Diag::err(sp, "check",
+                        format!("`{name}` has named payload — use `{name}{{...}}`")));
+                }
+                return Ty::Enum(en);
+            }
+            // `e.kind()` — enum tag accessor (flattens to Ident "e.kind")
+            if let Some((obj, "kind")) = name.rsplit_once('.') {
+                if args.is_empty() {
+                    let ot = self.expr(&Expr {
+                        kind: ExprKind::Ident(obj.to_string()), span: f.span,
+                    }, env);
+                    let otb = match &ot { Ty::Own(b) => &**b, t => t };
+                    if matches!(otb, Ty::Enum(_)) {
+                        return Ty::Int;
+                    }
+                    if ot != Ty::Unknown {
+                        self.diags.push(Diag::err(sp, "type",
+                            format!("`.kind()` on non-enum `{}`", ot.name())));
+                    }
+                    return Ty::Unknown;
+                }
+            }
             if self.fns.contains_key(name) {
                 self.calls.entry(self.cur_fn.clone()).or_default().insert(name.clone());
             }
@@ -730,15 +903,17 @@ impl<'a> Checker<'a> {
                     return Ty::Void;
                 }
                 "new" => {
-                    // new(StructName) -> own Struct
-                    if let Some(Expr { kind: ExprKind::Ident(n), .. }) = args.first() {
-                        if self.structs.contains_key(n) {
-                            return Ty::Own(Box::new(Ty::Struct(n.clone())));
+                    // new(StructName) -> own Struct; new(expr) -> own <expr ty>
+                    if let Some(a) = args.first() {
+                        if let Expr { kind: ExprKind::Ident(n), .. } = a {
+                            if self.structs.contains_key(n) {
+                                return Ty::Own(Box::new(Ty::Struct(n.clone())));
+                            }
                         }
-                        self.diags.push(Diag::err(sp, "type", format!("`new` needs a struct name, got `{n}`")));
-                    } else {
-                        self.diags.push(Diag::err(sp, "type", "`new` needs a struct name"));
+                        let t = self.expr(a, env);
+                        return Ty::Own(Box::new(t));
                     }
+                    self.diags.push(Diag::err(sp, "type", "`new` needs a struct name or value"));
                     return Ty::Unknown;
                 }
                 "itoa" => {
@@ -978,6 +1153,7 @@ impl<'a> Checker<'a> {
                 ExprKind::Bin { l, r, .. } => expr_susp(l) || expr_susp(r),
                 ExprKind::Un { e, .. } => expr_susp(e),
                 ExprKind::Field { obj, .. } => expr_susp(obj),
+                ExprKind::As { e, .. } => expr_susp(e),
                 ExprKind::StructLit { fields, .. } => fields.iter().any(|(_, e)| expr_susp(e)),
                 _ => false,
             }
@@ -1025,6 +1201,7 @@ impl<'a> Checker<'a> {
                 }
                 ExprKind::Un { e, .. } => expr_has_susp(e, susp),
                 ExprKind::Field { obj, .. } => expr_has_susp(obj, susp),
+                ExprKind::As { e, .. } => expr_has_susp(e, susp),
                 ExprKind::StructLit { fields, .. } => {
                     fields.iter().any(|(_, e)| expr_has_susp(e, susp))
                 }
@@ -1073,6 +1250,15 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
+    }
+}
+
+/// flatten `a.b.c` Field chains to a dotted string (enum/module paths)
+fn field_path(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Ident(n) => Some(n.clone()),
+        ExprKind::Field { obj, name } => Some(format!("{}.{}", field_path(obj)?, name)),
+        _ => None,
     }
 }
 

@@ -3,6 +3,10 @@
 // the AST as JSON via std/json. With the lexer, the entire compiler
 // frontend now exists in-language.
 //
+// Internals are a typed `Node` enum (B1) — every variant maps to one
+// `{tag: ...}` Json object; `to_json` walks the tree at the end, so
+// the emitted output is unchanged.
+//
 //   oxl run bootstrap/parser.oxl -- examples/hello.oxl
 
 import "lexlib"
@@ -12,6 +16,245 @@ struct PCur {
     t: own lexlib.Tok
     nolit: int // 1 while parsing if/for conditions — `{` is a block, not a literal
 }
+
+// ---------- typed AST ----------
+//
+// One variant per `{tag: ...}` node the parser emits. Child lists are
+// `own NList` cons cells; optional children are `own Node` = nil.
+
+struct NList { v: own Node, next: own NList }
+
+enum Node {
+    JInt(int),                              // {"int": i}
+    JStr(str),                              // {"str": s}
+    Name(str),                              // {"name": s}
+    Ty(str),                                // {"ty": s}
+    NamedField{name: str, val: own Node},   // {"name": s, "val": <v>}
+    Param{name: str, ty: own Node},         // {"name": s} (+"ty")
+    FieldDef{name: str, ty: own Node},      // {"name": s} (+"ty")
+    Lit{obj: own Node, fields: own NList},  // {"lit": <o>, "fields": [...]}
+    Call{f: own Node, args: own NList},     // {"call": <f>, "args": [...]}
+    Field{obj: own Node, name: str},        // {"field": <o>, "name": s}
+    Un{op: str, e: own Node},               // {"un": s, "e": <e>}
+    Bin{op: str, l: own Node, r: own Node}, // {"bin": s, "l": <l>, "r": <r>}
+    Let{name: str, init: own Node},         // {"let": s} (+"init")
+    Ret{vals: own NList},                   // {"return": [...]}
+    Break,                                  // {"break": null}
+    Continue,                               // {"continue": null}
+    Scope{body: own Node},                  // {"scope": <body>}
+    Spawn{e: own Node},                     // {"spawn": <e>}
+    SpawnBlocking{e: own Node},             // {"spawnBlocking": <e>}
+    Go{e: own Node},                        // {"go": <e>}
+    Let2{names: str, call: own Node},       // {"let2": s} (+"call")
+    Bind{name: str, init: own Node},        // {"bind": s, "init": <init>}
+    ExprStmt{e: own Node},                  // {"expr": <e>}
+    If{cond: own Node, then: own Node, els: own Node}, // {"if","then",(+"else")}
+    For{cond: own Node, body: own Node},    // {"for": <cond>, "body": <body>}
+    List{items: own NList},                 // bare [...] array node
+    Fn{ex: bool, name: str, params: own NList, ret: own Node, body: own Node},
+    Import{path: str},                      // {"import": s}
+    Struct{name: str, fields: own NList},   // {"struct": s, "fields": [...]}
+    Skip{text: str},                        // {"skip": s}
+    Root{items: own NList},                 // {"items": [...]}
+    Enum{name: str, vars: own NList},       // {"enum": s, "variants": [...]}
+    Variant{name: str, args: own NList},    // {"variant": s, "args": [...]}
+    As{e: own Node, ty: own Node},          // {"as": <e>, "ty": <t>}
+}
+
+fn ncons(v: own Node, next: own NList) -> own NList {
+    c := new(NList)
+    c.v = v
+    c.next = next
+    return c
+}
+
+fn nrev(l: own NList) -> own NList {
+    let out: own NList = nil
+    for l != nil {
+        n := l.next
+        l.next = out
+        out = l
+        l = n
+    }
+    return out
+}
+
+
+// box a Node value into `own Node` — constructions are by-value; the
+// AST is all `own` handles
+fn b(n: Node) -> own Node { return new(n) }
+
+fn jl_items(l: own NList) -> own json.Json {
+    a := json.jarr()
+    cur := l
+    for cur != nil {
+        json.jadd(a, "", to_json(cur.v))
+        cur = cur.next
+    }
+    return a
+}
+
+fn to_json(n: own Node) -> own json.Json {
+    // List is a bare array — emit it directly, not as a tagged object
+    if n.kind() == 25 {
+        p := n as Node.List
+        return jl_items(p.items)
+    }
+    o := json.jobj()
+    k := n.kind()
+    if k == 0 {
+        p := n as Node.JInt
+        json.jadd(o, "int", json.jint(p.f0))
+    }
+    if k == 1 {
+        p := n as Node.JStr
+        json.jadd(o, "str", json.jstr(p.f0))
+    }
+    if k == 2 {
+        p := n as Node.Name
+        json.jadd(o, "name", json.jstr(p.f0))
+    }
+    if k == 3 {
+        p := n as Node.Ty
+        json.jadd(o, "ty", json.jstr(p.f0))
+    }
+    if k == 4 {
+        p := n as Node.NamedField
+        json.jadd(o, "name", json.jstr(p.name))
+        json.jadd(o, "val", to_json(p.val))
+    }
+    if k == 5 {
+        p := n as Node.Param
+        json.jadd(o, "name", json.jstr(p.name))
+        if p.ty != nil { json.jadd(o, "ty", to_json(p.ty)) }
+    }
+    if k == 6 {
+        p := n as Node.FieldDef
+        json.jadd(o, "name", json.jstr(p.name))
+        if p.ty != nil { json.jadd(o, "ty", to_json(p.ty)) }
+    }
+    if k == 7 {
+        p := n as Node.Lit
+        json.jadd(o, "lit", to_json(p.obj))
+        json.jadd(o, "fields", jl_items(p.fields))
+    }
+    if k == 8 {
+        p := n as Node.Call
+        json.jadd(o, "call", to_json(p.f))
+        json.jadd(o, "args", jl_items(p.args))
+    }
+    if k == 9 {
+        p := n as Node.Field
+        json.jadd(o, "field", to_json(p.obj))
+        json.jadd(o, "name", json.jstr(p.name))
+    }
+    if k == 10 {
+        p := n as Node.Un
+        json.jadd(o, "un", json.jstr(p.op))
+        json.jadd(o, "e", to_json(p.e))
+    }
+    if k == 11 {
+        p := n as Node.Bin
+        json.jadd(o, "bin", json.jstr(p.op))
+        json.jadd(o, "l", to_json(p.l))
+        json.jadd(o, "r", to_json(p.r))
+    }
+    if k == 12 {
+        p := n as Node.Let
+        json.jadd(o, "let", json.jstr(p.name))
+        if p.init != nil { json.jadd(o, "init", to_json(p.init)) }
+    }
+    if k == 13 {
+        p := n as Node.Ret
+        json.jadd(o, "return", jl_items(p.vals))
+    }
+    if k == 14 { json.jadd(o, "break", json.jnull()) }
+    if k == 15 { json.jadd(o, "continue", json.jnull()) }
+    if k == 16 {
+        p := n as Node.Scope
+        json.jadd(o, "scope", to_json(p.body))
+    }
+    if k == 17 {
+        p := n as Node.Spawn
+        json.jadd(o, "spawn", to_json(p.e))
+    }
+    if k == 18 {
+        p := n as Node.SpawnBlocking
+        json.jadd(o, "spawnBlocking", to_json(p.e))
+    }
+    if k == 19 {
+        p := n as Node.Go
+        json.jadd(o, "go", to_json(p.e))
+    }
+    if k == 20 {
+        p := n as Node.Let2
+        json.jadd(o, "let2", json.jstr(p.names))
+        if p.call != nil { json.jadd(o, "call", to_json(p.call)) }
+    }
+    if k == 21 {
+        p := n as Node.Bind
+        json.jadd(o, "bind", json.jstr(p.name))
+        json.jadd(o, "init", to_json(p.init))
+    }
+    if k == 22 {
+        p := n as Node.ExprStmt
+        json.jadd(o, "expr", to_json(p.e))
+    }
+    if k == 23 {
+        p := n as Node.If
+        json.jadd(o, "if", to_json(p.cond))
+        json.jadd(o, "then", to_json(p.then))
+        if p.els != nil { json.jadd(o, "else", to_json(p.els)) }
+    }
+    if k == 24 {
+        p := n as Node.For
+        json.jadd(o, "for", to_json(p.cond))
+        json.jadd(o, "body", to_json(p.body))
+    }
+    if k == 26 {
+        p := n as Node.Fn
+        if p.ex { json.jadd(o, "extern", json.jbool(true)) }
+        json.jadd(o, "fn", json.jstr(p.name))
+        json.jadd(o, "params", jl_items(p.params))
+        if p.ret != nil { json.jadd(o, "ret", to_json(p.ret)) }
+        if p.body != nil { json.jadd(o, "body", to_json(p.body)) }
+    }
+    if k == 27 {
+        p := n as Node.Import
+        json.jadd(o, "import", json.jstr(p.path))
+    }
+    if k == 28 {
+        p := n as Node.Struct
+        json.jadd(o, "struct", json.jstr(p.name))
+        json.jadd(o, "fields", jl_items(p.fields))
+    }
+    if k == 29 {
+        p := n as Node.Skip
+        json.jadd(o, "skip", json.jstr(p.text))
+    }
+    if k == 30 {
+        p := n as Node.Root
+        json.jadd(o, "items", jl_items(p.items))
+    }
+    if k == 31 {
+        p := n as Node.Enum
+        json.jadd(o, "enum", json.jstr(p.name))
+        json.jadd(o, "variants", jl_items(p.vars))
+    }
+    if k == 32 {
+        p := n as Node.Variant
+        json.jadd(o, "variant", json.jstr(p.name))
+        json.jadd(o, "args", jl_items(p.args))
+    }
+    if k == 33 {
+        p := n as Node.As
+        json.jadd(o, "as", to_json(p.e))
+        json.jadd(o, "ty", to_json(p.ty))
+    }
+    return o
+}
+
+// ---------- cursor ----------
 
 fn peek(c: mut PCur) -> str {
     if c.t == nil { return "" }
@@ -46,17 +289,15 @@ fn eat(c: mut PCur, w: str) -> bool {
 
 // ---------- expressions ----------
 
-fn p_primary(c: mut PCur) -> own json.Json {
+fn p_primary(c: mut PCur) -> own Node {
     k := pkind(c)
     if k == 3 {
-        e := json.jobj()
-        json.jadd(e, "int", json.jint(atoi(peek(c))))
+        e := b(Node.JInt(atoi(peek(c))))
         next(c)
         return e
     }
     if k == 4 {
-        e := json.jobj()
-        json.jadd(e, "str", json.jstr(peek(c)))
+        e := b(Node.JStr(peek(c)))
         next(c)
         return e
     }
@@ -66,55 +307,65 @@ fn p_primary(c: mut PCur) -> own json.Json {
         return e
     }
     // ident / keyword literals
-    e := json.jobj()
-    json.jadd(e, "name", json.jstr(peek(c)))
+    e := b(Node.Name(peek(c)))
     next(c)
     // struct literal: Name { f: v, ... } — suppressed in cond position
     if at(c, "{") && c.nolit == 0 {
         next(c)
-        lit := json.jobj()
-        json.jadd(lit, "lit", e)
-        fields := json.jarr()
+        let fields: own NList = nil
         for !at(c, "}") && !eof(c) {
-            f := json.jobj()
-            json.jadd(f, "name", json.jstr(peek(c)))
+            fname := peek(c)
             next(c)
             eat(c, ":")
-            json.jadd(f, "val", p_expr(c))
-            json.jadd(fields, "", f)
+            fields = ncons(b(Node.NamedField{name: fname, val: p_expr(c)}), fields)
             eat(c, ",")
         }
         eat(c, "}")
-        json.jadd(lit, "fields", fields)
-        return lit
+        return b(Node.Lit{obj: e, fields: nrev(fields)})
     }
     return e
 }
 
-fn p_postfix(c: mut PCur) -> own json.Json {
+fn p_postfix(c: mut PCur) -> own Node {
     e := p_primary(c)
     for true {
         if at(c, "(") {
             next(c)
-            call := json.jobj()
-            json.jadd(call, "call", e)
-            args := json.jarr()
+            let args: own NList = nil
             for !at(c, ")") && !eof(c) {
-                json.jadd(args, "", p_expr(c))
+                args = ncons(p_expr(c), args)
                 eat(c, ",")
             }
             eat(c, ")")
-            json.jadd(call, "args", args)
-            e = call
+            e = b(Node.Call{f: e, args: nrev(args)})
             continue
         }
         if at(c, ".") {
             next(c)
-            f := json.jobj()
-            json.jadd(f, "field", e)
-            json.jadd(f, "name", json.jstr(peek(c)))
+            e = b(Node.Field{obj: e, name: peek(c)})
             next(c)
-            e = f
+            continue
+        }
+        // `E.V{...}`/`a.b{...}` — lit on a postfix expr (bare `Name{...}`
+        // is handled in p_primary)
+        if at(c, "{") && c.nolit == 0 {
+            next(c)
+            let fields: own NList = nil
+            for !at(c, "}") && !eof(c) {
+                fname := peek(c)
+                next(c)
+                eat(c, ":")
+                fields = ncons(b(Node.NamedField{name: fname, val: p_expr(c)}), fields)
+                eat(c, ",")
+            }
+            eat(c, "}")
+            e = b(Node.Lit{obj: e, fields: nrev(fields)})
+            continue
+        }
+        // `e as T` — enum payload extraction / type assertion
+        if at(c, "as") {
+            next(c)
+            e = b(Node.As{e: e, ty: p_ty(c)})
             continue
         }
         break
@@ -122,116 +373,87 @@ fn p_postfix(c: mut PCur) -> own json.Json {
     return e
 }
 
-fn p_unary(c: mut PCur) -> own json.Json {
+fn p_unary(c: mut PCur) -> own Node {
     if at(c, "!") || at(c, "-") {
         op := peek(c)
         next(c)
-        u := json.jobj()
-        json.jadd(u, "un", json.jstr(op))
-        json.jadd(u, "e", p_unary(c))
-        return u
+        return b(Node.Un{op: op, e: p_unary(c)})
     }
     return p_postfix(c)
 }
 
-fn p_mul(c: mut PCur) -> own json.Json {
+fn p_mul(c: mut PCur) -> own Node {
     l := p_unary(c)
     for at(c, "*") || at(c, "/") {
         op := peek(c)
         next(c)
-        b := json.jobj()
-        json.jadd(b, "bin", json.jstr(op))
-        json.jadd(b, "l", l)
-        json.jadd(b, "r", p_unary(c))
-        l = b
+        l = b(Node.Bin{op: op, l: l, r: p_unary(c)})
     }
     return l
 }
 
-fn p_add(c: mut PCur) -> own json.Json {
+fn p_add(c: mut PCur) -> own Node {
     l := p_mul(c)
     for at(c, "+") || at(c, "-") {
         op := peek(c)
         next(c)
-        b := json.jobj()
-        json.jadd(b, "bin", json.jstr(op))
-        json.jadd(b, "l", l)
-        json.jadd(b, "r", p_mul(c))
-        l = b
+        l = b(Node.Bin{op: op, l: l, r: p_mul(c)})
     }
     return l
 }
 
-fn p_cmp(c: mut PCur) -> own json.Json {
+fn p_cmp(c: mut PCur) -> own Node {
     l := p_add(c)
     for at(c, "==") || at(c, "!=") || at(c, "<") || at(c, ">") || at(c, "<=") || at(c, ">=") {
         op := peek(c)
         next(c)
-        b := json.jobj()
-        json.jadd(b, "bin", json.jstr(op))
-        json.jadd(b, "l", l)
-        json.jadd(b, "r", p_add(c))
-        l = b
+        l = b(Node.Bin{op: op, l: l, r: p_add(c)})
     }
     return l
 }
 
-fn p_and(c: mut PCur) -> own json.Json {
+fn p_and(c: mut PCur) -> own Node {
     l := p_cmp(c)
     for at(c, "&&") {
         next(c)
-        b := json.jobj()
-        json.jadd(b, "bin", json.jstr("&&"))
-        json.jadd(b, "l", l)
-        json.jadd(b, "r", p_cmp(c))
-        l = b
+        l = b(Node.Bin{op: "&&", l: l, r: p_cmp(c)})
     }
     return l
 }
 
-fn p_expr(c: mut PCur) -> own json.Json {
+fn p_expr(c: mut PCur) -> own Node {
     l := p_and(c)
     for at(c, "||") {
         next(c)
-        b := json.jobj()
-        json.jadd(b, "bin", json.jstr("||"))
-        json.jadd(b, "l", l)
-        json.jadd(b, "r", p_and(c))
-        l = b
+        l = b(Node.Bin{op: "||", l: l, r: p_and(c)})
     }
     return l
 }
 
 // ---------- statements ----------
 
-fn p_stmt(c: mut PCur) -> own json.Json {
+fn p_stmt(c: mut PCur) -> own Node {
     if eat(c, "let") {
-        s := json.jobj()
-        json.jadd(s, "let", json.jstr(peek(c)))
+        name := peek(c)
         next(c)
         if eat(c, ":") { p_ty(c) }
-        if eat(c, "=") { json.jadd(s, "init", p_expr(c)) }
-        return s
+        let init: own Node = nil
+        if eat(c, "=") { init = p_expr(c) }
+        return b(Node.Let{name: name, init: init})
     }
     if eat(c, "return") {
-        s := json.jobj()
-        vals := json.jarr()
+        let vals: own NList = nil
         for !at(c, "}") && !eof(c) {
-            json.jadd(vals, "", p_expr(c))
+            vals = ncons(p_expr(c), vals)
             if !eat(c, ",") { break }
         }
-        json.jadd(s, "return", vals)
-        return s
+        return b(Node.Ret{vals: nrev(vals)})
     }
     if eat(c, "break") {
-        s := json.jobj()
-        json.jadd(s, "break", json.jnull())
-        return s
+        return b(Node.Break)
     }
     if eat(c, "continue") {
-        s := json.jobj()
-        json.jadd(s, "continue", json.jnull())
-        return s
+        return b(Node.Continue)
     }
     if at(c, "if") {
         return p_if(c)
@@ -240,24 +462,16 @@ fn p_stmt(c: mut PCur) -> own json.Json {
         return p_for(c)
     }
     if eat(c, "scope") {
-        s := json.jobj()
-        json.jadd(s, "scope", p_block(c))
-        return s
+        return b(Node.Scope{body: p_block(c)})
     }
     if eat(c, "spawn") {
-        s := json.jobj()
-        json.jadd(s, "spawn", p_expr(c))
-        return s
+        return b(Node.Spawn{e: p_expr(c)})
     }
     if eat(c, "spawnBlocking") {
-        s := json.jobj()
-        json.jadd(s, "spawnBlocking", p_expr(c))
-        return s
+        return b(Node.SpawnBlocking{e: p_expr(c)})
     }
     if eat(c, "go") {
-        s := json.jobj()
-        json.jadd(s, "go", p_expr(c))
-        return s
+        return b(Node.Go{e: p_expr(c)})
     }
     // [a, b] = call
     if at(c, "[") {
@@ -268,62 +482,54 @@ fn p_stmt(c: mut PCur) -> own json.Json {
         b := peek(c)
         next(c)
         eat(c, "]")
-        s := json.jobj()
-        json.jadd(s, "let2", json.jstr(a + "," + b))
-        if eat(c, "=") { json.jadd(s, "call", p_expr(c)) }
-        return s
+        let call: own Node = nil
+        if eat(c, "=") { call = p_expr(c) }
+        return b(Node.Let2{names: a + "," + b, call: call})
     }
     // ident := expr | ident = expr | call/field stmt
     name := peek(c)
     e := p_postfix(c)
     if eat(c, ":=") || at(c, "=") {
         if peek(c) == "=" { next(c) }
-        s := json.jobj()
-        json.jadd(s, "bind", json.jstr(name))
-        json.jadd(s, "init", p_expr(c))
-        return s
+        return b(Node.Bind{name: name, init: p_expr(c)})
     }
-    s := json.jobj()
-    json.jadd(s, "expr", e)
-    return s
+    return b(Node.ExprStmt{e: e})
 }
 
-fn p_if(c: mut PCur) -> own json.Json {
+fn p_if(c: mut PCur) -> own Node {
     eat(c, "if")
-    s := json.jobj()
     c.nolit = 1
-    json.jadd(s, "if", p_expr(c))
+    cond := p_expr(c)
     c.nolit = 0
-    json.jadd(s, "then", p_block(c))
+    then := p_block(c)
+    let els: own Node = nil
     if eat(c, "else") {
         if at(c, "if") {
-            json.jadd(s, "else", p_if(c))
+            els = p_if(c)
         } else {
-            json.jadd(s, "else", p_block(c))
+            els = p_block(c)
         }
     }
-    return s
+    return b(Node.If{cond: cond, then: then, els: els})
 }
 
-fn p_for(c: mut PCur) -> own json.Json {
+fn p_for(c: mut PCur) -> own Node {
     eat(c, "for")
-    s := json.jobj()
     c.nolit = 1
-    json.jadd(s, "for", p_expr(c))
+    cond := p_expr(c)
     c.nolit = 0
-    json.jadd(s, "body", p_block(c))
-    return s
+    return b(Node.For{cond: cond, body: p_block(c)})
 }
 
-fn p_block(c: mut PCur) -> own json.Json {
-    a := json.jarr()
+fn p_block(c: mut PCur) -> own Node {
+    let items: own NList = nil
     if eat(c, "{") {
         for !at(c, "}") && !eof(c) {
-            json.jadd(a, "", p_stmt(c))
+            items = ncons(p_stmt(c), items)
         }
         eat(c, "}")
     }
-    return a
+    return b(Node.List{items: nrev(items)})
 }
 
 // ---------- types + items ----------
@@ -339,8 +545,7 @@ fn p_dotted(c: mut PCur) -> str {
     return n
 }
 
-fn p_ty(c: mut PCur) -> own json.Json {
-    t := json.jobj()
+fn p_ty(c: mut PCur) -> own Node {
     txt := peek(c)
     // own/ref/mut [own/ref/mut] dotted.name
     if txt == "own" || txt == "ref" || txt == "mut" {
@@ -348,102 +553,132 @@ fn p_ty(c: mut PCur) -> own json.Json {
         inner := peek(c)
         if inner == "own" || inner == "ref" || inner == "mut" {
             next(c)
-            json.jadd(t, "ty", json.jstr(txt + " " + inner + " " + p_dotted(c)))
-            return t
+            return b(Node.Ty(txt + " " + inner + " " + p_dotted(c)))
         }
-        json.jadd(t, "ty", json.jstr(txt + " " + p_dotted(c)))
-        return t
+        return b(Node.Ty(txt + " " + p_dotted(c)))
     }
-    json.jadd(t, "ty", json.jstr(p_dotted(c)))
-    return t
+    return b(Node.Ty(p_dotted(c)))
 }
 
-fn p_params(c: mut PCur) -> own json.Json {
-    a := json.jarr()
+fn p_params(c: mut PCur) -> own NList {
+    let items: own NList = nil
     eat(c, "(")
     for !at(c, ")") && !eof(c) {
-        p := json.jobj()
-        json.jadd(p, "name", json.jstr(peek(c)))
+        name := peek(c)
         next(c)
-        if eat(c, ":") { json.jadd(p, "ty", p_ty(c)) }
-        json.jadd(a, "", p)
+        let ty: own Node = nil
+        if eat(c, ":") { ty = p_ty(c) }
+        items = ncons(b(Node.Param{name: name, ty: ty}), items)
         eat(c, ",")
     }
     eat(c, ")")
-    return a
+    return nrev(items)
 }
 
-fn p_fn(c: mut PCur, ex: bool) -> own json.Json {
-    f := json.jobj()
-    if ex { json.jadd(f, "extern", json.jbool(true)) }
+fn p_fn(c: mut PCur, ex: bool) -> own Node {
     eat(c, "fn")
-    json.jadd(f, "fn", json.jstr(peek(c)))
+    name := peek(c)
     next(c)
-    json.jadd(f, "params", p_params(c))
+    params := p_params(c)
+    let ret: own Node = nil
     if eat(c, "->") {
         if eat(c, "[") { // multi-return [v, err]
-            r := json.jarr()
+            let tys: own NList = nil
             for !at(c, "]") && !eof(c) {
-                json.jadd(r, "", p_ty(c))
+                tys = ncons(p_ty(c), tys)
                 eat(c, ",")
             }
             eat(c, "]")
-            json.jadd(f, "ret", r)
+            ret = b(Node.List{items: nrev(tys)})
         } else {
-            json.jadd(f, "ret", p_ty(c))
+            ret = p_ty(c)
         }
     }
-    if at(c, "{") { json.jadd(f, "body", p_block(c)) }
-    return f
+    let body: own Node = nil
+    if at(c, "{") { body = p_block(c) }
+    return b(Node.Fn{ex: ex, name: name, params: params, ret: ret, body: body})
 }
 
-fn p_item(c: mut PCur) -> own json.Json {
+// enum variant: `V`, `V(t, ..)`, `V { n: t, .. }`
+fn p_variant(c: mut PCur) -> own Node {
+    name := peek(c)
+    next(c)
+    let args: own NList = nil
+    if eat(c, "(") {
+        for !at(c, ")") && !eof(c) {
+            args = ncons(p_ty(c), args)
+            eat(c, ",")
+        }
+        eat(c, ")")
+    }
+    if eat(c, "{") {
+        for !at(c, "}") && !eof(c) {
+            fname := peek(c)
+            next(c)
+            let ty: own Node = nil
+            if eat(c, ":") { ty = p_ty(c) }
+            args = ncons(b(Node.Param{name: fname, ty: ty}), args)
+            eat(c, ",")
+        }
+        eat(c, "}")
+    }
+    return b(Node.Variant{name: name, args: nrev(args)})
+}
+
+fn p_item(c: mut PCur) -> own Node {
     if eat(c, "import") {
-        it := json.jobj()
-        json.jadd(it, "import", json.jstr(peek(c)))
+        path := peek(c)
         next(c)
-        return it
+        return b(Node.Import{path: path})
     }
     if eat(c, "struct") {
-        st := json.jobj()
-        json.jadd(st, "struct", json.jstr(peek(c)))
+        name := peek(c)
         next(c)
-        fields := json.jarr()
+        let fields: own NList = nil
         if eat(c, "{") {
             for !at(c, "}") && !eof(c) {
-                fld := json.jobj()
-                json.jadd(fld, "name", json.jstr(peek(c)))
+                fname := peek(c)
                 next(c)
-                if eat(c, ":") { json.jadd(fld, "ty", p_ty(c)) }
-                json.jadd(fields, "", fld)
+                let ty: own Node = nil
+                if eat(c, ":") { ty = p_ty(c) }
+                fields = ncons(b(Node.FieldDef{name: fname, ty: ty}), fields)
                 eat(c, ",")
             }
             eat(c, "}")
         }
-        json.jadd(st, "fields", fields)
-        return st
+        return b(Node.Struct{name: name, fields: nrev(fields)})
+    }
+    if eat(c, "enum") {
+        name := peek(c)
+        next(c)
+        let vars: own NList = nil
+        if eat(c, "{") {
+            for !at(c, "}") && !eof(c) {
+                vars = ncons(p_variant(c), vars)
+                eat(c, ",")
+            }
+            eat(c, "}")
+        }
+        return b(Node.Enum{name: name, vars: nrev(vars)})
     }
     if eat(c, "extern") { return p_fn(c, true) }
     if at(c, "fn") { return p_fn(c, false) }
     if at(c, "let") { return p_stmt(c) }
     // unknown item — skip the token so we always progress
-    u := json.jobj()
-    json.jadd(u, "skip", json.jstr(peek(c)))
+    text := peek(c)
     next(c)
-    return u
+    return b(Node.Skip{text: text})
 }
 
-fn parse(toks: own lexlib.Tok) -> own json.Json {
+fn parse(toks: own lexlib.Tok) -> own Node {
     c := new(PCur)
     c.t = toks
     c.nolit = 0
-    root := json.jobj()
-    items := json.jarr()
+    let items: own NList = nil
     for pkind(c) != 0 {
-        json.jadd(items, "", p_item(c))
+        items = ncons(p_item(c), items)
     }
-    json.jadd(root, "items", items)
-    return root
+    return b(Node.Root{items: nrev(items)})
 }
 
 fn main() {
@@ -457,5 +692,5 @@ fn main() {
         exit(1)
     }
     ast := parse(lexlib.lex(src))
-    println(json.tojson(ast))
+    println(json.tojson(to_json(ast)))
 }
