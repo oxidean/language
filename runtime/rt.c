@@ -989,28 +989,30 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
     qsort(sorted, (size_t)n, sizeof *sorted, addr_cmp);
     for (int i = 0; i < n; i++) pthread_mutex_lock(&sorted[i]->mu);
 
-    /* re-check: a send may have landed between the sweep and the lock */
-    int nready = 0, last = -1;
-    for (int i = 0; i < n; i++) {
-        int64_t v; RtTask *wm;
-        if (sel_ready(chs[i], &v, &wm)) { nready++; last = i; }
-    }
+    /* re-check: a send may have landed between the sweep and the lock.
+     * Peek the ready set — sel_ready consumes (pops ring/sendq, claims
+     * senders), so a destructive scan would drop payloads and orphan
+     * every claimed sender but the last. Peeked state can't change
+     * while every arm lock is held, so the picked chan still fires. */
+    int nready = 0;
+    for (int i = 0; i < n; i++)
+        if (chs[i]->count > 0 || chs[i]->sendq || chs[i]->has || chs[i]->closed)
+            nready++;
     if (nready) {
         int pick = nready > 1 ? (int)(rand() % (unsigned)nready) : 0;
         int64_t v = 0;
         RtTask *wm = NULL;
-        int seen = 0;
+        int arm = -1, seen = 0;
         for (int i = 0; i < n; i++) {
-            int64_t vv; RtTask *w2;
-            if (sel_ready(chs[i], &vv, &w2)) {
-                if (seen++ == pick) { v = vv; wm = w2; last = i; }
+            if (chs[i]->count > 0 || chs[i]->sendq || chs[i]->has || chs[i]->closed) {
+                if (seen++ == pick) { sel_ready(chs[i], &v, &wm); arm = i; break; }
             }
         }
         for (int i = 0; i < n; i++) pthread_mutex_unlock(&sorted[i]->mu);
         free(sorted);
         if (wm) rt_task_wake(wm);
         t->chan_res = v;
-        t->sel_arm = last;
+        t->sel_arm = arm;
         return RT_READY;
     }
 

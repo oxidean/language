@@ -52,8 +52,7 @@ fn main() {
     scope {
         spawn worker(ch, 5)
         spawn worker(ch, 7)
-        println(itoa(recv(ch)))
-        println(itoa(recv(ch)))
+        println(itoa(recv(ch) + recv(ch)))
     }
     close(ch)
 
