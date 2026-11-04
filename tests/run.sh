@@ -32,6 +32,20 @@ echo "== bootstrap lexer =="
 out=$("$LANG" run bootstrap/lexer.lang -- examples/hello.lang)
 grep -q "11 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }
 
+echo "== bootstrap parser =="
+out=$("$LANG" run bootstrap/parser.lang -- examples/features.lang)
+python3 - "$out" <<'PY' || { echo "FAIL parser"; exit 1; }
+import json,sys
+d=json.loads(sys.argv[1])
+assert len(d['items'])==6 and not any('skip' in i for i in d['items']), d
+PY
+out=$("$LANG" run bootstrap/parser.lang -- bootstrap/parser.lang)
+python3 - "$out" <<'PY' || { echo "FAIL parser self-parse"; exit 1; }
+import json,sys
+d=json.loads(sys.argv[1])
+assert len(d['items'])>20 and not any('skip' in i for i in d['items']), d
+PY
+
 echo "== http pilot =="
 work=$(mktemp -d)
 "$LANG" build examples/http-crud-sqlite/main.lang -o "$work/httpsrv"

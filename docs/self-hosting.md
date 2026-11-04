@@ -1,45 +1,54 @@
 # Self-hosting readiness
 
 The goal: the compiler, written in the language, compiled by itself.
-`bootstrap/lexer.lang` is the first shipped component — a working lexer
-for `.lang` source, written in `.lang`, compiled by the Rust bootstrap
-compiler. It proves the language already expresses compiler-shaped code:
-file io, byte-level classification, owned linked structures, recursion.
 
-## What the language already has (sufficient for the lexer)
+**Done so far — the entire frontend is self-hosted:**
+
+- `bootstrap/lexlib.lang` — a working lexer for `.lang`, written in
+  `.lang` (shared library: token kinds, `lex`, cursor helpers)
+- `bootstrap/lexer.lang` — thin driver over lexlib (token dump)
+- `bootstrap/parser.lang` — a recursive-descent parser for `.lang`,
+  written in `.lang`, emitting the AST as JSON via `std/json`.
+  **It parses itself with zero skipped tokens** — full round-trip.
+
+Both components are compiled by the Rust bootstrap compiler and run in
+CI (`tests/run.sh`), so the self-host claim can't rot.
+
+## What the language already has (sufficient for frontend)
 
 - `readfile`/`writefile`/`exit` builtins (file io + process)
 - `import` — multi-file crates with a merged namespace + `std/` lookup
-- `own` linked structures + `nil` — trees and lists without generics
+- `own` linked structures + `nil` — token lists and AST trees
+- `mut`/`ref` borrows — parser cursors mutate through borrow regions
 - Generics: `fn f[T constraint]` monomorphized per instantiation
 - `break`/`continue`, `for`, `[v, err]` returns, `if/else`
 - `interface` decls as named op constraints (`eq`, `ordered`, `add`)
 
 ## Gaps before a full self-hosted compiler lands
 
-Ordered by what the parser/codegen port actually needs:
+Ordered by what the checker/codegen port actually needs:
 
-1. **Sum types / enums** — the AST is a tagged-union problem; modeling it
-   with struct-per-node + kind ints works (the lexer does) but is
-   laborious. A `enum` decl is the highest-leverage next feature.
-2. **`match`** — the parser/checker dispatch on kinds constantly;
-   if-chains work, match is ergonomic pressure relief.
+1. **Sum types / enums** — the AST is a tagged-union problem; the
+   parser models it with `std/json` nodes + kind ints (works, but
+   verbose). A real `enum` decl is the highest-leverage next feature.
+2. **`match`** — the parser's if-chains work; the checker's
+   kind-dispatch will want match badly.
 3. **Slices `[]T`** — token streams want contiguous arrays, not linked
    lists. `mkbuf`/`poke8` is the escape hatch today.
-4. **Function values** — the parser's recursive descent doesn't need
-   them, but visitor-style AST passes and stdlib `sort`/`map` will.
+4. **Function values** — recursive descent doesn't need them, but
+   visitor-style AST passes and stdlib `sort`/`map` will.
 5. **Methods / `interface` dispatch** — today's `interface` is only an
-   op-constraint vocabulary for generics, not a type. Real dynamic
-   dispatch arrives with the deeper type-system work.
-6. **`defer`** — scoped cleanup in a compiler pass that allocates
-   per-node; arenas already make this tolerable.
+   op-constraint vocabulary for generics, not a type.
+6. **Maps/sets in stdlib** — the checker's env and fn tables want real
+   `map[str]T`-shaped containers; linked lists suffice at v0 sizes.
 
 ## Path
 
 ```
-bootstrap/lexer.lang    (done — tokenizes .lang)
-bootstrap/parser.lang   (next — needs no new features, just volume)
-bootstrap/check.lang
+bootstrap/lexlib.lang   (done — tokenizes .lang, shared library)
+bootstrap/lexer.lang    (done — token-dump driver)
+bootstrap/parser.lang   (done — AST → JSON, self-parses clean)
+bootstrap/check.lang    (next — needs maps or long if-chains)
 bootstrap/codegen.lang  (emits C, links against runtime/)
 ```
 
@@ -50,6 +59,7 @@ transform lands independently of self-hosting.
 
 ## Keeping the claim honest
 
-`tests/run.sh` runs `bootstrap/lexer.lang` over `examples/hello.lang`
-in CI — the self-host component is tested on every push, so "the
-language can compile itself" never rots.
+`tests/run.sh` runs both bootstrap components in CI: the lexer over
+`examples/hello.lang` and the parser over `features.lang` *and itself*
+(asserting zero skipped tokens both ways). "The language can parse
+itself" is tested on every push.

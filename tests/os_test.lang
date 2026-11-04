@@ -1,0 +1,15 @@
+import "std/os"
+import "std/testing"
+
+fn test_args() {
+    expect(nargs() >= 1, "has args")
+    expect(len(args(0)) > 0, "argv0 nonempty")
+}
+
+fn test_file() {
+    n := writefile_("/tmp/lang-ostest.txt", "hello os")
+    expect(n == 0, "write ok")
+    expect_streq(readfile_("/tmp/lang-ostest.txt"), "hello os", "read back")
+}
+
+fn main() {}

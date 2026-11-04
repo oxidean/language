@@ -1,0 +1,445 @@
+// bootstrap/parser.lang — a parser for .lang, written in .lang.
+// Second self-host component: consumes lexlib's token list and emits
+// the AST as JSON via std/json. With the lexer, the entire compiler
+// frontend now exists in-language.
+//
+//   lang run bootstrap/parser.lang -- examples/hello.lang
+
+import "lexlib"
+import "std/json"
+
+struct PCur {
+    t: own Tok
+    nolit: int // 1 while parsing if/for conditions — `{` is a block, not a literal
+}
+
+fn peek(c: mut PCur) -> str {
+    if c.t == nil { return "" }
+    return c.t.text
+}
+
+fn pkind(c: mut PCur) -> int {
+    if c.t == nil { return 0 }
+    return c.t.kind
+}
+
+fn next(c: mut PCur) {
+    if c.t != nil { c.t = c.t.next }
+}
+
+fn at(c: mut PCur, w: str) -> bool {
+    if len(w) == 0 { return false } // "" is a real string token, not EOF
+    // str/int literal texts must never match punct/keyword checks —
+    // a ")" literal is a string, not a close paren
+    if pkind(c) == 3 || pkind(c) == 4 { return false }
+    return peek(c) == w
+}
+
+fn eof(c: mut PCur) -> bool {
+    return pkind(c) == 0
+}
+
+fn eat(c: mut PCur, w: str) -> bool {
+    if peek(c) == w { next(c); return true }
+    return false
+}
+
+// ---------- expressions ----------
+
+fn p_primary(c: mut PCur) -> own Json {
+    k := pkind(c)
+    if k == 3 {
+        e := jobj()
+        jadd(e, "int", jint(atoi(peek(c))))
+        next(c)
+        return e
+    }
+    if k == 4 {
+        e := jobj()
+        jadd(e, "str", jstr(peek(c)))
+        next(c)
+        return e
+    }
+    if eat(c, "(") {
+        e := p_expr(c)
+        eat(c, ")")
+        return e
+    }
+    // ident / keyword literals
+    e := jobj()
+    jadd(e, "name", jstr(peek(c)))
+    next(c)
+    // struct literal: Name { f: v, ... } — suppressed in cond position
+    if at(c, "{") && c.nolit == 0 {
+        next(c)
+        lit := jobj()
+        jadd(lit, "lit", e)
+        fields := jarr()
+        for !at(c, "}") && !eof(c) {
+            f := jobj()
+            jadd(f, "name", jstr(peek(c)))
+            next(c)
+            eat(c, ":")
+            jadd(f, "val", p_expr(c))
+            jadd(fields, "", f)
+            eat(c, ",")
+        }
+        eat(c, "}")
+        jadd(lit, "fields", fields)
+        return lit
+    }
+    return e
+}
+
+fn p_postfix(c: mut PCur) -> own Json {
+    e := p_primary(c)
+    for true {
+        if at(c, "(") {
+            next(c)
+            call := jobj()
+            jadd(call, "call", e)
+            args := jarr()
+            for !at(c, ")") && !eof(c) {
+                jadd(args, "", p_expr(c))
+                eat(c, ",")
+            }
+            eat(c, ")")
+            jadd(call, "args", args)
+            e = call
+            continue
+        }
+        if at(c, ".") {
+            next(c)
+            f := jobj()
+            jadd(f, "field", e)
+            jadd(f, "name", jstr(peek(c)))
+            next(c)
+            e = f
+            continue
+        }
+        break
+    }
+    return e
+}
+
+fn p_unary(c: mut PCur) -> own Json {
+    if at(c, "!") || at(c, "-") {
+        op := peek(c)
+        next(c)
+        u := jobj()
+        jadd(u, "un", jstr(op))
+        jadd(u, "e", p_unary(c))
+        return u
+    }
+    return p_postfix(c)
+}
+
+fn p_mul(c: mut PCur) -> own Json {
+    l := p_unary(c)
+    for at(c, "*") || at(c, "/") {
+        op := peek(c)
+        next(c)
+        b := jobj()
+        jadd(b, "bin", jstr(op))
+        jadd(b, "l", l)
+        jadd(b, "r", p_unary(c))
+        l = b
+    }
+    return l
+}
+
+fn p_add(c: mut PCur) -> own Json {
+    l := p_mul(c)
+    for at(c, "+") || at(c, "-") {
+        op := peek(c)
+        next(c)
+        b := jobj()
+        jadd(b, "bin", jstr(op))
+        jadd(b, "l", l)
+        jadd(b, "r", p_mul(c))
+        l = b
+    }
+    return l
+}
+
+fn p_cmp(c: mut PCur) -> own Json {
+    l := p_add(c)
+    for at(c, "==") || at(c, "!=") || at(c, "<") || at(c, ">") || at(c, "<=") || at(c, ">=") {
+        op := peek(c)
+        next(c)
+        b := jobj()
+        jadd(b, "bin", jstr(op))
+        jadd(b, "l", l)
+        jadd(b, "r", p_add(c))
+        l = b
+    }
+    return l
+}
+
+fn p_and(c: mut PCur) -> own Json {
+    l := p_cmp(c)
+    for at(c, "&&") {
+        next(c)
+        b := jobj()
+        jadd(b, "bin", jstr("&&"))
+        jadd(b, "l", l)
+        jadd(b, "r", p_cmp(c))
+        l = b
+    }
+    return l
+}
+
+fn p_expr(c: mut PCur) -> own Json {
+    l := p_and(c)
+    for at(c, "||") {
+        next(c)
+        b := jobj()
+        jadd(b, "bin", jstr("||"))
+        jadd(b, "l", l)
+        jadd(b, "r", p_and(c))
+        l = b
+    }
+    return l
+}
+
+// ---------- statements ----------
+
+fn p_stmt(c: mut PCur) -> own Json {
+    if eat(c, "let") {
+        s := jobj()
+        jadd(s, "let", jstr(peek(c)))
+        next(c)
+        if eat(c, ":") { p_ty(c) }
+        if eat(c, "=") { jadd(s, "init", p_expr(c)) }
+        return s
+    }
+    if eat(c, "return") {
+        s := jobj()
+        vals := jarr()
+        for !at(c, "}") && !eof(c) {
+            jadd(vals, "", p_expr(c))
+            if !eat(c, ",") { break }
+        }
+        jadd(s, "return", vals)
+        return s
+    }
+    if eat(c, "break") {
+        s := jobj()
+        jadd(s, "break", jnull())
+        return s
+    }
+    if eat(c, "continue") {
+        s := jobj()
+        jadd(s, "continue", jnull())
+        return s
+    }
+    if at(c, "if") {
+        return p_if(c)
+    }
+    if at(c, "for") {
+        return p_for(c)
+    }
+    if eat(c, "scope") {
+        s := jobj()
+        jadd(s, "scope", p_block(c))
+        return s
+    }
+    if eat(c, "spawn") {
+        s := jobj()
+        jadd(s, "spawn", p_expr(c))
+        return s
+    }
+    if eat(c, "spawnBlocking") {
+        s := jobj()
+        jadd(s, "spawnBlocking", p_expr(c))
+        return s
+    }
+    if eat(c, "go") {
+        s := jobj()
+        jadd(s, "go", p_expr(c))
+        return s
+    }
+    // [a, b] = call
+    if at(c, "[") {
+        next(c)
+        a := peek(c)
+        next(c)
+        eat(c, ",")
+        b := peek(c)
+        next(c)
+        eat(c, "]")
+        s := jobj()
+        jadd(s, "let2", jstr(a + "," + b))
+        if eat(c, "=") { jadd(s, "call", p_expr(c)) }
+        return s
+    }
+    // ident := expr | ident = expr | call/field stmt
+    name := peek(c)
+    e := p_postfix(c)
+    if eat(c, ":=") || at(c, "=") {
+        if peek(c) == "=" { next(c) }
+        s := jobj()
+        jadd(s, "bind", jstr(name))
+        jadd(s, "init", p_expr(c))
+        return s
+    }
+    s := jobj()
+    jadd(s, "expr", e)
+    return s
+}
+
+fn p_if(c: mut PCur) -> own Json {
+    eat(c, "if")
+    s := jobj()
+    c.nolit = 1
+    jadd(s, "if", p_expr(c))
+    c.nolit = 0
+    jadd(s, "then", p_block(c))
+    if eat(c, "else") {
+        if at(c, "if") {
+            jadd(s, "else", p_if(c))
+        } else {
+            jadd(s, "else", p_block(c))
+        }
+    }
+    return s
+}
+
+fn p_for(c: mut PCur) -> own Json {
+    eat(c, "for")
+    s := jobj()
+    c.nolit = 1
+    jadd(s, "for", p_expr(c))
+    c.nolit = 0
+    jadd(s, "body", p_block(c))
+    return s
+}
+
+fn p_block(c: mut PCur) -> own Json {
+    a := jarr()
+    if eat(c, "{") {
+        for !at(c, "}") && !eof(c) {
+            jadd(a, "", p_stmt(c))
+        }
+        eat(c, "}")
+    }
+    return a
+}
+
+// ---------- types + items ----------
+
+fn p_ty(c: mut PCur) -> own Json {
+    t := jobj()
+    txt := peek(c)
+    next(c)
+    // own/ref/mut T
+    if txt == "own" || txt == "ref" || txt == "mut" {
+        jadd(t, "ty", jstr(txt + " " + peek(c)))
+        next(c)
+        return t
+    }
+    jadd(t, "ty", jstr(txt))
+    return t
+}
+
+fn p_params(c: mut PCur) -> own Json {
+    a := jarr()
+    eat(c, "(")
+    for !at(c, ")") && !eof(c) {
+        p := jobj()
+        jadd(p, "name", jstr(peek(c)))
+        next(c)
+        if eat(c, ":") { jadd(p, "ty", p_ty(c)) }
+        jadd(a, "", p)
+        eat(c, ",")
+    }
+    eat(c, ")")
+    return a
+}
+
+fn p_fn(c: mut PCur, ex: bool) -> own Json {
+    f := jobj()
+    if ex { jadd(f, "extern", jbool(true)) }
+    eat(c, "fn")
+    jadd(f, "fn", jstr(peek(c)))
+    next(c)
+    jadd(f, "params", p_params(c))
+    if eat(c, "->") {
+        if eat(c, "[") { // multi-return [v, err]
+            r := jarr()
+            for !at(c, "]") && !eof(c) {
+                jadd(r, "", p_ty(c))
+                eat(c, ",")
+            }
+            eat(c, "]")
+            jadd(f, "ret", r)
+        } else {
+            jadd(f, "ret", p_ty(c))
+        }
+    }
+    if at(c, "{") { jadd(f, "body", p_block(c)) }
+    return f
+}
+
+fn p_item(c: mut PCur) -> own Json {
+    if eat(c, "import") {
+        it := jobj()
+        jadd(it, "import", jstr(peek(c)))
+        next(c)
+        return it
+    }
+    if eat(c, "struct") {
+        st := jobj()
+        jadd(st, "struct", jstr(peek(c)))
+        next(c)
+        fields := jarr()
+        if eat(c, "{") {
+            for !at(c, "}") && !eof(c) {
+                fld := jobj()
+                jadd(fld, "name", jstr(peek(c)))
+                next(c)
+                if eat(c, ":") { jadd(fld, "ty", p_ty(c)) }
+                jadd(fields, "", fld)
+                eat(c, ",")
+            }
+            eat(c, "}")
+        }
+        jadd(st, "fields", fields)
+        return st
+    }
+    if eat(c, "extern") { return p_fn(c, true) }
+    if at(c, "fn") { return p_fn(c, false) }
+    if at(c, "let") { return p_stmt(c) }
+    // unknown item — skip the token so we always progress
+    u := jobj()
+    jadd(u, "skip", jstr(peek(c)))
+    next(c)
+    return u
+}
+
+fn parse(toks: own Tok) -> own Json {
+    c := new(PCur)
+    c.t = toks
+    c.nolit = 0
+    root := jobj()
+    items := jarr()
+    for pkind(c) != 0 {
+        jadd(items, "", p_item(c))
+    }
+    jadd(root, "items", items)
+    return root
+}
+
+fn main() {
+    if argc() < 2 {
+        println("usage: parser <file.lang>")
+        exit(1)
+    }
+    src := readfile(argv(1))
+    if len(src) == 0 {
+        println("cannot read " + argv(1))
+        exit(1)
+    }
+    ast := parse(lex(src))
+    println(tojson(ast))
+}

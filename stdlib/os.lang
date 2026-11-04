@@ -1,0 +1,27 @@
+// std/os — process environment + file I/O, thin honest wrappers over
+// the file/process builtins (argv/argc, readfile/writefile, exit).
+
+/// process args (index 0 is the program name)
+fn args(i: int) -> str {
+    return argv(i)
+}
+
+/// number of process args
+fn nargs() -> int {
+    return argc()
+}
+
+/// read an entire file; empty string on failure
+fn readfile_(path: str) -> str {
+    return readfile(path)
+}
+
+/// write an entire file (truncates); 0 ok, -1 on error
+fn writefile_(path: str, data: str) -> int {
+    return writefile(path, data)
+}
+
+/// exit the process with code
+fn quit(code: int) {
+    exit(code)
+}
