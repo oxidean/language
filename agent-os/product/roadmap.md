@@ -16,10 +16,27 @@
 - Pilot apps under `examples/`: CLI; HTTP CRUD server + SQLite
 - Open-source plumbing: MIT license, CI, release builds, docs
 
-## Phase 2: Post-Launch
+## Phase 1.5: v0.2 Forward Work (spec'd — `agent-os/specs/2026-11-04-0132-v0-2-forward/`)
 
-- GUI: platform-toolkit FFI bindings, portable UI layer in the language,
-  Qt/GTK bridge — plus the simple GUI pilot app
-- Web compilation target (JS/HTML/CSS)
-- `select`, richer stdlib, package registry
-- Self-hosting (much later)
+- **Track A (critical path):** state-machine coroutine transform,
+  `select`, buffered channels
+- **Track B (self-host features):** `enum`, `match`, slices `[]T`,
+  function values, `defer`, `std/collections` maps/sets
+- **Track C (self-host compiler):** `bootstrap/check.lang`,
+  `bootstrap/codegen.lang` — the full bootstrap chain
+- **Track D (type depth):** `float`, `own` move tracking, methods +
+  interface dispatch, shape-based generics, module qualification
+- **Track E (tooling):** LSP hover/goto, AST-printer fmt, platform
+  matrix CI (aarch64/macOS/Windows)
+- **Track F (pilot):** GUI app — GTK4 FFI bridge first, portable layer
+  remains the charter
+
+## Phase 2: Post-v0.2
+
+- GUI: portable UI layer in the language (charter path), plus optional
+  platform-toolkit bindings
+- Web compilation target (JS/HTML/CSS) — parked, guardrail in
+  `items/parked-web.md`
+- Package registry / module versioning
+- LLVM backend (behind the `interfaces.md` codegen seam)
+- Full self-hosting (compiler compiles itself end-to-end)
