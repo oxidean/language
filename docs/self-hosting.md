@@ -22,6 +22,9 @@ The goal: the compiler, written in the language, compiled by itself.
   diagnostics or `ok`. Documented subset: the parser does not yet
   produce generics (`fn f[T any]` parses but `T` reports unknown),
   interface decls, or float-typed AST distinctions beyond literals.
+  The checker understands `shared` but does not port the Rust side's
+  `own` move tracking (D2) — it accepts the same sources without the
+  use-after-move diagnostics.
 - `bootstrap/codegen.oxl` — a port of the Rust C emitter, written in
   `.oxl`, consuming the checker's tables over the parser's AST:
   `oxl run bootstrap/codegen.oxl -- file.oxl > out.c`, then

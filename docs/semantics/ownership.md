@@ -74,6 +74,20 @@ through a handle, and are elided where the typechecker proves safety
 
 ## Compile-time rules
 
+- `own` handles are move-tracked statically (D2). Move sites: an `own`
+  argument to an `own` parameter, `return` of an `own` result, a
+  struct/enum field store (`s.f = v`, `E.V{ f: v }`), and `send(ch, v)`.
+  Using a moved binding is a compile error naming it; re-binding
+  (`x = new(T)`, `x := f()`) clears the mark. Deliberately *not* move
+  sites: `y := x` and `y = x` between variables (the aliasing walk
+  idiom `cur := head`), field reads, and `ref`/`mut` borrows — those
+  stay runtime-checked. At branch joins a binding is dead only when
+  moved on *every* path (`if`/`else`, `match`, `select` arms); a net
+  move inside a `for` body is a compile error since the next iteration
+  would read a moved value — re-initializing it in the same iteration
+  is the fix. `mkshared` returns `shared` — a copyable atomic-cell type
+  that is never move-tracked, so the same cell may be handed to many
+  workers (`shared` params replace `own` for that API).
 - Dropping a non-`nil` second return value (`err`) silently is a compile
   error. `_` may discard a *value*, never an error.
 - `ref`/`mut` borrows may not be stored in heap objects (v0 restriction;

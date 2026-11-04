@@ -98,6 +98,55 @@ out=$("$OXL" run tests/defer_test.oxl)
 [ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }
 grep -q "^9$" <<<"$out" || { echo "FAIL defer error-return path: $out"; exit 1; }
 
+echo "== move tracking (d2) =="
+# use-after-move must be a compile error naming the binding
+cat > /tmp/d2move.oxl <<'EOF'
+struct P { v: int }
+fn take(p: own P) { }
+fn main() { p := new(P); take(p); take(p) }
+EOF
+if "$OXL" build /tmp/d2move.oxl -o /tmp/d2move 2>/dev/null; then
+    echo "FAIL: use-after-move compiled"; exit 1
+fi
+diag=$("$OXL" build /tmp/d2move.oxl -o /tmp/d2move 2>&1 || true)
+grep -q 'use of moved value `p`' <<<"$diag" || { echo "FAIL moved diag: $diag"; exit 1; }
+# the headline bug class — one own cell into two spawned workers
+cat > /tmp/d2spawn.oxl <<'EOF'
+struct P { v: int }
+fn w(p: own P) { }
+fn main() { p := new(P); spawn w(p); spawn w(p) }
+EOF
+if "$OXL" build /tmp/d2spawn.oxl -o /tmp/d2spawn 2>/dev/null; then
+    echo "FAIL: double-spawn of own compiled"; exit 1
+fi
+# moved inside a loop body — the next iteration would read a moved value
+cat > /tmp/d2for.oxl <<'EOF'
+struct P { v: int }
+fn take(p: own P) { }
+fn main() { p := new(P); for true { take(p) } }
+EOF
+if "$OXL" build /tmp/d2for.oxl -o /tmp/d2for 2>/dev/null; then
+    echo "FAIL: move-in-loop compiled"; exit 1
+fi
+# re-init clears the mark; moved-in-one-branch stays live after the join
+cat > /tmp/d2ok.oxl <<'EOF'
+struct P { v: int }
+fn take(p: own P) { }
+fn main() {
+    p := new(P)
+    take(p)
+    p = new(P)
+    if len("x") > 0 { take(p) }
+    take(p)
+    println("ok")
+}
+EOF
+out=$("$OXL" run /tmp/d2ok.oxl)
+[ "$out" = "ok" ] || { echo "FAIL d2 reinit/branch: $out"; exit 1; }
+# shared cells are copy/shareable — same cell to four workers is intended
+out=$("$OXL" run tests/stdmods_test.oxl)
+grep -q "^4000$" <<<"$out" || { echo "FAIL d2 shared workers: $out"; exit 1; }
+
 echo "== bootstrap lexer =="
 out=$("$OXL" run bootstrap/lexer.oxl -- examples/hello.oxl)
 grep -q "11 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }

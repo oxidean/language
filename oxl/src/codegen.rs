@@ -435,6 +435,7 @@ impl<'a> Gen<'a> {
                 "cstr" => Ty::CStr,
                 "err" => Ty::Err,
                 "void" => Ty::Void,
+                "shared" => Ty::Shared,
                 s => {
                     if let Some(b) = self.subst.get(s) {
                         b.clone()
@@ -468,6 +469,7 @@ impl<'a> Gen<'a> {
             Ty::CStr => "const char*".into(),
             Ty::Void => "void".into(),
             Ty::Chan => "RtChan*".into(),
+            Ty::Shared => "RtShared*".into(),
             Ty::Struct(n) => format!("struct o_s_{}", cname(n)),
             Ty::Enum(n) => format!("struct o_en_{}", cname(n)),
             Ty::Slice(_) => "RtSlice".into(),
@@ -761,7 +763,8 @@ impl<'a> Gen<'a> {
                             return Ty::Str
                         }
                         "cstr" => return Ty::CStr,
-                        "mkbuf" | "sqlite_open" | "mkshared" => return Ty::Own(Box::new(Ty::Unknown)),
+                        "mkbuf" | "sqlite_open" => return Ty::Own(Box::new(Ty::Unknown)),
+                        "mkshared" => return Ty::Shared,
                         "new" => {
                             if let ExprKind::Call { args, .. } = &e.kind {
                                 if let Some(a) = args.first() {

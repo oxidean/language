@@ -21,6 +21,8 @@ pub enum Ty {
     /// `fn(int, int) -> bool` — fn value ({env, fnptr}); ret Void = no `->`
     Fn(Vec<Ty>, Box<Ty>),
     Var(String), // generic type parameter (instantiated at call sites)
+    /// atomic shared cell (mkshared) — copy/shareable, never move-tracked
+    Shared,
     Unknown,
 }
 
@@ -46,11 +48,12 @@ impl Ty {
                 ps.iter().map(|p| p.name()).collect::<Vec<_>>().join(", "),
                 if **r == Ty::Void { String::new() } else { format!(" -> {}", r.name()) }),
             Ty::Var(n) => n.clone(),
+            Ty::Shared => "shared".into(),
             Ty::Unknown => "?".into(),
         }
     }
     fn is_word(&self) -> bool {
-        matches!(self, Ty::Int | Ty::Bool | Ty::Chan | Ty::Own(_))
+        matches!(self, Ty::Int | Ty::Bool | Ty::Chan | Ty::Own(_) | Ty::Shared)
     }
 }
 
@@ -75,16 +78,22 @@ pub struct Checked {
 
 struct Env {
     scopes: Vec<HashMap<String, Ty>>,
+    /// shallow move tracking: a binding is marked moved when its `own`
+    /// value flows somewhere ownership transfers (call arg, return,
+    /// field store, channel send). Parallel to `scopes`.
+    moved: Vec<HashMap<String, bool>>,
 }
 impl Env {
     fn new() -> Self {
-        Env { scopes: vec![HashMap::new()] }
+        Env { scopes: vec![HashMap::new()], moved: vec![HashMap::new()] }
     }
     fn push(&mut self) {
         self.scopes.push(HashMap::new());
+        self.moved.push(HashMap::new());
     }
     fn pop(&mut self) {
         self.scopes.pop();
+        self.moved.pop();
     }
     fn get(&self, n: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(n).cloned())
@@ -93,7 +102,37 @@ impl Env {
         self.scopes.iter().flat_map(|s| s.keys().cloned()).collect()
     }
     fn set(&mut self, n: String, t: Ty) {
-        self.scopes.last_mut().unwrap().insert(n, t);
+        self.scopes.last_mut().unwrap().insert(n.clone(), t);
+        // a (re)binding starts un-moved — clears any stale bit on shadow
+        self.moved.last_mut().unwrap().remove(&n);
+    }
+    fn scope_of(&self, n: &str) -> Option<usize> {
+        (0..self.scopes.len()).rev().find(|&i| self.scopes[i].contains_key(n))
+    }
+    fn is_moved(&self, n: &str) -> bool {
+        self.scope_of(n)
+            .map(|i| self.moved[i].get(n).copied().unwrap_or(false))
+            .unwrap_or(false)
+    }
+    fn mark_moved(&mut self, n: &str) {
+        if let Some(i) = self.scope_of(n) {
+            self.moved[i].insert(n.to_string(), true);
+        }
+    }
+    fn clear_moved(&mut self, n: &str) {
+        if let Some(i) = self.scope_of(n) {
+            self.moved[i].remove(n);
+        }
+    }
+    /// branch merge: keep bindings marked moved in BOTH states —
+    /// moved in only one branch leaves the value live after the join
+    fn moved_intersect(&mut self, other: &[HashMap<String, bool>]) {
+        for (i, m) in self.moved.iter_mut().enumerate() {
+            let o = other.get(i);
+            m.retain(|k, v| {
+                *v && o.map(|o| o.get(k).copied().unwrap_or(false)).unwrap_or(false)
+            });
+        }
     }
 }
 
@@ -288,6 +327,7 @@ impl<'a> Checker<'a> {
                 "cstr" => Ty::CStr,
                 "void" => Ty::Void,
                 "err" => Ty::Err,
+                "shared" => Ty::Shared,
                 s => {
                     if self.ty_scope.contains(s) {
                         Ty::Var(s.to_string())
@@ -379,9 +419,25 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Assign { target, val, span } => {
-                let tt = self.expr(target, env);
+                // a bare-ident target is a write, not a use — assignment
+                // to a moved-from binding re-initializes it
+                let tt = match &target.kind {
+                    ExprKind::Ident(n) => env
+                        .get(n)
+                        .or_else(|| self.globals.get(n).cloned())
+                        .unwrap_or_else(|| self.expr(target, env)),
+                    _ => self.expr(target, env),
+                };
                 let vt = self.expr(val, env);
                 self.assignable(&tt, &vt, *span);
+                // `x = y` re-initializes (aliasing walks like `s = s.next`
+                // stay legal); `s.f = y`/`s[i] = y` hand the value away
+                if !matches!(target.kind, ExprKind::Ident(_)) {
+                    self.move_for(val, &tt, env);
+                }
+                if let ExprKind::Ident(n) = &target.kind {
+                    env.clear_moved(n);
+                }
             }
             Stmt::Expr(e) => {
                 if let Some(Ret::Pair(_)) = self.call_ret(e) {
@@ -431,12 +487,14 @@ impl<'a> Checker<'a> {
                         } else {
                             let t = self.expr(&vals[0], env);
                             self.assignable(want, &t, vals[0].span);
+                            self.move_for(&vals[0], want, env);
                         }
                     }
                     Ret::Pair(want) => {
                         if vals.len() == 2 {
                             let t = self.expr(&vals[0], env);
                             self.assignable(want, &t, vals[0].span);
+                            self.move_for(&vals[0], want, env);
                             let e = self.expr(&vals[1], env);
                             self.assignable(&Ty::Err, &e, vals[1].span);
                         } else if vals.len() == 1 {
@@ -459,17 +517,35 @@ impl<'a> Checker<'a> {
             Stmt::If { cond, then, els, .. } => {
                 let t = self.expr(cond, env);
                 self.assignable(&Ty::Bool, &t, cond.span);
+                // moved-in-one-branch reads as live after the join — only
+                // definitely-moved bindings error, so intersect the exits
+                let pre_moved = env.moved.clone();
                 self.block(then, env);
+                let then_moved = std::mem::replace(&mut env.moved, pre_moved);
                 if let Some(e) = els {
                     self.block(e, env);
                 }
+                env.moved_intersect(&then_moved);
             }
-            Stmt::For { cond, body, .. } => {
+            Stmt::For { cond, body, span } => {
+                // a move inside a loop leaves the next iteration reading a
+                // moved value — unless the binding is re-initialized in the
+                // same iteration (which clears the mark)
+                let pre_moved = env.moved.clone();
                 let t = self.expr(cond, env);
                 self.assignable(&Ty::Bool, &t, cond.span);
                 self.loop_depth += 1;
                 self.block(body, env);
                 self.loop_depth -= 1;
+                for (i, m) in env.moved.iter().enumerate() {
+                    for k in m.keys() {
+                        if !pre_moved.get(i).and_then(|p| p.get(k)).copied().unwrap_or(false) {
+                            self.diags.push(Diag::err(*span, "own",
+                                format!("`{k}` moved inside `for` — re-assign it in the same iteration")));
+                        }
+                    }
+                }
+                env.moved = pre_moved;
             }
             Stmt::Break { span } | Stmt::Continue { span } => {
                 if self.loop_depth == 0 {
@@ -496,7 +572,11 @@ impl<'a> Checker<'a> {
                 }
                 let mut has_else = false;
                 let mut tmo_count = 0;
+                // arms are alternative paths — merge `moved` like if/else
+                let pre_moved = env.moved.clone();
+                let mut arm_moved = Vec::new();
                 for arm in arms {
+                    env.moved = pre_moved.clone();
                     env.push();
                     match &arm.kind {
                         SelKind::Recv { chan, bind, .. } => {
@@ -519,6 +599,13 @@ impl<'a> Checker<'a> {
                         self.stmt(s, env);
                     }
                     env.pop();
+                    arm_moved.push(env.moved.clone());
+                }
+                if let Some(first) = arm_moved.first() {
+                    env.moved = first.clone();
+                    for st in &arm_moved[1..] {
+                        env.moved_intersect(st);
+                    }
                 }
                 if has_else && tmo_count > 0 {
                     self.diags.push(Diag::err(*span, "check",
@@ -615,13 +702,31 @@ impl<'a> Checker<'a> {
             || (*want == Ty::Int && *got == Ty::Err)
             // nil (Ty::Err) is the null pointer for owned/borrowed refs
             // and the empty slice
-            || (*got == Ty::Err && matches!(want, Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Slice(_)))
-            || matches!((want, got), (Ty::Ref(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) | (Ty::Mut(w), Ty::Own(g) | Ty::Mut(g)) if **w == **g);
+            || (*got == Ty::Err && matches!(want, Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Slice(_) | Ty::Shared))
+            || matches!((want, got), (Ty::Ref(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) | (Ty::Mut(w), Ty::Own(g) | Ty::Mut(g)) if **w == **g)
+            // an untyped owned cell (mkbuf, own ?) borrows into any ref/mut
+            || (*got == Ty::Own(Box::new(Ty::Unknown)) && matches!(want, Ty::Ref(_) | Ty::Mut(_)));
         if !ok {
             self.diags.push(Diag::err(
                 sp, "type",
                 format!("expected `{}`, found `{}`", want.name(), got.name()),
             ));
+        }
+    }
+
+    /// `e` consumes an `own` binding — mark it moved. Reads were already
+    /// use-checked by `expr()`, so a second use reports there, not here.
+    fn move_own(&mut self, e: &Expr, env: &mut Env) {
+        if let ExprKind::Ident(n) = &e.kind {
+            if matches!(env.get(n), Some(Ty::Own(_))) {
+                env.mark_moved(n);
+            }
+        }
+    }
+    /// move only when the destination wants ownership (param, field, ret)
+    fn move_for(&mut self, e: &Expr, want: &Ty, env: &mut Env) {
+        if matches!(want, Ty::Own(_)) {
+            self.move_own(e, env);
         }
     }
 
@@ -655,6 +760,7 @@ impl<'a> Checker<'a> {
             let gt = self.expr(ge, env);
             let wt = wt.clone();
             self.assignable(&wt, &gt, ge.span);
+            self.move_for(ge, &wt, env);
         }
     }
 
@@ -666,7 +772,13 @@ impl<'a> Checker<'a> {
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Nil => Ty::Err, // nil is the empty err
             ExprKind::Ident(n) => match env.get(n).or_else(|| self.globals.get(n).cloned()) {
-                Some(t) => t,
+                Some(t) => {
+                    if env.is_moved(n) {
+                        self.diags.push(Diag::err(e.span, "own",
+                            format!("use of moved value `{n}`")));
+                    }
+                    t
+                }
                 None => {
                     if let Some(sig) = self.fns.get(n).cloned() {
                         // named fn as a value (B4) — restrictions:
@@ -814,6 +926,7 @@ impl<'a> Checker<'a> {
                                     let gt = self.expr(fe, env);
                                     let wt = wt.clone();
                                     self.assignable(&wt, &gt, fe.span);
+                                    self.move_for(fe, &wt, env);
                                 }
                                 None => self.diags.push(Diag::err(fe.span, "type",
                                     format!("`{name}` has no field `{fname}`"))),
@@ -958,13 +1071,19 @@ impl<'a> Checker<'a> {
                 let (mut saw_t, mut saw_f) = (false, false);
                 let mut result: Option<Ty> = None;
                 let (mut n_expr, mut n_block) = (0usize, 0usize);
+                // arms are alternative paths — merge `moved` like if/else
+                let pre_moved = env.moved.clone();
+                let mut arm_moved = Vec::new();
                 for arm in arms {
+                    env.moved = pre_moved.clone();
                     env.push();
                     match &arm.pat {
                         Pattern::Wild => wild = true,
                         Pattern::Bind(n) => {
                             wild = true;
                             env.set(n.clone(), st.clone());
+                            // binding an `own` scrutinee moves it into the var
+                            self.move_own(scrut, env);
                         }
                         Pattern::Lit(le) => {
                             let lt = self.expr(le, env);
@@ -1053,6 +1172,13 @@ impl<'a> Checker<'a> {
                         }
                     }
                     env.pop();
+                    arm_moved.push(env.moved.clone());
+                }
+                if let Some(first) = arm_moved.first() {
+                    env.moved = first.clone();
+                    for st in &arm_moved[1..] {
+                        env.moved_intersect(st);
+                    }
                 }
                 if n_expr > 0 && n_block > 0 {
                     self.diags.push(Diag::err(e.span, "check",
@@ -1208,6 +1334,7 @@ impl<'a> Checker<'a> {
                             self.diags.push(Diag::err(args[1].span, "own",
                                 format!("channels carry word-sized owned values (v0), not `{}`", vt.name())));
                         }
+                        self.move_own(&args[1], env);
                     }
                     return Ty::Void;
                 }
@@ -1311,6 +1438,7 @@ impl<'a> Checker<'a> {
                             if let Some(v) = args.get(1) {
                                 let vt = self.expr(v, env);
                                 self.assignable(el, &vt, v.span);
+                                self.move_for(v, el, env);
                             } else {
                                 self.diags.push(Diag::err(sp, "check",
                                     "`push` takes (slice, value)"));
@@ -1435,7 +1563,7 @@ impl<'a> Checker<'a> {
                     for a in args {
                         self.expr(a, env);
                     }
-                    return Ty::Own(Box::new(Ty::Unknown));
+                    return Ty::Shared;
                 }
                 _ => {}
             }
@@ -1449,7 +1577,7 @@ impl<'a> Checker<'a> {
             if sig.is_extern {
                 for a in args {
                     let t = self.expr(a, env);
-                    if !matches!(t, Ty::Int | Ty::Bool | Ty::CStr | Ty::Str | Ty::Own(_) | Ty::Chan | Ty::Unknown) {
+                    if !matches!(t, Ty::Int | Ty::Bool | Ty::CStr | Ty::Str | Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Shared | Ty::Unknown) {
                         self.diags.push(Diag::err(a.span, "ffi",
                             format!("`{}` cannot cross the FFI boundary", t.name())));
                     }
@@ -1483,7 +1611,9 @@ impl<'a> Checker<'a> {
             for (a, want) in args.iter().zip(sig.params.iter()) {
                 let got = self.expr(a, env);
                 // extern fns get the raw C type; ref/mut params emit borrow checks
-                self.assignable(&subst_ty(want, &bind), &got, a.span);
+                let want = subst_ty(want, &bind);
+                self.assignable(&want, &got, a.span);
+                self.move_for(a, &want, env);
             }
             let ret = subst_ret(&sig.ret, &bind);
             return match ret {
@@ -1519,6 +1649,7 @@ impl<'a> Checker<'a> {
         for (a, want) in args.iter().zip(ps.iter()) {
             let got = self.expr(a, env);
             self.assignable(want, &got, a.span);
+            self.move_for(a, want, env);
         }
         r.clone()
     }

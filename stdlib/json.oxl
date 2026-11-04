@@ -67,7 +67,7 @@ fn jarr() -> own Json {
 }
 
 /// append member/element; key is ignored for arrays
-fn jadd(parent: own Json, key: str, val: own Json) {
+fn jadd(parent: mut Json, key: str, val: own Json) {
     val.key = key
     if parent.child == nil {
         parent.child = val
@@ -81,7 +81,7 @@ fn jadd(parent: own Json, key: str, val: own Json) {
 }
 
 /// first member with this key, or nil
-fn jget(obj: own Json, key: str) -> own Json {
+fn jget(obj: ref Json, key: str) -> own Json {
     m := obj.child
     for m != nil {
         if m.key == key {
@@ -119,7 +119,7 @@ fn jescape(s: str) -> str {
     return out
 }
 
-fn tojson(j: own Json) -> str {
+fn tojson(j: ref Json) -> str {
     if j == nil {
         return "null"
     }

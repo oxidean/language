@@ -138,14 +138,14 @@ fn set_new() -> own Set {
     return s
 }
 
-fn set_add(s: own Set, k: str) {
+fn set_add(s: mut Set, k: str) {
     map_set(s.m, k, 1)
 }
 
-fn set_has(s: own Set, k: str) -> bool {
+fn set_has(s: ref Set, k: str) -> bool {
     return map_has(s.m, k)
 }
 
-fn set_del(s: own Set, k: str) {
+fn set_del(s: mut Set, k: str) {
     map_del(s.m, k)
 }

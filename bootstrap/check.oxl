@@ -33,6 +33,7 @@ fn k_fn() -> int { return 13 }
 fn k_var() -> int { return 14 }
 fn k_struct() -> int { return 15 }
 fn k_enum() -> int { return 16 }
+fn k_shared() -> int { return 17 }
 
 // one pool record; i/r are ty handles (-1 unused), args an int list
 struct T { k: int, i: int, args: own IList, r: int, name: str }
@@ -74,6 +75,18 @@ fn fcons(n: str, t: int, next: own FList) -> own FList {
     c.v.n = n
     c.v.t = t
     c.next = next
+    return c
+}
+// deep copy — the same field list is shared between the struct
+// registry and the enum variant entry; each needs its own cells
+fn fclone(l: ref FList) -> own FList {
+    if l == nil { return nil }
+    e := new(FEnt)
+    e.n = l.v.n
+    e.t = l.v.t
+    c := new(FList)
+    c.v = e
+    c.next = fclone(l.next)
     return c
 }
 fn frev(l: own FList) -> own FList {
@@ -289,6 +302,7 @@ fn ty_name(ck: ref Ck, t: int) -> str {
     if k == k_void() { return "void" }
     if k == k_err() { return "err" }
     if k == k_chan() { return "chan" }
+    if k == k_shared() { return "shared" }
     if k == k_var() || k == k_struct() || k == k_enum() { return ck.tyv[t].name }
     if k == k_own() { return "own " + ty_name(ck, ck.tyv[t].i) }
     if k == k_ref() { return "ref " + ty_name(ck, ck.tyv[t].i) }
@@ -331,12 +345,17 @@ fn assignable(ck: mut Ck, want: int, got: int) {
     if !ok && gk == k_err() {
         // nil is the null pointer for owned/borrowed refs, chans, slices
         ok = wk == k_own() || wk == k_ref() || wk == k_mut()
-            || wk == k_chan() || wk == k_slice()
+            || wk == k_chan() || wk == k_slice() || wk == k_shared()
     }
     if !ok && wk == k_ref() {
         if gk == k_own() || gk == k_mut() || gk == k_ref() {
             ok = ty_eq(ck, ck.tyv[want].i, ck.tyv[got].i)
         }
+    }
+    if !ok && (wk == k_ref() || wk == k_mut()) {
+        // `ref T`/`mut T` accept `own ?` (untyped boxes like mkbuf)
+        ok = gk == k_own() && ck.tyv[got].i >= 0
+            && ck.tyv[ck.tyv[got].i].k == k_unk()
     }
     if !ok && wk == k_mut() {
         if gk == k_own() || gk == k_mut() {
@@ -352,6 +371,7 @@ fn assignable(ck: mut Ck, want: int, got: int) {
 fn is_word(ck: ref Ck, t: int) -> bool {
     k := ck.tyv[t].k
     return k == k_int() || k == k_bool() || k == k_chan() || k == k_own()
+        || k == k_shared()
 }
 
 // ---------- node helpers ----------
@@ -557,6 +577,7 @@ fn ty_parse(ck: mut Ck, s: str) -> int {
     if s == "void" { return t_void(ck) }
     if s == "err" { return t_err(ck) }
     if s == "chan" { return tk(ck, k_chan()) }
+    if s == "shared" { return tk(ck, k_shared()) }
     n := resolve_named(ck, s)
     if collections.map_has(ck.structs, n) { return tn(ck, k_struct(), n) }
     if collections.map_has(ck.enums, n) { return tn(ck, k_enum(), n) }
@@ -642,7 +663,7 @@ fn reg_variant(ck: mut Ck, en: str, ei: int, vars: ref parser.NList) {
                     // the `as` payload resolves as a struct `E.V`
                     sn := en + "." + name
                     collections.map_set(ck.structs, sn, len(ck.structsv))
-                    ck.structsv = push(ck.structsv, SEnt{n: sn, fields: fields})
+                    ck.structsv = push(ck.structsv, SEnt{n: sn, fields: fclone(fields)})
                     out = vcons(name, fields, out)
                 }
             }
@@ -1659,7 +1680,7 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
                 expr(ck, al.v, env)
                 al = al.next
             }
-            return ti(ck, k_own(), t_unk(ck))
+            return tk(ck, k_shared())
         }
         // ---------- declared fns ----------
         if !collections.map_has(ck.fns, qn) {

@@ -30,7 +30,7 @@ fn main() {
     println("done")
 }
 
-fn worker(c: own) {
+fn worker(c: shared) {
     i := 0
     for i < 1000 {
         sync.cinc(c)

@@ -8,13 +8,13 @@
 // returns is sent as a text/plain 200 response.
 
 extern fn socket(domain: int, ty: int, proto: int) -> int
-extern fn bind(fd: int, addr: own sockaddr, len: int) -> int
+extern fn bind(fd: int, addr: ref sockaddr, len: int) -> int
 extern fn listen(fd: int, backlog: int) -> int
-extern fn accept(fd: int, addr: own sockaddr, len: own intp) -> int
-extern fn read(fd: int, buf: own void, n: int) -> int
+extern fn accept(fd: int, addr: mut sockaddr, len: mut intp) -> int
+extern fn read(fd: int, buf: mut void, n: int) -> int
 extern fn write(fd: int, buf: cstr, n: int) -> int
 extern fn close(fd: int) -> int
-extern fn setsockopt(fd: int, lvl: int, opt: int, v: own intp, n: int) -> int
+extern fn setsockopt(fd: int, lvl: int, opt: int, v: ref intp, n: int) -> int
 
 struct sockaddr { a: int, b: int }   // 16 bytes: sockaddr_in fits
 struct intp { v: int }

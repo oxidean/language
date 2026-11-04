@@ -24,14 +24,14 @@ fns become state machines; tasks are frames (~96 B measured), not
 threads (~8.5 kB). Sequential because everything in Track A + the
 self-hosted codegen builds on its suspend-set and frame layout.
 
-### Task A2: `select` multi-channel wait [not started]
+### Task A2: `select` multi-channel wait [done]
 
 `items/a2-select.md`. Design doc: desired, TBD — this spec settles it.
 Depends on A1 (channel ops become suspend points inside a state
 machine) — doing it on pool threads would bake in the wrong
 implementation twice.
 
-### Task A3: Buffered channels [not started]
+### Task A3: Buffered channels [done]
 
 `items/a3-buffered-channels.md`. `mkchan(n)` capacity. Independent of
 A1's transform mechanics but rides the same RtChan struct — schedule
@@ -39,21 +39,21 @@ after A1 lands to avoid churning the channel internals twice.
 
 ## Track B — Self-host language features (parallel-safe, ordered)
 
-### Task B1: `enum` tagged unions [not started]
+### Task B1: `enum` tagged unions [done]
 
 `items/b1-enum.md`. Highest leverage: the AST is a tagged-union
 problem and `bootstrap/check.oxl` is blocked without it.
 
-### Task B2: `match` [not started]
+### Task B2: `match` [done]
 
 `items/b2-match.md`. Lands right behind B1 — checker/codegen dispatch
 is the consumer.
 
-### Task B3: slices `[]T` [not started]
+### Task B3: slices `[]T` [done]
 
 `items/b3-slices.md`. Token/AST arrays. Parallel-safe with B1/B2.
 
-### Task B4: function values [not started]
+### Task B4: function values [done]
 
 `items/b4-fn-values.md`. Visitor passes + stdlib sort/map. Parallel-safe.
 
@@ -61,18 +61,18 @@ is the consumer.
 
 `items/b5-defer.md`. Scoped cleanup. Parallel-safe, small.
 
-### Task B6: maps/sets stdlib [not started]
+### Task B6: maps/sets stdlib [done]
 
 `items/b6-maps.md`. `std/collections` — hash map + set over the runtime's
 existing primitives. The checker's env/fn tables consume it.
 
 ## Track C — Self-host compiler (sequential after B)
 
-### Task C1: `bootstrap/check.oxl` [not started]
+### Task C1: `bootstrap/check.oxl` [done]
 
 `items/c1-check.md`. Typechecker in the language. Needs B1, B2, B6.
 
-### Task C2: `bootstrap/codegen.oxl` [not started]
+### Task C2: `bootstrap/codegen.oxl` [done]
 
 `items/c2-codegen.md`. Emits C against `runtime/` — the last piece
 before the classic bootstrap chain (self-compiled `oxl` compiles
@@ -85,7 +85,7 @@ itself). Needs C1 + B3.
 `items/d1-float.md`. Blocks JSON floats and any numeric service work.
 Small, self-contained.
 
-### Task D2: `own` move tracking [not started]
+### Task D2: `own` move tracking [done]
 
 `items/d2-move-tracking.md`. Compile-time double-move detection —
 today the checker allows passing the same `own` twice. Soundness gap,

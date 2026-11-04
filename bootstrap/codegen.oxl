@@ -71,10 +71,11 @@ fn nput(b: mut GBuf, s: own parser.Node) {
     c := parser.ncons(s, nil)
     if b.items == nil {
         b.items = c
+        b.tail = b.items
     } else {
         b.tail.next = c
+        b.tail = b.tail.next
     }
-    b.tail = c
 }
 
 struct G {
@@ -247,6 +248,7 @@ fn gcty(g: mut G, t: int) -> str {
     if k == check.k_cstr() { return "const char*" }
     if k == check.k_void() { return "void" }
     if k == check.k_chan() { return "RtChan*" }
+    if k == check.k_shared() { return "RtShared*" }
     if k == check.k_slice() { return "RtSlice" }
     if k == check.k_fn() { return "RtFnv" }
     if k == check.k_struct() { return "struct o_s_" + cname(g.ck.tyv[t].name) }
@@ -624,10 +626,11 @@ fn xty_call(g: mut G, f: ref parser.Node, args: ref parser.NList) -> int {
         return check.t_str(g.ck)
     }
     if name == "cstr" { return check.tk(g.ck, check.k_cstr()) }
-    if name == "mkbuf" || name == "sqlite_open" || name == "mkshared" {
+    if name == "mkbuf" || name == "sqlite_open" {
         unk := check.t_unk(g.ck)
         return check.ti(g.ck, check.k_own(), unk)
     }
+    if name == "mkshared" { return check.tk(g.ck, check.k_shared()) }
     if name == "new" {
         if args != nil {
             a := args.v
