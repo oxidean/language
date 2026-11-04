@@ -89,6 +89,10 @@ fn k_shared() -> int {
     return 17
 }
 
+fn k_iface() -> int {
+    return 18
+}
+
 // one pool record; i/r are ty handles (-1 unused), args an int list
 struct T { k: int, i: int, args: own IList, r: int, name: str }
 
@@ -236,6 +240,7 @@ struct FnSig {
     retk: int, // 0 void, 1 one, 2 pair
     ret1: int, // ty handle for retk 1/2
     is_extern: int,
+    typarams: own TPList, // generic (T, constraint) decls — nil when plain
 }
 
 struct SList { v: str, next: own SList }
@@ -245,6 +250,69 @@ fn scons(v: str, next: own SList) -> own SList {
     c.v = v
     c.next = next
     return c
+}
+
+fn sl_clone(l: ref SList) -> own SList {
+    if l == nil {
+        return nil
+    }
+    c := new(SList)
+    c.v = l.v
+    c.next = sl_clone(l.next)
+    return c
+}
+
+fn sl_del(l: own SList, n: str) -> own SList {
+    if l == nil {
+        return nil
+    }
+    if l.v == n {
+        return l.next
+    }
+    t := l.next
+    l.next = sl_del(t, n)
+    return l
+}
+
+// (T, constraint) pairs — generic fn params + the active check scope
+struct TPEnt { n: str, c: str }
+
+struct TPList { v: own TPEnt, next: own TPList }
+
+fn tp_clone(l: ref TPList) -> own TPList {
+    if l == nil {
+        return nil
+    }
+    c := new(TPList)
+    c.v = new(TPEnt)
+    c.v.n = l.v.n
+    c.v.c = l.v.c
+    c.next = tp_clone(l.next)
+    return c
+}
+
+// interface method sig + the registered decl
+struct IMethod { n: str, params: own IList, retk: int, ret1: int }
+
+struct IMList { v: own IMethod, next: own IMList }
+
+struct IEnt { n: str, ops: own SList, methods: own IMList }
+
+// per-scope move marks, snapshotted for branch merges — LL is a list
+// of name lists, parallel to the scope stack
+struct LL { names: own SList, next: own LL }
+
+// select/match arm end-states awaiting the fall-through merge
+struct ArmSt { mv: own LL, ft: int, next: own ArmSt }
+
+// per-file import aliases (qualifier -> stem) and selective names
+struct ModEnt { alias: str, stem: str, next: own ModEnt }
+
+struct FileAlias {
+    mod: str,
+    aliases: own ModEnt,
+    names: own ModEnt,
+    next: own FileAlias,
 }
 
 fn sl_has(ll: ref SList, ss: str) -> bool {
@@ -265,7 +333,7 @@ struct ClChk { callees: own SList, seeded: int, next: own ClChk }
 
 struct It { node: own parser.Node, mod: str }
 
-struct Scope { m: own collections.Map }
+struct Scope { m: own collections.Map, moved: own SList }
 
 struct Env { scopes: []Scope }
 
@@ -280,6 +348,12 @@ struct Ck {
     enums: own collections.Map, // name -> idx into enumsv
     enumsv: []EEnt,
     globals: own collections.Map, // name -> ty handle
+    ifaces: own collections.Map, // name -> idx into ifacesv
+    ifacesv: []IEnt,
+    ty_scope: own SList, // type param names in scope (current generic fn)
+    cur_ty_params: own TPList, // (name, constraint) of the fn being checked
+    methods: own SList, // qualified `T.m` method names — for the susp ban
+    file_aliases: []FileAlias, // per-file alias + selective tables
     diags: []DBox,
     edges: own Edge, // caller -> callee call graph
     susp: own SList, // suspend-capable fn names
@@ -299,12 +373,12 @@ struct Ck {
 
 fn env_new() -> own Env {
     e := Env{scopes: mkslice(Scope, 0)}
-    e.scopes = push(e.scopes, Scope{m: collections.map_new()})
+    e.scopes = push(e.scopes, Scope{m: collections.map_new(), moved: nil})
     return new(e)
 }
 
 fn env_push(e: mut Env) {
-    e.scopes = push(e.scopes, Scope{m: collections.map_new()})
+    e.scopes = push(e.scopes, Scope{m: collections.map_new(), moved: nil})
 }
 
 fn env_pop(e: mut Env) {
@@ -312,7 +386,869 @@ fn env_pop(e: mut Env) {
 }
 
 fn env_set(e: mut Env, n: str, t: int) {
-    collections.map_set(e.scopes[len(e.scopes) - 1].m, n, t)
+    i := len(e.scopes) - 1
+    collections.map_set(e.scopes[i].m, n, t)
+    // a (re)binding starts un-moved — clears any stale mark on shadow
+    e.scopes[i].moved = sl_del(e.scopes[i].moved, n)
+}
+
+// ---------- move tracking (D2) ----------
+// a binding is marked moved when its `own` value flows somewhere
+// ownership transfers (own arg, own field store, return, chan send).
+// moved marks live per-scope, parallel to `scopes`.
+fn scope_of(e: ref Env, n: str) -> int {
+    i := len(e.scopes) - 1
+    for i >= 0 {
+        if collections.map_has(e.scopes[i].m, n) {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+fn is_moved(e: ref Env, n: str) -> bool {
+    i := scope_of(e, n)
+    return i >= 0 && sl_has(e.scopes[i].moved, n)
+}
+
+fn mark_moved(e: mut Env, n: str) {
+    i := scope_of(e, n)
+    if i >= 0 && !sl_has(e.scopes[i].moved, n) {
+        e.scopes[i].moved = scons(n, e.scopes[i].moved)
+    }
+}
+
+fn clear_moved(e: mut Env, n: str) {
+    i := scope_of(e, n)
+    if i >= 0 {
+        e.scopes[i].moved = sl_del(e.scopes[i].moved, n)
+    }
+}
+
+// snapshot of every scope's moved list — outermost first
+fn moved_save(e: ref Env) -> own LL {
+    let out: own LL = nil
+    i := len(e.scopes) - 1
+    for i >= 0 {
+        c := new(LL)
+        c.names = sl_clone(e.scopes[i].moved)
+        c.next = out
+        out = c
+        i = i - 1
+    }
+    return out
+}
+
+fn moved_restore(e: mut Env, s: own LL) {
+    i := 0
+    for i < len(e.scopes) && s != nil {
+        e.scopes[i].moved = s.names
+        s = s.next
+        i = i + 1
+    }
+}
+
+// branch merge: keep a binding marked if it moved on ANY path — the
+// join can't prove which branch ran
+fn moved_union(e: mut Env, other: ref LL) {
+    i := 0
+    o := other
+    for i < len(e.scopes) && o != nil {
+        l := o.names
+        for l != nil {
+            if !sl_has(e.scopes[i].moved, l.v) {
+                e.scopes[i].moved = scons(l.v, e.scopes[i].moved)
+            }
+            l = l.next
+        }
+        o = o.next
+        i = i + 1
+    }
+}
+
+// does control reach the end of this block? A trailing return/break/
+// continue can't have its moves observed at the join
+fn falls_through(items: ref parser.NList) -> bool {
+    if items == nil {
+        return true
+    }
+    l := items
+    for l.next != nil {
+        l = l.next
+    }
+    return stmt_ft(l.v)
+}
+
+fn stmt_ft(s: ref parser.Node) -> bool {
+    match s {
+        parser.Node.Ret{vals} => {
+            return false
+        }
+        parser.Node.Break => {
+            return false
+        }
+        parser.Node.Continue => {
+            return false
+        }
+        parser.Node.If{cond, then, els} => {
+            if els == nil {
+                return true
+            }
+            return node_ft(then) || node_ft(els)
+        }
+        parser.Node.Scope{body} => {
+            return node_ft(body)
+        }
+        _ => {
+            return true
+        }
+    }
+    return true
+}
+
+fn node_ft(b: ref parser.Node) -> bool {
+    if b == nil {
+        return true
+    }
+    match b {
+        parser.Node.List{items} => {
+            return falls_through(items)
+        }
+        _ => {
+            return stmt_ft(b)
+        }
+    }
+    return true
+}
+
+// `e` consumes an `own` binding — mark it moved
+fn move_own(ck: mut Ck, e: ref parser.Node, env: mut Env) {
+    match e {
+        parser.Node.Name(n) => {
+            t := env_get(ck, env, n)
+            if t >= 0 && ck.tyv[t].k == k_own() {
+                mark_moved(env, n)
+            }
+        }
+        _ => {
+        }
+    }
+}
+
+// move only when the destination wants ownership (param, field, ret) —
+// an iface data ptr takes it too
+fn move_for(ck: mut Ck, e: ref parser.Node, want: int, env: mut Env) {
+    if want >= 0 && (ck.tyv[want].k == k_own() || ck.tyv[want].k == k_iface()) {
+        move_own(ck, e, env)
+    }
+}
+
+// deep copy of a moved snapshot — select/match arms each re-run from it
+fn ll_clone(l: ref LL) -> own LL {
+    if l == nil {
+        return nil
+    }
+    c := new(LL)
+    c.names = sl_clone(l.names)
+    c.next = ll_clone(l.next)
+    return c
+}
+
+// after an arm-merge: pre is restored then wiped — the union of the
+// arms' end-states re-adds everything that survives
+fn moved_clear_all(e: mut Env) {
+    i := 0
+    for i < len(e.scopes) {
+        e.scopes[i].moved = nil
+        i = i + 1
+    }
+}
+
+// `for` post-pass: any binding newly marked inside the body would be
+// read moved by the next iteration — unless re-assigned in place
+fn for_moved_check(ck: mut Ck, e: ref Env, pre: ref LL) {
+    i := 0
+    p := pre
+    for i < len(e.scopes) && p != nil {
+        l := e.scopes[i].moved
+        for l != nil {
+            if !sl_has(p.names, l.v) {
+                diag(ck, "own", "`" + l.v + "` moved inside `for` — re-assign it in the same iteration")
+            }
+            l = l.next
+        }
+        p = p.next
+        i = i + 1
+    }
+}
+
+// ---------- generics + interfaces (D1/D3) ----------
+
+// ty param `v` declared on the fn being checked?
+fn tp_found(l: ref TPList, v: str) -> bool {
+    for l != nil {
+        if l.v.n == v {
+            return true
+        }
+        l = l.next
+    }
+    return false
+}
+
+// `v`'s declared constraint ("" when not a param of the current fn)
+fn tp_get(l: ref TPList, v: str) -> str {
+    for l != nil {
+        if l.v.n == v {
+            return l.v.c
+        }
+        l = l.next
+    }
+    return ""
+}
+
+// idx into ifacesv or -1 — `n` must already be qualified
+fn iface_ent(ck: ref Ck, n: str) -> int {
+    if collections.map_has(ck.ifaces, n) {
+        [i, err] = collections.map_get(ck.ifaces, n)
+        if err == nil {
+            return i
+        }
+    }
+    return -1
+}
+
+// Ret equality across (kind, ty) pairs — void carries no ty
+fn ret_eq(ck: ref Ck, k1: int, r1: int, k2: int, r2: int) -> bool {
+    if k1 != k2 {
+        return false
+    }
+    if k1 == 0 {
+        return true
+    }
+    return ty_eq(ck, r1, r2)
+}
+
+// the fixed op vocabulary — a Var operand passes any op (the declared
+// constraint gates use sites, not this test)
+fn op_ok(ck: ref Ck, op: str, t: int) -> bool {
+    k := ck.tyv[t].k
+    if op == "eq" {
+        return k == k_int() || k == k_bool() || k == k_str() || k == k_chan() || k == k_var()
+    }
+    if op == "ordered" {
+        return k == k_int() || k == k_var()
+    }
+    if op == "add" {
+        return k == k_int() || k == k_str() || k == k_var()
+    }
+    return false
+}
+
+// base type name behind own/ref/mut — the name methods key on
+fn ty_base(ck: ref Ck, t: int) -> str {
+    k := ck.tyv[t].k
+    if k == k_struct() || k == k_enum() {
+        return ck.tyv[t].name
+    }
+    if k == k_own() || k == k_ref() || k == k_mut() {
+        i := ck.tyv[t].i
+        if i >= 0 {
+            return ty_base(ck, i)
+        }
+    }
+    return ""
+}
+
+// iface `have` covers everything iface `want` declares
+fn iface_covers(ck: ref Ck, have: str, want: str) -> bool {
+    wi := iface_ent(ck, want)
+    hi := iface_ent(ck, have)
+    if wi < 0 || hi < 0 {
+        return false
+    }
+    wo := ck.ifacesv[wi].ops
+    for wo != nil {
+        if !sl_has(ck.ifacesv[hi].ops, wo.v) {
+            return false
+        }
+        wo = wo.next
+    }
+    wm := ck.ifacesv[wi].methods
+    for wm != nil {
+        hm := ck.ifacesv[hi].methods
+        ok := false
+        for hm != nil {
+            if hm.v.n == wm.v.n && il_eq(ck, hm.v.params, wm.v.params) && ret_eq(ck, hm.v.retk, hm.v.ret1, wm.v.retk, wm.v.ret1) {
+                ok = true
+                break
+            }
+            hm = hm.next
+        }
+        if !ok {
+            return false
+        }
+        wm = wm.next
+    }
+    return true
+}
+
+// copy an IList — interface method sigs are shared, callers need own
+fn il_clone(l: ref IList) -> own IList {
+    if l == nil {
+        return nil
+    }
+    c := new(IList)
+    c.v = l.v
+    c.next = il_clone(l.next)
+    return c
+}
+
+// record ty-param bindings by matching an expected param ty against
+// the argument's ty — `own T` binds T to the whole own type
+fn bind_vars(ck: mut Ck, want: int, got: int, bind: mut collections.Map) {
+    wk := ck.tyv[want].k
+    gk := ck.tyv[got].k
+    if wk == k_var() {
+        v := ck.tyv[want].name
+        if !collections.map_has(bind, v) {
+            collections.map_set(bind, v, got)
+        }
+        return
+    }
+    if wk == k_own() && gk == k_own() || wk == k_ref() && gk == k_ref() || wk == k_mut() && gk == k_mut() {
+        if ck.tyv[want].i >= 0 && ck.tyv[got].i >= 0 {
+            bind_vars(ck, ck.tyv[want].i, ck.tyv[got].i, bind)
+        }
+        return
+    }
+    // an own/ref/mut argument into a ref/mut param still binds the inner
+    if (wk == k_ref() || wk == k_mut()) && (gk == k_own() || gk == k_mut() || gk == k_ref()) {
+        if ck.tyv[want].i >= 0 && ck.tyv[got].i >= 0 {
+            bind_vars(ck, ck.tyv[want].i, ck.tyv[got].i, bind)
+        }
+        return
+    }
+    if wk == k_slice() && gk == k_slice() {
+        if ck.tyv[want].i >= 0 && ck.tyv[got].i >= 0 {
+            bind_vars(ck, ck.tyv[want].i, ck.tyv[got].i, bind)
+        }
+        return
+    }
+    if wk == k_fn() && gk == k_fn() {
+        wp := ck.tyv[want].args
+        gp := ck.tyv[got].args
+        for wp != nil && gp != nil {
+            bind_vars(ck, wp.v, gp.v, bind)
+            wp = wp.next
+            gp = gp.next
+        }
+        if ck.tyv[want].r >= 0 && ck.tyv[got].r >= 0 {
+            bind_vars(ck, ck.tyv[want].r, ck.tyv[got].r, bind)
+        }
+    }
+}
+
+// substitute bound ty params inside `t` — unbound Vars stay Vars
+fn subst_ty(ck: mut Ck, t: int, bind: ref collections.Map) -> int {
+    if t < 0 {
+        return t
+    }
+    k := ck.tyv[t].k
+    if k == k_var() {
+        v := ck.tyv[t].name
+        if collections.map_has(bind, v) {
+            [bt, err] = collections.map_get(bind, v)
+            if err == nil {
+                return bt
+            }
+        }
+        return t
+    }
+    if k == k_own() || k == k_ref() || k == k_mut() {
+        return ti(ck, k, subst_ty(ck, ck.tyv[t].i, bind))
+    }
+    if k == k_slice() {
+        return ti(ck, k, subst_ty(ck, ck.tyv[t].i, bind))
+    }
+    if k == k_fn() {
+        let ps: own IList = nil
+        l := ck.tyv[t].args
+        for l != nil {
+            ps = icons(subst_ty(ck, l.v, bind), ps)
+            l = l.next
+        }
+        return tm(ck, k, -1, irev(ps), subst_ty(ck, ck.tyv[t].r, bind), "")
+    }
+    return t
+}
+
+// concrete `tname` carries every method iface `iname` declares — the
+// `tname.m` fn must exist with the iface's sig behind a receiver slot
+fn impl_satisfies(ck: mut Ck, tname: str, iname: str) -> bool {
+    ii := iface_ent(ck, iname)
+    if ii < 0 {
+        return false
+    }
+    ml := ck.ifacesv[ii].methods
+    for ml != nil {
+        q := tname + "." + ml.v.n
+        if !collections.map_has(ck.fns, q) {
+            return false
+        }
+        [fi, err] = collections.map_get(ck.fns, q)
+        if err != nil {
+            return false
+        }
+        sig := ck.fnsv[fi]
+        if sig.is_extern == 1 || ilen(sig.params) != ilen(ml.v.params) + 1 {
+            return false
+        }
+        if sig.typarams == nil {
+            w := sig.params.next
+            m := ml.v.params
+            for w != nil && m != nil {
+                if !ty_eq(ck, w.v, m.v) {
+                    return false
+                }
+                w = w.next
+                m = m.next
+            }
+            if w != nil || m != nil || !ret_eq(ck, sig.retk, sig.ret1, ml.v.retk, ml.v.ret1) {
+                return false
+            }
+        } else {
+            // generic impl — the iface sig pins the ty params: bind
+            // declared params onto the iface's, then compare post-subst
+            bind := collections.map_new()
+            w := sig.params.next
+            m := ml.v.params
+            for w != nil && m != nil {
+                bind_vars(ck, w.v, m.v, bind)
+                w = w.next
+                m = m.next
+            }
+            tp := sig.typarams
+            for tp != nil {
+                if !collections.map_has(bind, tp.v.n) {
+                    return false
+                }
+                tp = tp.next
+            }
+            w = sig.params.next
+            m = ml.v.params
+            for w != nil && m != nil {
+                if !ty_eq(ck, subst_ty(ck, w.v, bind), m.v) {
+                    return false
+                }
+                w = w.next
+                m = m.next
+            }
+            if w != nil || m != nil {
+                return false
+            }
+            ok := sig.retk == ml.v.retk
+            if ok && sig.retk != 0 {
+                ok = ty_eq(ck, subst_ty(ck, sig.ret1, bind), ml.v.ret1)
+            }
+            if !ok {
+                return false
+            }
+        }
+        ml = ml.next
+    }
+    return true
+}
+
+// does `t` satisfy constraint `c` (builtin word or interface name)? A
+// method-declaring iface needs the type's method set; ops keep the
+// fixed vocabulary
+fn satisfies(ck: mut Ck, t: int, c: str) -> bool {
+    tk := ck.tyv[t].k
+    if tk == k_var() {
+        v := ck.tyv[t].name
+        if tp_found(ck.cur_ty_params, v) {
+            vc := tp_get(ck.cur_ty_params, v)
+            if vc == c {
+                return true
+            }
+            if collections.map_has(ck.ifaces, vc) && collections.map_has(ck.ifaces, c) {
+                return iface_covers(ck, vc, c)
+            }
+            ci := iface_ent(ck, c)
+            if ci < 0 || ck.ifacesv[ci].methods != nil {
+                return false
+            }
+            ol := ck.ifacesv[ci].ops
+            for ol != nil {
+                if !op_ok(ck, ol.v, t) {
+                    return false
+                }
+                ol = ol.next
+            }
+            return true
+        }
+    }
+    if tk == k_iface() {
+        if collections.map_has(ck.ifaces, c) {
+            return iface_covers(ck, ck.tyv[t].name, c)
+        }
+    }
+    if len(c) == 0 || c == "any" {
+        return true
+    }
+    if c == "eq" || c == "ordered" || c == "add" {
+        return op_ok(ck, c, t)
+    }
+    ci := iface_ent(ck, c)
+    if ci < 0 {
+        return false
+    }
+    ol := ck.ifacesv[ci].ops
+    for ol != nil {
+        if !op_ok(ck, ol.v, t) {
+            return false
+        }
+        ol = ol.next
+    }
+    if ck.ifacesv[ci].methods == nil {
+        return true
+    }
+    b := ty_base(ck, t)
+    if len(b) == 0 {
+        return false
+    }
+    return impl_satisfies(ck, b, c)
+}
+
+// `got` flows into iface `want` — concrete impls need the method set,
+// ifaces cover ifaces, constrained Vars forward their constraint, and
+// nil is the empty pair
+fn iface_ok(ck: mut Ck, want: int, got: int) -> bool {
+    if ck.tyv[want].k != k_iface() {
+        return false
+    }
+    w := ck.tyv[want].name
+    gk := ck.tyv[got].k
+    if gk == k_iface() {
+        return iface_covers(ck, ck.tyv[got].name, w)
+    }
+    if gk == k_var() {
+        v := ck.tyv[got].name
+        if tp_found(ck.cur_ty_params, v) {
+            c := tp_get(ck.cur_ty_params, v)
+            return c == w || iface_covers(ck, c, w)
+        }
+        return false
+    }
+    if gk == k_err() {
+        return true
+    }
+    b := ty_base(ck, got)
+    if len(b) == 0 {
+        return false
+    }
+    return impl_satisfies(ck, b, w)
+}
+
+// generic bodies may only use operators the constraint permits
+fn req_op(ck: mut Ck, var: str, op: str, bop: str) {
+    c := ""
+    if tp_found(ck.cur_ty_params, var) {
+        c = tp_get(ck.cur_ty_params, var)
+    }
+    has := false
+    if c == "eq" {
+        has = op == "eq"
+    }
+    if c == "ordered" {
+        has = op == "ordered" || op == "eq"
+    }
+    if c == "add" {
+        has = op == "add"
+    }
+    if len(c) > 0 && c != "any" && c != "eq" && c != "ordered" && c != "add" {
+        ci := iface_ent(ck, c)
+        if ci >= 0 {
+            has = sl_has(ck.ifacesv[ci].ops, op)
+        }
+    }
+    if !has {
+        diag(ck, "type", "`" + bop + "` on `" + var + "` requires constraint `" + op + "` (has `" + c + "`)")
+    }
+}
+
+// receiver base name behind `own `/`ref `/`mut ` prefixes — the
+// method's `T` in its `T.m` key
+fn recv_base_ty(s: str) -> str {
+    r := strings.trim(s)
+    i := find(r, " ")
+    for i > 0 {
+        q := substr(r, 0, i)
+        if q != "own" && q != "ref" && q != "mut" {
+            return r
+        }
+        r = strings.trim(substr(r, i + 1, len(r)))
+        i = find(r, " ")
+    }
+    return r
+}
+
+// qualified decl key for a fn — methods are `T.m` on the receiver's
+// resolved base name, everything else is `mod.name`
+fn fn_qname(ck: mut Ck, mod: str, recv: ref parser.Node, name: str) -> str {
+    if recv == nil {
+        return qname(mod, name)
+    }
+    b := ""
+    match recv {
+        parser.Node.Param{ty} => {
+            b = recv_base_ty(ty_str(ty))
+        }
+        _ => {
+        }
+    }
+    if len(b) == 0 {
+        return qname(mod, name)
+    }
+    return resolve_named(ck, b) + "." + name
+}
+
+// method-call resolution target: 1 = direct `T.m` fn, 2 = vtable slot,
+// 0 = nothing
+struct MT { k: int, q: str, ps: own IList, rk: int, r1: int }
+
+fn method_target(ck: ref Ck, t: int, m: str) -> own MT {
+    mt := new(MT{k: 0, q: "", ps: nil, rk: 0, r1: -1})
+    tk := ck.tyv[t].k
+    if tk == k_own() || tk == k_ref() || tk == k_mut() {
+        i := ck.tyv[t].i
+        if i >= 0 {
+            return method_target(ck, i, m)
+        }
+        return mt
+    }
+    if tk == k_struct() || tk == k_enum() {
+        q := ck.tyv[t].name + "." + m
+        if collections.map_has(ck.fns, q) {
+            mt.k = 1
+            mt.q = q
+        }
+        return mt
+    }
+    if tk == k_iface() {
+        ii := iface_ent(ck, ck.tyv[t].name)
+        if ii >= 0 {
+            ml := ck.ifacesv[ii].methods
+            for ml != nil {
+                if ml.v.n == m {
+                    mt.k = 2
+                    mt.q = ck.tyv[t].name + "." + m
+                    mt.ps = il_clone(ml.v.params)
+                    mt.rk = ml.v.retk
+                    mt.r1 = ml.v.ret1
+                    return mt
+                }
+                ml = ml.next
+            }
+        }
+        return mt
+    }
+    if tk == k_var() {
+        v := ck.tyv[t].name
+        if tp_found(ck.cur_ty_params, v) {
+            c := tp_get(ck.cur_ty_params, v)
+            ii := iface_ent(ck, c)
+            if ii >= 0 {
+                ml := ck.ifacesv[ii].methods
+                for ml != nil {
+                    if ml.v.n == m {
+                        mt.k = 2
+                        mt.q = c + "." + m
+                        mt.ps = il_clone(ml.v.params)
+                        mt.rk = ml.v.retk
+                        mt.r1 = ml.v.ret1
+                        return mt
+                    }
+                    ml = ml.next
+                }
+            }
+        }
+        return mt
+    }
+    return mt
+}
+
+// `w.m(args)` through an iface vtable — the declared sig checks args
+// (the receiver is the data ptr, not a visible arg)
+fn call_iface(ck: mut Ck, ps: ref IList, retk: int, ret1: int, args: ref parser.NList, env: mut Env) -> int {
+    if nl_len(args) != ilen(ps) {
+        diag(ck, "check", "method takes " + itoa(ilen(ps)) + " args, got " + itoa(nl_len(args)))
+    }
+    wl := ps
+    al := args
+    for al != nil && wl != nil {
+        gt := expr(ck, al.v, env)
+        assignable(ck, wl.v, gt)
+        move_for(ck, al.v, wl.v, env)
+        wl = wl.next
+        al = al.next
+    }
+    if retk == 0 {
+        return t_void(ck)
+    }
+    if retk == 2 && ck.in_let2 == 0 {
+        diag(ck, "check", "`[T, err]` result must be bound with `[v, err] =` or returned")
+    }
+    return ret1
+}
+
+// `want`/`got` where `got` is the receiver being adapted: value want
+// derefs a pointer arg, pointer want refs a value arg
+fn recv_adapt_ty(ck: ref Ck, want: int, got: int) -> int {
+    wk := ck.tyv[want].k
+    gk := ck.tyv[got].k
+    if (wk == k_struct() || wk == k_enum()) && (gk == k_own() || gk == k_ref() || gk == k_mut()) {
+        if ty_base(ck, got) == ck.tyv[want].name {
+            return want
+        }
+    }
+    if (wk == k_own() || wk == k_ref() || wk == k_mut()) && (gk == k_struct() || gk == k_enum()) {
+        if ty_base(ck, want) == ck.tyv[got].name {
+            return want
+        }
+    }
+    return got
+}
+
+// field ty of `name` on a struct(-ish) `t` — -1 when absent
+fn field_ty(ck: ref Ck, t: int, name: str) -> int {
+    sn := ""
+    k := ck.tyv[t].k
+    if k == k_struct() {
+        sn = ck.tyv[t].name
+    }
+    if k == k_own() || k == k_ref() || k == k_mut() {
+        i := ck.tyv[t].i
+        if i >= 0 && ck.tyv[i].k == k_struct() {
+            sn = ck.tyv[i].name
+        }
+    }
+    if len(sn) == 0 || !collections.map_has(ck.structs, sn) {
+        return -1
+    }
+    [si, err] = collections.map_get(ck.structs, sn)
+    if err != nil {
+        return -1
+    }
+    return ffind(ck.structsv[si].fields, name)
+}
+
+// can `&e` be taken? idents always; field/index chains when their
+// base is — anything else is an rvalue
+fn is_lvalue(e: ref parser.Node) -> bool {
+    if e == nil {
+        return false
+    }
+    k := nk(e)
+    if k == 2 {
+        return true
+    }
+    if k == 9 || k == 38 {
+        match e {
+            parser.Node.Field{obj} => {
+                return is_lvalue(obj)
+            }
+            parser.Node.Index{obj} => {
+                return is_lvalue(obj)
+            }
+            _ => {
+            }
+        }
+    }
+    return false
+}
+
+// a `T.m` registered under some T ending `.m` — the susp scans have no
+// env to type the receiver, so this only approximates (the methods-may-
+// not-suspend ban makes wrong answers unreachable in valid code)
+fn method_q(ck: ref Ck, m: str) -> str {
+    suf := "." + m
+    l := ck.methods
+    for l != nil {
+        if strings.endswith(l.v, suf) {
+            return l.v
+        }
+        l = l.next
+    }
+    return ""
+}
+
+// return kind+ty of a call expr — resolves declared fns, method calls
+// through the receiver's ty, and bare `m(x)` method sugar
+struct CRet { rk: int, r1: int }
+
+fn call_ret(ck: mut Ck, e: ref parser.Node, env: mut Env) -> own CRet {
+    cr := new(CRet{rk: -1, r1: -1})
+    if e == nil || nk(e) != 8 {
+        return cr
+    }
+    match e {
+        parser.Node.Call{f, args} => {
+            n := callee_name(f)
+            if len(n) == 0 {
+                return cr
+            }
+            qn := resolve_named(ck, n)
+            if collections.map_has(ck.fns, qn) {
+                [fi, err] = collections.map_get(ck.fns, qn)
+                if err == nil {
+                    cr.rk = ck.fnsv[fi].retk
+                    cr.r1 = ck.fnsv[fi].ret1
+                }
+                return cr
+            }
+            if nk(f) == 9 {
+                match f {
+                    parser.Node.Field{obj, name} => {
+                        ot := expr(ck, obj, env)
+                        mt := method_target(ck, ot, name)
+                        if mt.k == 2 {
+                            cr.rk = mt.rk
+                            cr.r1 = mt.r1
+                        }
+                        if mt.k == 1 && collections.map_has(ck.fns, mt.q) {
+                            [fi2, err2] = collections.map_get(ck.fns, mt.q)
+                            if err2 == nil {
+                                cr.rk = ck.fnsv[fi2].retk
+                                cr.r1 = ck.fnsv[fi2].ret1
+                            }
+                        }
+                    }
+                    _ => {
+                    }
+                }
+                return cr
+            }
+            // `m(x, ..)` — method sugar: receiver is args[0] already
+            if !is_builtin(n) && args != nil {
+                sv := moved_save(env)
+                t0 := expr(ck, args.v, env)
+                moved_restore(env, sv)
+                mt := method_target(ck, t0, n)
+                if mt.k == 1 && collections.map_has(ck.fns, mt.q) {
+                    [fi3, err3] = collections.map_get(ck.fns, mt.q)
+                    if err3 == nil {
+                        cr.rk = ck.fnsv[fi3].retk
+                        cr.r1 = ck.fnsv[fi3].ret1
+                    }
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    return cr
 }
 
 // ty handle or -1
@@ -457,7 +1393,7 @@ fn ty_name(ck: ref Ck, t: int) -> str {
     if k == k_shared() {
         return "shared"
     }
-    if k == k_var() || k == k_struct() || k == k_enum() {
+    if k == k_var() || k == k_struct() || k == k_enum() || k == k_iface() {
         return ck.tyv[t].name
     }
     if k == k_own() {
@@ -533,6 +1469,11 @@ fn assignable(ck: mut Ck, want: int, got: int) {
             ok = ty_eq(ck, ck.tyv[want].i, ck.tyv[got].i)
         }
     }
+    if !ok && wk == k_iface() {
+        // interface want: method-set satisfaction, iface coverage, a
+        // constrained Var, or nil
+        ok = iface_ok(ck, want, got)
+    }
     if !ok {
         diag(ck, "type", "expected `" + ty_name(ck, want) + "`, found `" + ty_name(ck, got) + "`")
     }
@@ -595,6 +1536,9 @@ fn nk(n: ref parser.Node) -> int {
         parser.Node.SArm{kind} => 44
         parser.Node.Closure{params} => 45
         parser.Node.PatBind{name} => 46
+        parser.Node.Interface{name} => 47
+        parser.Node.TyParam{name} => 48
+        parser.Node.Method{name} => 49
         _ => -1
     }
     return i
@@ -672,19 +1616,79 @@ fn qname(mod: str, n: str) -> str {
     return mod + "." + n
 }
 
-// the Rust driver qualifies decls `mod.name` at load; lookups here try
-// `cur_mod.head` first for bare and dotted names alike
-fn resolve_named(ck: ref Ck, s: str) -> str {
-    if len(ck.cur_mod) == 0 {
-        return s
+// per-file import tables: `import "x" as a` maps qualifier a -> stem,
+// plain imports map stem -> stem; `import "x".{n}` maps n -> stem.n
+fn file_alias_idx(ck: ref Ck, mod: str) -> int {
+    i := 0
+    for i < len(ck.file_aliases) {
+        if ck.file_aliases[i].mod == mod {
+            return i
+        }
+        i = i + 1
     }
+    return -1
+}
+
+// qualifier -> stem for the current file's aliases ("" when unaliased)
+fn alias_stem(ck: ref Ck, q: str) -> str {
+    fi := file_alias_idx(ck, ck.cur_mod)
+    if fi < 0 {
+        return ""
+    }
+    l := ck.file_aliases[fi].aliases
+    for l != nil {
+        if l.alias == q {
+            return l.stem
+        }
+        l = l.next
+    }
+    return ""
+}
+
+// bare name -> `stem.name` when the file selectively imported it
+fn selective_name(ck: ref Ck, n: str) -> str {
+    fi := file_alias_idx(ck, ck.cur_mod)
+    if fi < 0 {
+        return ""
+    }
+    l := ck.file_aliases[fi].names
+    for l != nil {
+        if l.alias == n {
+            return l.stem
+        }
+        l = l.next
+    }
+    return ""
+}
+
+// the Rust driver qualifies decls `mod.name` at load; lookups here try
+// `cur_mod.head` first for bare and dotted names alike. Import aliases
+// rewrite the head of dotted names; selective imports rewrite bare ones.
+fn resolve_named(ck: ref Ck, s: str) -> str {
     head := s
     i := find(s, ".")
     if i >= 0 {
         head = substr(s, 0, i)
+        stem := alias_stem(ck, head)
+        if len(stem) > 0 {
+            return stem + substr(s, i, len(s))
+        }
+        // a selective import binds its head too: `E.V` -> `stem.E.V`
+        sel := selective_name(ck, head)
+        if len(sel) > 0 {
+            return sel + substr(s, i, len(s))
+        }
+    } else {
+        sel := selective_name(ck, s)
+        if len(sel) > 0 {
+            return sel
+        }
+    }
+    if len(ck.cur_mod) == 0 {
+        return s
     }
     cand := ck.cur_mod + "." + head
-    if collections.map_has(ck.structs, cand) || collections.map_has(ck.enums, cand) || collections.map_has(ck.fns, cand) {
+    if collections.map_has(ck.structs, cand) || collections.map_has(ck.enums, cand) || collections.map_has(ck.fns, cand) || collections.map_has(ck.ifaces, cand) {
         return ck.cur_mod + "." + s
     }
     return s
@@ -797,12 +1801,18 @@ fn ty_parse(ck: mut Ck, s: str) -> int {
     if s == "shared" {
         return tk(ck, k_shared())
     }
+    if sl_has(ck.ty_scope, s) {
+        return tn(ck, k_var(), s)
+    }
     n := resolve_named(ck, s)
     if collections.map_has(ck.structs, n) {
         return tn(ck, k_struct(), n)
     }
     if collections.map_has(ck.enums, n) {
         return tn(ck, k_enum(), n)
+    }
+    if collections.map_has(ck.ifaces, n) {
+        return tn(ck, k_iface(), n)
     }
     diag(ck, "check", "unknown type `" + s + "`")
     return t_unk(ck)
@@ -854,6 +1864,13 @@ fn reg_tynames(ck: mut Ck, its: []It) {
                 if !collections.map_has(ck.enums, en) {
                     collections.map_set(ck.enums, en, len(ck.enumsv))
                     ck.enumsv = push(ck.enumsv, EEnt{n: en, vars: nil})
+                }
+            }
+            parser.Node.Interface{name} => {
+                iname := qname(its[i].mod, name)
+                if !collections.map_has(ck.ifaces, iname) {
+                    collections.map_set(ck.ifaces, iname, len(ck.ifacesv))
+                    ck.ifacesv = push(ck.ifacesv, IEnt{n: iname, ops: nil, methods: nil})
                 }
             }
             _ => {
@@ -931,11 +1948,110 @@ fn reg_struct(ck: mut Ck, sn: str, si: int, fields: ref parser.NList) {
     ck.structsv[si].fields = frev(out)
 }
 
+// shared ret resolution for fns + iface method sigs: `-> t` is One,
+// `-> [t, err]` is Pair; borrowed refs may not be returned
+fn ret_sig(ck: mut Ck, ret: ref parser.Node) -> own CRet {
+    cr := new(CRet{rk: 0, r1: -1})
+    if ret != nil {
+        if nk(ret) == 3 {
+            cr.rk = 1
+            cr.r1 = ty_parse(ck, ty_str(ret))
+        }
+        if nk(ret) == 23 { // [T, err]
+            match ret {
+                parser.Node.List{items} => {
+                    cr.rk = 2
+                    if items != nil {
+                        cr.r1 = ty_parse(ck, ty_str(items.v))
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+    }
+    if cr.r1 >= 0 {
+        rk2 := ck.tyv[cr.r1].k
+        if rk2 == k_ref() || rk2 == k_mut() {
+            diag(ck, "own", "borrowed refs may not be returned (v0)")
+        }
+    }
+    return cr
+}
+
+// (T, ..) param names as an SList — the ty_scope shape
+fn tp_names(l: ref TPList) -> own SList {
+    if l == nil {
+        return nil
+    }
+    c := new(SList)
+    c.v = l.v.n
+    c.next = tp_names(l.next)
+    return c
+}
+
+// pass 1 iface: ops are fixed-vocabulary words; methods resolve to
+// receiver-less sigs (interfaces aren't generic — empty ty scope)
+fn reg_iface(ck: mut Ck, ii: int, ops: ref parser.NList, methods: ref parser.NList) {
+    let ol: own SList = nil
+    l := ops
+    for l != nil {
+        match l.v {
+            parser.Node.Name(op) => {
+                ol = scons(op, ol)
+            }
+            _ => {
+            }
+        }
+        l = l.next
+    }
+    ck.ifacesv[ii].ops = ol
+    let ml: own IMList = nil
+    l = methods
+    for l != nil {
+        match l.v {
+            parser.Node.Method{name, params, ret} => {
+                let ps: own IList = nil
+                pl := params
+                for pl != nil {
+                    match pl.v {
+                        parser.Node.Param{ty} => {
+                            ps = icons(ty_parse(ck, ty_str(ty)), ps)
+                        }
+                        _ => {
+                        }
+                    }
+                    pl = pl.next
+                }
+                cr := ret_sig(ck, ret)
+                m := new(IMethod{n: name, params: irev(ps), retk: cr.rk, ret1: cr.r1})
+                mc := new(IMList)
+                mc.v = m
+                mc.next = ml
+                ml = mc
+            }
+            _ => {
+            }
+        }
+        l = l.next
+    }
+    ck.ifacesv[ii].methods = ml
+}
+
 fn reg_fields(ck: mut Ck, its: []It) {
     i := 0
     for i < len(its) {
         ck.cur_mod = its[i].mod
         match its[i].node {
+            parser.Node.Interface{name, ops, methods} => {
+                iname := qname(its[i].mod, name)
+                if collections.map_has(ck.ifaces, iname) {
+                    [ii, err] = collections.map_get(ck.ifaces, iname)
+                    if err == nil {
+                        reg_iface(ck, ii, ops, methods)
+                    }
+                }
+            }
             parser.Node.Enum{name, vars} => {
                 en := qname(its[i].mod, name)
                 if collections.map_has(ck.enums, en) {
@@ -961,13 +2077,52 @@ fn reg_fields(ck: mut Ck, its: []It) {
     }
 }
 
-fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, params: ref parser.NList, ret: ref parser.Node) {
-    // pass 2 fn: params + ret resolve into a signature
+fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, recv: ref parser.Node, typarams: ref parser.NList, params: ref parser.NList, ret: ref parser.Node) {
+    // pass 2 fn: params + ret resolve into a signature; generic params
+    // scope ty names, a receiver prefixes the sig and keys `T.m`
+    let tp: own TPList = nil
+    let tnames: own SList = nil
+    tl := typarams
+    for tl != nil {
+        match tl.v {
+            parser.Node.TyParam{name, constraint} => {
+                te := new(TPEnt{n: name, c: constraint})
+                tc := new(TPList)
+                tc.v = te
+                tc.next = tp
+                tp = tc
+                tnames = scons(name, tnames)
+            }
+            _ => {
+            }
+        }
+        tl = tl.next
+    }
+    ck.ty_scope = tnames
     qn := name
     if !ex {
-        qn = qname(mod, name)
+        qn = fn_qname(ck, mod, recv, name)
     }
     let ps: own IList = nil
+    if recv != nil {
+        match recv {
+            parser.Node.Param{ty} => {
+                rt := ty_parse(ck, ty_str(ty))
+                rk0 := ck.tyv[rt].k
+                ok := rk0 == k_struct() || rk0 == k_enum()
+                if !ok && (rk0 == k_own() || rk0 == k_ref() || rk0 == k_mut()) {
+                    i0 := ck.tyv[rt].i
+                    ok = i0 >= 0 && (ck.tyv[i0].k == k_struct() || ck.tyv[i0].k == k_enum())
+                }
+                if !ok {
+                    diag(ck, "check", "method receiver must be a declared struct/enum type (optionally behind own/ref/mut)")
+                }
+                ps = icons(rt, ps)
+            }
+            _ => {
+            }
+        }
+    }
     pl := params
     for pl != nil {
         match pl.v {
@@ -980,38 +2135,27 @@ fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, params: ref parser.NList, r
         pl = pl.next
     }
     ps = irev(ps)
-    rk := 0
-    r1 := -1
-    if ret != nil {
-        if nk(ret) == 3 {
-            rk = 1
-            r1 = ty_parse(ck, ty_str(ret))
-        }
-        if nk(ret) == 23 { // [T, err]
-            match ret {
-                parser.Node.List{items} => {
-                    rk = 2
-                    if items != nil {
-                        r1 = ty_parse(ck, ty_str(items.v))
-                    }
-                }
-                _ => {
-                }
-            }
-        }
-    }
-    if r1 >= 0 {
-        rk2 := ck.tyv[r1].k
-        if rk2 == k_ref() || rk2 == k_mut() {
-            diag(ck, "own", "borrowed refs may not be returned (v0)")
-        }
-    }
+    cr := ret_sig(ck, ret)
+    ck.ty_scope = nil
     if !ex && is_builtin(qn) {
         diag(ck, "check", "`" + name + "` is a builtin and cannot be redefined")
     }
+    tl2 := tp
+    for tl2 != nil {
+        c := tl2.v.c
+        if len(c) > 0 && c != "any" && c != "ordered" && c != "eq" && c != "add" {
+            if iface_ent(ck, resolve_named(ck, c)) < 0 {
+                diag(ck, "check", "unknown constraint `" + c + "` for `" + tl2.v.n + "`")
+            }
+        }
+        tl2 = tl2.next
+    }
+    if recv != nil {
+        ck.methods = scons(qn, ck.methods)
+    }
     if !collections.map_has(ck.fns, qn) {
         collections.map_set(ck.fns, qn, len(ck.fnsv))
-        ck.fnsv = push(ck.fnsv, FnSig{params: ps, retk: rk, ret1: r1, is_extern: 0})
+        ck.fnsv = push(ck.fnsv, FnSig{params: ps, retk: cr.rk, ret1: cr.r1, is_extern: 0, typarams: tp})
     }
     if ex {
         [idx, err2] = collections.map_get(ck.fns, qn)
@@ -1039,8 +2183,8 @@ fn reg_sigs(ck: mut Ck, its: []It) {
     for i < len(its) {
         ck.cur_mod = its[i].mod
         match its[i].node {
-            parser.Node.Fn{ex, name, params, ret, body} => {
-                reg_fn(ck, its[i].mod, ex, name, params, ret)
+            parser.Node.Fn{ex, name, recv, typarams, params, ret, body} => {
+                reg_fn(ck, its[i].mod, ex, name, recv, typarams, params, ret)
             }
             parser.Node.Let{name, ty, init} => {
                 reg_global(ck, name, ty, init)
@@ -1061,7 +2205,7 @@ fn register(ck: mut Ck, its: []It) {
 
 // ---------- builtins ----------
 fn is_builtin(n: str) -> bool {
-    return n == "print" || n == "println" || n == "mkchan" || n == "send" || n == "recv" || n == "close" || n == "sleep" || n == "new" || n == "mkslice" || n == "push" || n == "assert" || n == "itoa" || n == "argc" || n == "argv" || n == "len" || n == "byteat" || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf" || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32" || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open" || n == "sqlite_exec" || n == "sqlite_query" || n == "sqlite_close" || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared" || n == "sget" || n == "sset" || n == "scas" || n == "sadd" || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi" || n == "itof" || n == "atof" || n == "ftoa"
+    return n == "print" || n == "println" || n == "mkchan" || n == "send" || n == "recv" || n == "close" || n == "sleep" || n == "new" || n == "mkslice" || n == "push" || n == "assert" || n == "itoa" || n == "argc" || n == "argv" || n == "len" || n == "byteat" || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf" || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32" || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open" || n == "str" || n == "sqlite_exec" || n == "sqlite_exec_bind" || n == "set_rcvtimo" || n == "sqlite_query" || n == "sqlite_close" || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared" || n == "sget" || n == "sset" || n == "scas" || n == "sadd" || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi" || n == "itof" || n == "atof" || n == "ftoa"
 }
 
 fn is_susp_builtin(n: str) -> bool {
@@ -1109,6 +2253,9 @@ fn ident(ck: mut Ck, n: str, env: mut Env) -> int {
     }
     t := env_get(ck, env, n)
     if t >= 0 {
+        if is_moved(env, n) {
+            diag(ck, "own", "use of moved value `" + n + "`")
+        }
         return t
     }
     qn := resolve_named(ck, n)
@@ -1116,7 +2263,11 @@ fn ident(ck: mut Ck, n: str, env: mut Env) -> int {
         [fi, err] = collections.map_get(ck.fns, qn)
         if err == nil {
             sig := ck.fnsv[fi]
-            if sig.retk == 2 {
+            // named fn as a value — generics need a call site, [T,err]
+            // has no shared ret struct
+            if sig.typarams != nil {
+                diag(ck, "check", "generic fn `" + n + "` can't be a value — call it to instantiate")
+            } else if sig.retk == 2 {
                 diag(ck, "check", "`" + n + "` returns `[T, err]` — pair returns can't be fn values (v0.2)")
             } else {
                 ck.fnvals = scons(qn, ck.fnvals)
@@ -1209,6 +2360,7 @@ fn lit_fields(ck: mut Ck, path: str, want: ref FList, fields: ref parser.NList, 
                 } else {
                     gt := expr(ck, val, env)
                     assignable(ck, wt, gt)
+                    move_for(ck, val, wt, env)
                 }
             }
             _ => {
@@ -1382,13 +2534,27 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
     if op == "==" || op == "!=" {
         if lk == k_fn() || rk == k_fn() {
             diag(ck, "type", "fn values aren't comparable (v0.2)")
+        } else if lk == k_iface() && rk != k_err() || rk == k_iface() && lk != k_err() {
+            diag(ck, "type", "iface values aren't comparable except against nil (v0.2)")
         } else {
             assignable(ck, lt, rt)
         }
         return t_bool(ck)
     }
     if op == "<" || op == "<=" || op == ">" || op == ">=" {
-        if lk == k_float() || rk == k_float() {
+        if lk == k_var() {
+            b := "Lt"
+            if op == "<=" {
+                b = "Le"
+            }
+            if op == ">" {
+                b = "Gt"
+            }
+            if op == ">=" {
+                b = "Ge"
+            }
+            req_op(ck, ck.tyv[lt].name, "ordered", b)
+        } else if lk == k_float() || rk == k_float() {
             assignable(ck, tk(ck, k_float()), lt)
             assignable(ck, tk(ck, k_float()), rt)
         } else {
@@ -1398,6 +2564,10 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
         return t_bool(ck)
     }
     if op == "+" {
+        if lk == k_var() {
+            req_op(ck, ck.tyv[lt].name, "add", "Add")
+            return tn(ck, k_var(), ck.tyv[lt].name)
+        }
         if lk == k_str() && rk == k_str() {
             return t_str(ck)
         }
@@ -1554,8 +2724,12 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
     result := -1
     n_expr := 0
     n_block := 0
+    // arms are alternative paths — merge `moved` like if/else
+    pre := moved_save(env)
+    let armst: own ArmSt = nil
     a := arms
     for a != nil {
+        moved_restore(env, ll_clone(pre))
         match a.v {
             parser.Node.MArm{pat, body} => {
                 env_push(env)
@@ -1573,6 +2747,8 @@ fn match_expr(ck: mut Ck, scrut: ref parser.Node, arms: ref parser.NList, env: m
                         _ => {
                         }
                     }
+                    // binding an `own` scrutinee moves it into the var
+                    move_own(ck, scrut, env)
                 }
                 if pk == 36 {
                     match pat {
@@ -1729,6 +2905,60 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             return call_fnvalue(ck, ck.tyv[lt].args, ck.tyv[lt].r, args, env)
         }
         qn := resolve_named(ck, name)
+        // method dispatch (D3): `x.m(..)` resolves via the receiver's ty
+        // to `T.m` (a fn-typed field wins); `w.m(..)` on an iface or a
+        // generic constraint vtab-dispatches; a bare `m(x,..)` that isn't
+        // a fn retries as a method on args[0]'s ty
+        let recv: ref parser.Node = nil
+        if !collections.map_has(ck.fns, qn) {
+            if nk(f) == 9 {
+                match f {
+                    parser.Node.Field{obj, name} => {
+                        ot := expr(ck, obj, env)
+                        if ck.tyv[ot].k == k_unk() {
+                            return t_unk(ck)
+                        }
+                        ft := field_ty(ck, ot, name)
+                        if ft >= 0 {
+                            if ck.tyv[ft].k == k_fn() {
+                                return call_fnvalue(ck, ck.tyv[ft].args, ck.tyv[ft].r, args, env)
+                            }
+                            bn := ty_base(ck, ot)
+                            if len(bn) == 0 {
+                                bn = ty_name(ck, ot)
+                            }
+                            diag(ck, "type", "`" + bn + "." + name + "` is a field of `" + ty_name(ck, ot) + "`, not callable")
+                            return t_unk(ck)
+                        }
+                        mt := method_target(ck, ot, name)
+                        if mt.k == 2 {
+                            return call_iface(ck, mt.ps, mt.rk, mt.r1, args, env)
+                        }
+                        if mt.k == 1 {
+                            recv = obj
+                            qn = mt.q
+                        }
+                        if mt.k == 0 {
+                            diag(ck, "type", "no method `" + name + "` on `" + ty_name(ck, ot) + "`")
+                            return t_unk(ck)
+                        }
+                    }
+                    _ => {
+                    }
+                }
+            } else if !is_builtin(name) && args != nil {
+                // `m(x, ..)` — method sugar: receiver is args[0] already.
+                // Skip builtins (`new(T)`'s arg is a type name); the probe
+                // re-evaluates args[0] so its move marks must not leak
+                sv := moved_save(env)
+                t0 := expr(ck, args.v, env)
+                moved_restore(env, sv)
+                mt := method_target(ck, t0, name)
+                if mt.k == 1 {
+                    qn = mt.q
+                }
+            }
+        }
         if collections.map_has(ck.fns, qn) {
             add_edge(ck, qn)
         }
@@ -1964,7 +3194,15 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             }
             return ti(ck, k_own(), t_unk(ck))
         }
-        if qn == "sqlite_exec" {
+        if qn == "str" {
+            al := args
+            for al != nil {
+                expr(ck, al.v, env)
+                al = al.next
+            }
+            return t_str(ck)
+        }
+        if qn == "sqlite_exec" || qn == "sqlite_exec_bind" || qn == "set_rcvtimo" {
             al := args
             for al != nil {
                 expr(ck, al.v, env)
@@ -2044,27 +3282,79 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
                 al = al.next
             }
         }
-        if nl_len(args) != ilen(sig.params) {
-            diag(ck, "check", "`" + name + "` takes " + itoa(ilen(sig.params)) + " args, got " + itoa(nl_len(args)))
+        have := nl_len(args)
+        if recv != nil {
+            have = have + 1
+        }
+        if have != ilen(sig.params) {
+            diag(ck, "check", "`" + qn + "` takes " + itoa(ilen(sig.params)) + " args, got " + itoa(have))
+        }
+        // generic: bind ty params from argument tys, check constraints
+        bind := collections.map_new()
+        if sig.typarams != nil {
+            wl0 := sig.params
+            if recv != nil && wl0 != nil {
+                bind_vars(ck, wl0.v, expr(ck, recv, env), bind)
+                wl0 = wl0.next
+            }
+            al0 := args
+            for al0 != nil && wl0 != nil {
+                bind_vars(ck, wl0.v, expr(ck, al0.v, env), bind)
+                wl0 = wl0.next
+                al0 = al0.next
+            }
+            tl := sig.typarams
+            for tl != nil {
+                tv := tl.v.n
+                if collections.map_has(bind, tv) {
+                    [bt, err3] = collections.map_get(bind, tv)
+                    if err3 == nil && !satisfies(ck, bt, tl.v.c) {
+                        diag(ck, "type", "`" + ty_name(ck, bt) + "` does not satisfy constraint `" + tl.v.c + "`")
+                    }
+                } else {
+                    diag(ck, "type", "cannot infer type parameter `" + tv + "`")
+                }
+                tl = tl.next
+            }
         }
         wl := sig.params
         al := args
+        if recv != nil && wl != nil {
+            // receiver slot: `*x`/`&x` adapt — `&` needs an lvalue
+            want := subst_ty(ck, wl.v, bind)
+            got := expr(ck, recv, env)
+            wk2 := ck.tyv[want].k
+            gk2 := ck.tyv[got].k
+            if (wk2 == k_own() || wk2 == k_ref() || wk2 == k_mut()) && (gk2 == k_struct() || gk2 == k_enum()) && !is_lvalue(recv) {
+                diag(ck, "type", "pointer receiver on an rvalue — bind it first")
+            }
+            got = recv_adapt_ty(ck, want, got)
+            assignable(ck, want, got)
+            move_for(ck, recv, want, env)
+            wl = wl.next
+        }
         for al != nil && wl != nil {
+            want := subst_ty(ck, wl.v, bind)
             gt := expr(ck, al.v, env)
-            assignable(ck, wl.v, gt)
+            assignable(ck, want, gt)
+            move_for(ck, al.v, want, env)
             wl = wl.next
             al = al.next
         }
         if sig.retk == 0 {
             return t_void(ck)
         }
+        r1 := sig.ret1
+        if sig.typarams != nil {
+            r1 = subst_ty(ck, r1, bind)
+        }
         if sig.retk == 1 {
-            return sig.ret1
+            return r1
         }
         if ck.in_let2 == 0 {
             diag(ck, "check", "`[T, err]` result must be bound with `[v, err] =` or returned")
         }
-        return sig.ret1
+        return r1
     }
     // non-name callee — indirect call through a fn value
     ft := expr(ck, f, env)
@@ -2093,51 +3383,15 @@ fn call_fnvalue(ck: mut Ck, ps: ref IList, r: int, args: ref parser.NList, env: 
 }
 
 // ret kind for the `[T, err]` binding rules (-1 = not a declared call)
-fn call_retk(ck: mut Ck, e: ref parser.Node) -> int {
-    if e == nil {
-        return -1
-    }
-    if nk(e) != 8 {
-        return -1
-    }
-    match e {
-        parser.Node.Call{f, args} => {
-            n := callee_name(f)
-            if len(n) == 0 {
-                return -1
-            }
-            qn := resolve_named(ck, n)
-            if !collections.map_has(ck.fns, qn) {
-                return -1
-            }
-            [fi, err] = collections.map_get(ck.fns, qn)
-            if err != nil {
-                return -1
-            }
-            return ck.fnsv[fi].retk
-        }
-        _ => {
-        }
-    }
-    return -1
+fn call_retk(ck: mut Ck, e: ref parser.Node, env: mut Env) -> int {
+    cr := call_ret(ck, e, env)
+    return cr.rk
 }
 
 // ret1 for a Call node known to hit a pair-returning fn
-fn call_ret1(ck: mut Ck, e: ref parser.Node) -> int {
-    match e {
-        parser.Node.Call{f, args} => {
-            qn := resolve_named(ck, callee_name(f))
-            if collections.map_has(ck.fns, qn) {
-                [fi, err] = collections.map_get(ck.fns, qn)
-                if err == nil {
-                    return ck.fnsv[fi].ret1
-                }
-            }
-        }
-        _ => {
-        }
-    }
-    return -1
+fn call_ret1(ck: mut Ck, e: ref parser.Node, env: mut Env) -> int {
+    cr := call_ret(ck, e, env)
+    return cr.r1
 }
 
 // ---------- statements ----------
@@ -2181,8 +3435,8 @@ fn stmt(ck: mut Ck, s: ref parser.Node, env: mut Env) {
             expr(ck, call, env)
             ck.in_let2 = 0
             val_ty := t_unk(ck)
-            if call_retk(ck, call) == 2 {
-                val_ty = call_ret1(ck, call)
+            if call_retk(ck, call, env) == 2 {
+                val_ty = call_ret1(ck, call, env)
             } else {
                 diag(ck, "check", "`[v, err] = f()` requires a call to a `[T, err]` function")
             }
@@ -2203,12 +3457,34 @@ fn stmt(ck: mut Ck, s: ref parser.Node, env: mut Env) {
             }
         }
         parser.Node.Assign{target, val} => {
-            tt := expr(ck, target, env)
+            // a bare-ident target is a write, not a use — assignment to
+            // a moved-from binding re-initializes it
+            idn := ""
+            tt := t_unk(ck)
+            match target {
+                parser.Node.Name(n) => {
+                    idn = n
+                    tt = env_get(ck, env, n)
+                    if tt < 0 {
+                        tt = expr(ck, target, env)
+                    }
+                }
+                _ => {
+                    tt = expr(ck, target, env)
+                }
+            }
             vt := expr(ck, val, env)
             assignable(ck, tt, vt)
+            // `x = y` re-initializes (aliasing walks like `s = s.next`
+            // stay legal); `s.f = y`/`s[i] = y` hand the value away
+            if len(idn) == 0 {
+                move_for(ck, val, tt, env)
+            } else {
+                clear_moved(env, idn)
+            }
         }
         parser.Node.ExprStmt{e} => {
-            if call_retk(ck, e) == 2 {
+            if call_retk(ck, e, env) == 2 {
                 diag(ck, "check", "call returns `[T, err]` — bind it with `[v, err] =`")
             }
             expr(ck, e, env)
@@ -2255,8 +3531,8 @@ fn stmt(ck: mut Ck, s: ref parser.Node, env: mut Env) {
                 ck.in_let2 = 1
                 expr(ck, vals.v, env)
                 ck.in_let2 = 0
-                if call_retk(ck, vals.v) == 2 {
-                    rt1 := call_ret1(ck, vals.v)
+                if call_retk(ck, vals.v, env) == 2 {
+                    rt1 := call_ret1(ck, vals.v, env)
                     if rt1 >= 0 {
                         assignable(ck, ck.ret1, rt1)
                     }
@@ -2270,13 +3546,26 @@ fn stmt(ck: mut Ck, s: ref parser.Node, env: mut Env) {
         parser.Node.If{cond, then, els} => {
             t := expr(ck, cond, env)
             assignable(ck, t_bool(ck), t)
+            // a move on either branch is possible after the join — union
+            // the exits; only exits that can reach the join contribute
+            pre := moved_save(env)
             block_node(ck, then, env)
+            thmv := moved_save(env)
+            moved_restore(env, pre)
+            tft := node_ft(then)
+            eft := els == nil
             if els != nil {
+                eft = node_ft(els)
                 if nk(els) == 23 {
                     block_node(ck, els, env)
                 } else {
                     stmt(ck, els, env)
                 }
+            }
+            if els != nil && !eft && tft {
+                moved_restore(env, thmv)
+            } else if tft && (els == nil || eft) {
+                moved_union(env, thmv)
             }
         }
         parser.Node.For{cond, body} => {
@@ -2861,9 +4150,9 @@ fn susp_seeds(ck: mut Ck, its: []It) {
     for i < len(its) {
         if nk(its[i].node) == 24 {
             match its[i].node {
-                parser.Node.Fn{ex, name, body} => {
+                parser.Node.Fn{ex, name, recv, body} => {
                     if !ex && body != nil && block_susp_node(ck, body) {
-                        ck.susp = scons(qname(its[i].mod, name), ck.susp)
+                        ck.susp = scons(fn_qname(ck, its[i].mod, recv, name), ck.susp)
                     }
                 }
                 _ => {
@@ -3309,16 +4598,20 @@ fn walk_block_node(ck: mut Ck, body: ref parser.Node) {
 }
 
 // ---------- per-fn checking ----------
-fn check_fn(ck: mut Ck, mod: str, name: str, params: ref parser.NList, body: ref parser.Node) {
-    qn := qname(mod, name)
+fn check_fn(ck: mut Ck, mod: str, name: str, recv: ref parser.Node, params: ref parser.NList, body: ref parser.Node) {
+    qn := fn_qname(ck, mod, recv, name)
     ck.cur_fn = qn
     ck.retk = 0
     ck.ret1 = -1
+    ck.ty_scope = nil
+    ck.cur_ty_params = nil
     if collections.map_has(ck.fns, qn) {
         [fi, err] = collections.map_get(ck.fns, qn)
         if err == nil {
             ck.retk = ck.fnsv[fi].retk
             ck.ret1 = ck.fnsv[fi].ret1
+            ck.cur_ty_params = tp_clone(ck.fnsv[fi].typarams)
+            ck.ty_scope = tp_names(ck.fnsv[fi].typarams)
         }
     }
     ck.loop_depth = 0
@@ -3327,6 +4620,16 @@ fn check_fn(ck: mut Ck, mod: str, name: str, params: ref parser.NList, body: ref
         [fi, err] = collections.map_get(ck.fns, qn)
         if err == nil {
             wl := ck.fnsv[fi].params
+            if recv != nil && wl != nil {
+                match recv {
+                    parser.Node.Param{name} => {
+                        env_set(env, name, wl.v)
+                    }
+                    _ => {
+                    }
+                }
+                wl = wl.next
+            }
             pl := params
             for pl != nil && wl != nil {
                 match pl.v {
@@ -3357,10 +4660,10 @@ fn check_items(ck: mut Ck, its: []It) {
     for i < len(its) {
         if nk(its[i].node) == 24 {
             match its[i].node {
-                parser.Node.Fn{ex, name, params, body} => {
+                parser.Node.Fn{ex, name, recv, params, body} => {
                     if !ex {
                         ck.cur_mod = its[i].mod
-                        check_fn(ck, its[i].mod, name, params, body)
+                        check_fn(ck, its[i].mod, name, recv, params, body)
                     }
                 }
                 _ => {
@@ -3503,14 +4806,33 @@ fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
                 l = l.next
             }
             l = items
+            let al: own ModEnt = nil
+            let nm: own ModEnt = nil
             for l != nil {
                 match l.v {
-                    parser.Node.Import{path} => {
+                    parser.Node.Import{path, alias, names} => {
                         p := resolve_imp(file, path)
                         if len(p) == 0 {
                             diag(ck, "check", "cannot resolve import `" + path + "`")
                         } else {
-                            load_mod(ck, ld, p, file_stem(p))
+                            stem := file_stem(p)
+                            if len(alias) > 0 {
+                                al = new(ModEnt{alias: alias, stem: stem, next: al})
+                            } else {
+                                al = new(ModEnt{alias: stem, stem: stem, next: al})
+                            }
+                            nl := names
+                            for nl != nil {
+                                match nl.v {
+                                    parser.Node.Name(n) => {
+                                        nm = new(ModEnt{alias: n, stem: stem + "." + n, next: nm})
+                                    }
+                                    _ => {
+                                    }
+                                }
+                                nl = nl.next
+                            }
+                            load_mod(ck, ld, p, stem)
                         }
                     }
                     _ => {
@@ -3518,6 +4840,7 @@ fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
                 }
                 l = l.next
             }
+            ck.file_aliases = push(ck.file_aliases, FileAlias{mod: mod, aliases: al, names: nm, next: nil})
         }
         _ => {
         }
@@ -3538,6 +4861,12 @@ fn check_file(path: str) -> own CkRes {
     ck.enums = collections.map_new()
     ck.enumsv = mkslice(EEnt, 0)
     ck.globals = collections.map_new()
+    ck.ifaces = collections.map_new()
+    ck.ifacesv = mkslice(IEnt, 0)
+    ck.ty_scope = nil
+    ck.cur_ty_params = nil
+    ck.methods = nil
+    ck.file_aliases = mkslice(FileAlias, 0)
     ck.diags = mkslice(DBox, 0)
     ck.edges = nil
     ck.susp = nil
@@ -3561,6 +4890,14 @@ fn check_file(path: str) -> own CkRes {
     check_items(ck, ld.items)
     susp_seeds(ck, ld.items)
     susp_fixpoint(ck)
+    // D3: methods may not suspend — vtable/indirect calls carry no task
+    ml := ck.methods
+    for ml != nil {
+        if sl_has(ck.susp, ml.v) {
+            diag(ck, "check", "suspendable method `" + ml.v + "` — methods may not suspend (v0.2)")
+        }
+        ml = ml.next
+    }
     check_closures(ck)
     check_fnvals(ck)
     check_suspend_rules(ck, ld.items)

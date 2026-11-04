@@ -52,9 +52,12 @@ enum Node {
     If { cond: own Node, then: own Node, els: own Node }, // {"if","then",(+"else")}
     For { cond: own Node, body: own Node }, // {"for": <cond>, "body": <body>}
     List { items: own NList }, // bare [...] array node
-    Fn { ex: bool, name: str, params: own NList, ret: own Node, body: own Node },
-    Import { path: str }, // {"import": s}
+    Fn { ex: bool, name: str, recv: own Node, typarams: own NList, params: own NList, ret: own Node, body: own Node },
+    TyParam { name: str, constraint: str }, // {"typaram": s, "constraint": s}
+    Import { path: str, alias: str, names: own NList }, // {"import": s} (+"as","names")
     Struct { name: str, fields: own NList }, // {"struct": s, "fields": [...]}
+    Interface { name: str, ops: own NList, methods: own NList }, // {"interface": s}
+    Method { name: str, params: own NList, ret: own Node }, // {"method": s}
     Skip { text: str }, // {"skip": s}
     Root { items: own NList }, // {"items": [...]}
     Enum { name: str, vars: own NList }, // {"enum": s, "variants": [...]}
@@ -230,11 +233,17 @@ fn to_json(n: own Node) -> own json.Json {
         Node.List{items} => {
             json.jadd(o, "items", jl_items(items))
         }
-        Node.Fn{ex, name, params, ret, body} => {
+        Node.Fn{ex, name, recv, typarams, params, ret, body} => {
             if ex {
                 json.jadd(o, "extern", json.jbool(true))
             }
             json.jadd(o, "fn", json.jstr(name))
+            if recv != nil {
+                json.jadd(o, "recv", to_json(recv))
+            }
+            if typarams != nil {
+                json.jadd(o, "typarams", jl_items(typarams))
+            }
             json.jadd(o, "params", jl_items(params))
             if ret != nil {
                 json.jadd(o, "ret", to_json(ret))
@@ -243,12 +252,34 @@ fn to_json(n: own Node) -> own json.Json {
                 json.jadd(o, "body", to_json(body))
             }
         }
-        Node.Import{path} => {
+        Node.TyParam{name, constraint} => {
+            json.jadd(o, "typaram", json.jstr(name))
+            json.jadd(o, "constraint", json.jstr(constraint))
+        }
+        Node.Import{path, alias, names} => {
             json.jadd(o, "import", json.jstr(path))
+            if len(alias) > 0 {
+                json.jadd(o, "as", json.jstr(alias))
+            }
+            if names != nil {
+                json.jadd(o, "names", jl_items(names))
+            }
         }
         Node.Struct{name, fields} => {
             json.jadd(o, "struct", json.jstr(name))
             json.jadd(o, "fields", jl_items(fields))
+        }
+        Node.Interface{name, ops, methods} => {
+            json.jadd(o, "interface", json.jstr(name))
+            json.jadd(o, "ops", jl_items(ops))
+            json.jadd(o, "methods", jl_items(methods))
+        }
+        Node.Method{name, params, ret} => {
+            json.jadd(o, "method", json.jstr(name))
+            json.jadd(o, "params", jl_items(params))
+            if ret != nil {
+                json.jadd(o, "ret", to_json(ret))
+            }
         }
         Node.Skip{text} => {
             json.jadd(o, "skip", json.jstr(text))
@@ -957,27 +988,9 @@ fn p_params(c: mut PCur) -> own NList {
     return nrev(items)
 }
 
-fn p_fn(c: mut PCur, ex: bool) -> own Node {
-    eat(c, "fn")
-    name := peek(c)
-    next(c)
-    if at(c, "[") {
-        // generic params `[T any]` — outside the bootstrap AST; skip the bracket group
-        d := 0
-        for !eof(c) {
-            if at(c, "[") {
-                d = d + 1
-            }
-            if at(c, "]") {
-                d = d - 1
-            }
-            next(c)
-            if d == 0 {
-                break
-            }
-        }
-    }
-    params := p_params(c)
+// `-> t` / `-> [t, err]` / `-> []T` / nothing — shared by fns and
+// interface method sigs
+fn p_ret(c: mut PCur) -> own Node {
     let ret: own Node = nil
     if eat(c, "->") {
         if eat(c, "[") { // multi-return [v, err] — or `[]T` slice ret
@@ -997,11 +1010,47 @@ fn p_fn(c: mut PCur, ex: bool) -> own Node {
             ret = p_ty(c)
         }
     }
+    return ret
+}
+
+fn p_fn(c: mut PCur, ex: bool) -> own Node {
+    eat(c, "fn")
+    // method receiver: `fn (r T) m(..)` — `fn (r: T)` also accepted
+    let recv: own Node = nil
+    if at(c, "(") {
+        next(c)
+        rname := peek(c)
+        next(c)
+        eat(c, ":")
+        rty := p_ty(c)
+        eat(c, ")")
+        recv = b(Node.Param{name: rname, ty: rty})
+    }
+    name := peek(c)
+    next(c)
+    // generic params `[T any, U ordered]` — constraint defaults to `any`
+    let typs: own NList = nil
+    if eat(c, "[") {
+        for !at(c, "]") && !eof(c) {
+            tn := peek(c)
+            next(c)
+            ct := "any"
+            if pkind(c) == 1 {
+                ct = peek(c)
+                next(c)
+            }
+            typs = ncons(b(Node.TyParam{name: tn, constraint: ct}), typs)
+            eat(c, ",")
+        }
+        eat(c, "]")
+    }
+    params := p_params(c)
+    ret := p_ret(c)
     let body: own Node = nil
     if at(c, "{") {
         body = p_block(c)
     }
-    return b(Node.Fn{ex: ex, name: name, params: params, ret: ret, body: body})
+    return b(Node.Fn{ex: ex, name: name, recv: recv, typarams: typs, params: params, ret: ret, body: body})
 }
 
 // enum variant: `V`, `V(t, ..)`, `V { n: t, .. }`
@@ -1036,7 +1085,47 @@ fn p_item(c: mut PCur) -> own Node {
     if eat(c, "import") {
         path := peek(c)
         next(c)
-        return b(Node.Import{path: path})
+        alias := ""
+        if at(c, "as") {
+            next(c)
+            alias = peek(c)
+            next(c)
+        }
+        let names: own NList = nil
+        if eat(c, ".") && eat(c, "{") {
+            for !at(c, "}") && !eof(c) {
+                names = ncons(b(Node.Name(peek(c))), names)
+                next(c)
+                eat(c, ",")
+            }
+            eat(c, "}")
+        }
+        eat(c, ";")
+        return b(Node.Import{path: path, alias: alias, names: names})
+    }
+    // interface Name { eq, ordered, m(p: t) -> t, .. } — bare idents are
+    // operator constraints, `m(..) -> t` are method sigs
+    if eat(c, "interface") {
+        name := peek(c)
+        next(c)
+        eat(c, "{")
+        let ops: own NList = nil
+        let methods: own NList = nil
+        for !at(c, "}") && !eof(c) {
+            mname := peek(c)
+            next(c)
+            if at(c, "(") {
+                mparams := p_params(c)
+                mret := p_ret(c)
+                methods = ncons(b(Node.Method{name: mname, params: mparams, ret: mret}), methods)
+            } else {
+                ops = ncons(b(Node.Name(mname)), ops)
+            }
+            eat(c, ",")
+            eat(c, ";")
+        }
+        eat(c, "}")
+        return b(Node.Interface{name: name, ops: nrev(ops), methods: nrev(methods)})
     }
     if eat(c, "struct") {
         name := peek(c)
@@ -1071,7 +1160,9 @@ fn p_item(c: mut PCur) -> own Node {
         return b(Node.Enum{name: name, vars: nrev(vars)})
     }
     if eat(c, "extern") {
-        return p_fn(c, true)
+        f := p_fn(c, true)
+        eat(c, ";")
+        return f
     }
     if at(c, "fn") {
         return p_fn(c, false)
