@@ -1806,7 +1806,7 @@ impl<'a> Gen<'a> {
             "len" => format!("rt_len({})", a0),
             "byteat" | "substr" | "find" | "bufstr" | "poke8" | "poke16" | "poke32"
             | "sqlite_exec" | "sqlite_query" => format!("rt_{name}({})", j(argvs)),
-            "atoi" | "mkbuf" | "htons" | "htonl" | "cstr" | "sqlite_open" | "sqlite_close"
+            "atoi" | "mkbuf" | "htons" | "htonl" | "cstr" | "str" | "sqlite_open" | "sqlite_close"
             | "readfile" | "writefile" | "exit" | "mkshared" | "sget" | "sset" | "scas"
             | "sadd" | "now" | "now_ms" | "usleep" | "atof" | "ftoa" => {
                 format!("rt_{name}({})", j(argvs))

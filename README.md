@@ -34,8 +34,10 @@ cd oxl && cargo build --release
 ```
 
 `oxl build`/`run` invoke the system `cc` for the final link; set
-`LANG_CC` to override (e.g. `LANG_CC=clang-18`). `tests/run.sh`
-honors the same override.
+`LANG_CC` to override (e.g. `LANG_CC=clang-18`) and `LANG_LDFLAGS`
+to append extra link inputs (FFI shim objects, libraries — see
+`examples/gui-todo/build.sh`). `tests/run.sh` honors the same
+overrides.
 
 ## Using it
 

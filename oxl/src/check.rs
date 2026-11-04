@@ -235,7 +235,7 @@ const BUILTINS: &[&str] = &[
     "mkslice", "push",
     "assert", "itoa", "argc", "argv", "len", "byteat", "substr", "find", "atoi",
     "mkbuf", "bufstr", "poke8", "poke16", "poke32", "htons", "htonl",
-    "cstr", "sqlite_open", "sqlite_exec", "sqlite_query", "sqlite_close",
+    "cstr", "str", "sqlite_open", "sqlite_exec", "sqlite_query", "sqlite_close",
     "readfile", "writefile", "exit", "mkshared", "sget", "sset", "scas", "sadd",
     "now", "now_ms", "usleep", "ftoi", "itof", "atof", "ftoa",
 ];
@@ -2059,6 +2059,12 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::CStr;
                 }
+                "str" => {
+                    for a in args {
+                        self.expr(a, env);
+                    }
+                    return Ty::Str;
+                }
                 "sqlite_open" => {
                     for a in args {
                         self.expr(a, env);
@@ -2119,7 +2125,7 @@ impl<'a> Checker<'a> {
             if sig.is_extern {
                 for a in args {
                     let t = self.expr(a, env);
-                    if !matches!(t, Ty::Int | Ty::Bool | Ty::CStr | Ty::Str | Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Shared | Ty::Unknown) {
+                    if !matches!(t, Ty::Int | Ty::Bool | Ty::CStr | Ty::Str | Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Shared | Ty::Fn(..) | Ty::Unknown) {
                         self.diags.push(Diag::err(a.span, "ffi",
                             format!("`{}` cannot cross the FFI boundary", t.name())));
                     }

@@ -97,7 +97,7 @@ moderate size.
 typed values. The biggest type-system item; keep shallow (Go-style
 structural interfaces, no trait solving).
 
-### Task D4: shape-based generics [not started]
+### Task D4: shape-based generics [deferred — spec-sanctioned slip]
 
 `items/d4-shape-generics.md`. Design doc's preferred instantiation
 (gcshape stenciling — share code per memory layout, not per type).
@@ -122,14 +122,14 @@ stdlib grows further.
 pretty-printer over the AST. Cheap once B-landed (could even be written
 in `.oxl` on the self-hosted parser's AST).
 
-### Task E3: platform matrix [not started]
+### Task E3: platform matrix [done]
 
 `items/e3-platform-matrix.md`. CI matrix x86_64+aarch64, macOS, then
 Windows; runtime portability audit (pthreads everywhere today).
 
 ## Track F — Product pilots
 
-### Task F1: GUI pilot [not started]
+### Task F1: GUI pilot [done]
 
 `items/f1-gui-pilot.md`. Third acceptance app from the design doc —
 three paths kept open in charter (platform FFI, portable layer, Qt/GTK

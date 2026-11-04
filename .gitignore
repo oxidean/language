@@ -6,3 +6,6 @@ pilot.db*
 srv.pid
 srv.log
 core*
+rt.c
+rt.h
+examples/gui-todo/todo

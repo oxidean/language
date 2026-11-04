@@ -3,6 +3,8 @@
 set -euo pipefail
 OXL="${1:-oxl}"
 cd "$(dirname "$0")/.."
+# absolutize — subshell gates (gui pilot) invoke $OXL from other dirs
+case "$OXL" in /*) ;; *) OXL="$PWD/$OXL";; esac
 
 # GNU timeout doesn't exist on stock macOS; fall back to gtimeout
 # (brew coreutils), else run unbounded.
@@ -297,5 +299,20 @@ got=$(curl -s -d widget localhost:8080/items)
 got=$(curl -s localhost:8080/items)
 grep -q '"name":"widget"' <<<"$got" || { echo "FAIL get: $got"; kill $srv_pid 2>/dev/null; exit 1; }
 kill $srv_pid 2>/dev/null || true
+
+echo "== gui pilot =="
+# GTK4 FFI pilot: build whenever gtk4 dev files exist; run the
+# signal-path selftest only when a display is available (CI macOS /
+# headless runners build but don't launch)
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists gtk4 2>/dev/null; then
+    (cd examples/gui-todo && OXL="$OXL" ./build.sh >/dev/null)
+    if [ -n "${DISPLAY:-}" ]; then
+        out=$(with_timeout 30 examples/gui-todo/todo --selftest 2>/dev/null)
+        grep -q "selftest rows=2" <<<"$out" || { echo "FAIL gui selftest: $out"; exit 1; }
+        grep -q "gui done" <<<"$out" || { echo "FAIL gui run: $out"; exit 1; }
+    fi
+else
+    echo "  (skipped: gtk4 not installed)"
+fi
 
 echo "ALL TESTS PASSED"
