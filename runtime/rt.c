@@ -1,6 +1,8 @@
 /* oxl runtime — v0 implementation. See docs/semantics/. */
+#define _DEFAULT_SOURCE /* keep POSIX/BSD decls visible under strict -std */
 #include "rt.h"
 #include <arpa/inet.h>
+#include <errno.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -568,7 +570,16 @@ int64_t rt_now_ms(void) {
     clock_gettime(CLOCK_REALTIME, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
-void rt_usleep(int64_t usecs) { usleep((useconds_t)usecs); }
+/* usleep(3) is obsolescent (gone in POSIX.1-2008) and fails EINVAL past
+ * 1e6us — silent no-sleep; useconds_t truncation corrupts longer waits. */
+static void sleep_us(int64_t us) {
+    if (us <= 0)
+        return;
+    struct timespec ts = {us / 1000000, (us % 1000000) * 1000};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+}
+void rt_usleep(int64_t usecs) { sleep_us(usecs); }
 
 /* ---------------- channels (unbuffered, word payload) ----------------
  * One chan, two surfaces: thread tasks block on cond vars, frame tasks
@@ -945,7 +956,7 @@ static int sel_ready(RtChan *ch, int64_t *v, RtTask **wake_me) {
 
 static void *sel_timer(void *p) {
     struct RtSel *s = p;
-    usleep((useconds_t)(s->tmo * 1000));
+    sleep_us(s->tmo * 1000);
     if (__sync_bool_compare_and_swap(&s->winner, -1, RT_SEL_TMO)
         && park_claim(s->t)) {
         s->t->sel_arm = RT_SEL_TMO;
@@ -1311,7 +1322,7 @@ int64_t rt_sqlite_exec(void *db, const char *sql) {
         if (rc != SQLITE_BUSY && rc != SQLITE_LOCKED) {
             return rc;
         }
-        usleep(10000);
+        sleep_us(10000);
     }
     return SQLITE_BUSY;
 }
