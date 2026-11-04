@@ -28,9 +28,10 @@ extern fn setsockopt(fd: int, lvl: int, opt: int, v: ref intp, n: int) -> int
 // reclaim them, so a per-request scratch must be freed by hand
 extern fn rt_free(p: mut void)
 
-// signal(2): SIGPIPE(13) + SIG_IGN(1) — a client that resets mid-write
-// must not kill the process before write() returns an error
-extern fn signal(sig: int, handler: int) -> int
+// a client that resets mid-write must not kill the process before
+// write() returns EPIPE — runtime wrapper (libc signal can't be
+// extern'd portably: its real prototype clashes with int args)
+extern fn rt_sigpipe_ignore()
 
 // heap try-scope for per-conn trap containment — the runtime's
 // documented contract (rt_scope_try): join returns the trap code
@@ -140,7 +141,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
 
 /// listen+serve on port; dispatches `h.route` per request
 fn serve(port: int, h: Handler) {
-    signal(13, 1) // SIGPIPE, SIG_IGN — reset clients must not kill us
+    rt_sigpipe_ignore() // reset clients must not kill us on write
     srv := socket(2, 1, 0) // AF_INET, SOCK_STREAM
     one := new(intp)
     one.v = 1

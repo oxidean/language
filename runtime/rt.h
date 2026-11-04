@@ -87,6 +87,7 @@ void rt_scope_leave(RtScope *s);
 int rt_scope_try(RtScope *s); /* join; return trap code without propagating */
 int rt_scope_join_poll(RtScope *s, RtTask *t); /* frame join: READY/PENDING */
 int rt_scope_finish(RtScope *s);              /* post-join teardown -> err */
+void rt_sigpipe_ignore(void);                 /* SIGPIPE -> SIG_IGN (server write path) */
 void *rt_scope_new(void);                     /* heap scope: opaque size for lib code */
 int64_t rt_scope_join_free(void *s);          /* try-join + free: swallow trap code */
 void rt_spawn(void *(*fn)(void *), void *arg);   /* fn task (non-susp fns) */

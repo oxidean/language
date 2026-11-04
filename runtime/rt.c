@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -313,6 +314,11 @@ static void scope_done(RtScope *s) {
  * size (stdlib http trap containment). Join with rt_scope_join_free —
  * rt_scope_try semantics: the trap code returns instead of
  * propagating to the parent. */
+/* SIGPIPE must not kill the process before write() returns EPIPE —
+ * servers ignore it. Wrapped in rt.c because a libc `signal` extern
+ * conflicts with the real prototype (clang -Wint-conversion). */
+void rt_sigpipe_ignore(void) { signal(SIGPIPE, SIG_IGN); }
+
 void *rt_scope_new(void) {
     /* rt_alloc into the CURRENT scope, not raw malloc/own: callers wrap
      * the value in borrow checks (rt_borrow_mut) that need a real
