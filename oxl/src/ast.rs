@@ -243,6 +243,7 @@ pub enum ExprKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BinOp {
     Add, Sub, Mul, Div, Mod,
+    BitAnd, BitOr, Xor,
     Eq, Ne, Lt, Le, Gt, Ge,
     And, Or,
 }

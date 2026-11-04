@@ -904,6 +904,12 @@ impl<'a> Checker<'a> {
                             Ty::Int
                         }
                     }
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::Xor => {
+                        // bit ops are int-only — no float promotion
+                        self.assignable(&Ty::Int, &lt, l.span);
+                        self.assignable(&Ty::Int, &rt, r.span);
+                        Ty::Int
+                    }
                     _ => {
                         if lt == Ty::Float || rt == Ty::Float {
                             self.assignable(&Ty::Float, &lt, l.span);

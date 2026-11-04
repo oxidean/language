@@ -50,8 +50,11 @@ Ordered by what the checker/codegen port actually needs:
    and `==` on them — see `docs/semantics/fnvals.md`.
 5. **Methods / `interface` dispatch** — today's `interface` is only an
    op-constraint vocabulary for generics, not a type.
-6. **Maps/sets in stdlib** — the checker's env and fn tables want real
-   `map[str]T`-shaped containers; linked lists suffice at v0 sizes.
+6. ~~**Maps/sets in stdlib**~~ — **done (B6).** `std/collections`:
+   FNV-1a `map`/`set` over `[]Bucket` power-of-2 tables, `int` payloads
+   (word-sized, covers env ids and counts). Needed `&`/`|`/`^` infix
+   ops — added int-only `BitAnd`/`BitOr`/`Xor` at C precedence; the
+   bootstrap parser's infix chain learned them too.
 
 ## Path
 

@@ -1221,6 +1221,7 @@ impl<'a> Gen<'a> {
                 let cop = match op {
                     BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*",
                     BinOp::Div => "/", BinOp::Mod => "%",
+                    BinOp::BitAnd => "&", BinOp::BitOr => "|", BinOp::Xor => "^",
                     BinOp::Eq => "==", BinOp::Ne => "!=",
                     BinOp::Lt => "<", BinOp::Le => "<=",
                     BinOp::Gt => ">", BinOp::Ge => ">=",

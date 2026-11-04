@@ -89,6 +89,10 @@ EOF
     fi
 done
 
+echo "== collections (b6) =="
+out=$("$OXL" run tests/collections_test.oxl)
+[ "$(tail -1 <<<"$out")" = "collections ok" ] || { echo "FAIL collections: $out"; exit 1; }
+
 echo "== defer (b5) =="
 out=$("$OXL" run tests/defer_test.oxl)
 [ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }

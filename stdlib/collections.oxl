@@ -1,0 +1,151 @@
+// std/collections — str-keyed map and set over int payloads.
+//
+// FNV-1a hash, power-of-2 bucket array, separate chaining on `own`
+// node lists. All nodes and the bucket array allocate in the
+// enclosing scope's arena, so a map bulk-dies with its scope.
+//
+// v0 payloads are int only — `own`/`str` values wait on payload
+// generics; word-sized ints cover the bootstrap checker (env ids,
+// fn indices, counts).
+
+struct MapNode {
+    key: str,
+    val: int,
+    next: own MapNode
+}
+
+struct Bucket { head: own MapNode }
+
+struct Map {
+    bs: []Bucket,
+    size: int
+}
+
+struct Set { m: own Map }
+
+// FNV-1a 64-bit: h ^= b; h *= prime — wraps are fine, the low bits
+// carry the entropy the mask uses. The offset basis doesn't fit a
+// signed literal, so it's written as its two's-complement value
+// (0xcbf29ce484222325 == -3750763034362895579).
+fn fnv(s: str) -> int {
+    h := -3750763034362895579
+    i := 0
+    for i < len(s) {
+        h = (h ^ byteat(s, i)) * 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+fn map_new() -> own Map {
+    m := new(Map)
+    m.bs = mkslice(Bucket, 16)
+    m.size = 0
+    return m
+}
+
+fn map_len(m: ref Map) -> int { return m.size }
+
+fn map_set(m: mut Map, k: str, v: int) {
+    mask := len(m.bs) - 1
+    // grow at 3/4 load before inserting — keeps chains short
+    if (m.size + 1) * 4 > len(m.bs) * 3 {
+        map_grow(m)
+        mask = len(m.bs) - 1
+    }
+    h := fnv(k) & mask
+    p := m.bs[h].head
+    for p != nil {
+        if p.key == k {
+            p.val = v
+            return
+        }
+        p = p.next
+    }
+    n := new(MapNode)
+    n.key = k
+    n.val = v
+    n.next = m.bs[h].head
+    m.bs[h].head = n
+    m.size = m.size + 1
+}
+
+// map_get(m, k) -> [v, err] — err != nil on miss
+fn map_get(m: ref Map, k: str) -> [int, err] {
+    h := fnv(k) & (len(m.bs) - 1)
+    p := m.bs[h].head
+    for p != nil {
+        if p.key == k {
+            return p.val, nil
+        }
+        p = p.next
+    }
+    return 0, 1
+}
+
+fn map_has(m: ref Map, k: str) -> bool {
+    [_, e] = map_get(m, k)
+    return e == nil
+}
+
+fn map_del(m: mut Map, k: str) {
+    h := fnv(k) & (len(m.bs) - 1)
+    p := m.bs[h].head
+    if p == nil {
+        return
+    }
+    if p.key == k {
+        m.bs[h].head = p.next
+        m.size = m.size - 1
+        return
+    }
+    for p != nil {
+        n := p.next
+        if n == nil {
+            return
+        }
+        if n.key == k {
+            // unlink: drop n from the chain; node arena-frees with scope
+            p.next = n.next
+            m.size = m.size - 1
+            return
+        }
+        p = n
+    }
+}
+
+fn map_grow(m: mut Map) {
+    nb := mkslice(Bucket, len(m.bs) * 2)
+    mask := len(nb) - 1
+    i := 0
+    for i < len(m.bs) {
+        p := m.bs[i].head
+        for p != nil {
+            nx := p.next
+            h := fnv(p.key) & mask
+            p.next = nb[h].head
+            nb[h].head = p
+            p = nx
+        }
+        i = i + 1
+    }
+    m.bs = nb
+}
+
+fn set_new() -> own Set {
+    s := new(Set)
+    s.m = map_new()
+    return s
+}
+
+fn set_add(s: own Set, k: str) {
+    map_set(s.m, k, 1)
+}
+
+fn set_has(s: own Set, k: str) -> bool {
+    return map_has(s.m, k)
+}
+
+fn set_del(s: own Set, k: str) {
+    map_del(s.m, k)
+}

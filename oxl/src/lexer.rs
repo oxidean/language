@@ -14,7 +14,7 @@ pub enum P {
     Assign, ColonEq, Underscore,
     Plus, Minus, Star, Slash, Percent,
     Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or, Bang, Pipe,
+    And, Or, Bang, Pipe, Amp, Caret,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -183,6 +183,10 @@ pub fn lex(src: &str, diags: &mut Diags) -> Vec<Token> {
                     (P::Ge, 2)
                 } else if c == b'&' && two(b'&', b'&', i) {
                     (P::And, 2)
+                } else if c == b'&' {
+                    (P::Amp, 1)
+                } else if c == b'^' {
+                    (P::Caret, 1)
                 } else if c == b'|' && two(b'|', b'|', i) {
                     (P::Or, 2)
                 } else if c == b'|' {

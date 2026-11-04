@@ -471,11 +471,38 @@ fn p_cmp(c: mut PCur) -> own Node {
     return l
 }
 
-fn p_and(c: mut PCur) -> own Node {
+fn p_bitand(c: mut PCur) -> own Node {
     l := p_cmp(c)
+    for at(c, "&") {
+        next(c)
+        l = b(Node.Bin{op: "&", l: l, r: p_cmp(c)})
+    }
+    return l
+}
+
+fn p_bitxor(c: mut PCur) -> own Node {
+    l := p_bitand(c)
+    for at(c, "^") {
+        next(c)
+        l = b(Node.Bin{op: "^", l: l, r: p_bitand(c)})
+    }
+    return l
+}
+
+fn p_bitor(c: mut PCur) -> own Node {
+    l := p_bitxor(c)
+    for at(c, "|") {
+        next(c)
+        l = b(Node.Bin{op: "|", l: l, r: p_bitxor(c)})
+    }
+    return l
+}
+
+fn p_and(c: mut PCur) -> own Node {
+    l := p_bitor(c)
     for at(c, "&&") {
         next(c)
-        l = b(Node.Bin{op: "&&", l: l, r: p_cmp(c)})
+        l = b(Node.Bin{op: "&&", l: l, r: p_bitor(c)})
     }
     return l
 }
