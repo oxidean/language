@@ -1,11 +1,11 @@
 use crate::diag::Span;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Crate {
     pub items: Vec<Item>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Item {
     Fn(Fn),
     Struct(Struct),
@@ -18,7 +18,7 @@ pub enum Item {
 /// `import "path" [as alias] [.{name, ...}]`
 /// canonical module name = file stem of the resolved path; `alias` binds a
 /// different local name; `selective` names also bind unqualified.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Import {
     pub path: String,
     pub alias: Option<String>,
@@ -37,7 +37,7 @@ pub fn callee_name(e: &Expr) -> Option<String> {
 
 /// top-level `let name[: ty] = init` — process-wide state, initialized
 /// in oxl_main prologue (order: before user main runs)
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Global {
     pub name: String,
     pub ty: Option<TyRef>,
@@ -45,7 +45,7 @@ pub struct Global {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Interface {
     pub name: String,
     /// constraint surface: ops the type must support. v0: fixed vocab —
@@ -54,7 +54,7 @@ pub struct Interface {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Fn {
     pub name: String,
     pub ty_params: Vec<(String, String)>, // [(T, constraint)] — "" = any
@@ -64,34 +64,34 @@ pub struct Fn {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Param {
     pub name: String,
     pub ty: TyRef,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Struct {
     pub name: String,
     pub fields: Vec<Param>,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum RetTy {
     Void,
     One(TyRef),
     Pair(TyRef), // -> [T, err]
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TyRef {
     pub kind: TyKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum TyKind {
     Named(String),
     Own(Box<TyRef>),
@@ -100,19 +100,19 @@ pub enum TyKind {
     Chan,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Bind {
     Name(String),
     Blank,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Stmt {
     Let { name: String, ty: Option<TyRef>, init: Expr, span: Span },
     Let2 { a: Bind, b: Bind, call: Expr, span: Span },

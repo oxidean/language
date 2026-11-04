@@ -1,6 +1,7 @@
 /* oxl runtime — v0 implementation. See docs/semantics/. */
 #include "rt.h"
 #include <arpa/inet.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +12,7 @@
 
 /* ---------------- allocation & checks ---------------- */
 
-static _Thread_local RtScope *tls_scope;
+_Thread_local RtScope *tls_scope;
 
 static ObjHdr *hdr_of(void *obj) { return ((ObjHdr *)obj) - 1; }
 
@@ -75,42 +76,77 @@ void rt_scope_enter(RtScope *s) {
     tls_scope = s;
 }
 
-/* ---- interim executor: work pool + blocking pool ----
- * Work pool: N=nproc workers on a shared queue. Blocking pool: a
- * thread per task (FFI calls may block indefinitely). Both decrement
- * scope pending; the state-machine executor keeps the same
- * pending-count join protocol. */
+/* ---- executor: frame-task work pool + blocking pool ----
+ * Work pool: N=nproc workers on a shared queue driving frame tasks —
+ * each poll() runs a suspendable fn's state machine until it returns
+ * READY/PENDING/CANCEL. PENDING tasks are owned by their waker (chan,
+ * scope join, timer thread) which re-enqueues them. Blocking pool:
+ * a thread per task for FFI/blocking fns. Both decrement scope pending
+ * on completion — the join protocol is unchanged. */
 
-typedef struct Task {
-    void *(*fn)(void *);
+/* wakeup cell for tasks driven outside the work pool (root, blocking
+ * pool): owned by the driver's stack, pointed at for the task's life */
+typedef struct RtWake {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    volatile int ready;
+} RtWake;
+
+/* one unwind target per driver thread — a task's setjmp is only valid
+ * while its poll is on the C stack, so the target can live in TLS */
+static _Thread_local jmp_buf tls_jb;
+
+struct RtTask {
+    RtPoll poll;          /* frame tasks: driver fn */
+    RtFrame *frame;       /* == (RtFrame *)(t + 1) for rt_task_new blocks */
+    void *(*fn)(void *);  /* thread tasks: plain fn */
     void *arg;
     RtScope *scope;
-    struct Task *next;
-} Task;
+    struct RtTask *next;  /* pool queue / chan wait queue link */
+    int is_frame;
+    int external;         /* driven by rt_run_root / blocking thread */
+    RtWake *wk;           /* external wakeup, driver-stack-owned */
+    int64_t chan_res;     /* channel delivery slot */
+};
 
 static struct {
     pthread_mutex_t mu;
     pthread_cond_t cv;
-    Task *head, *tail;
+    RtTask *head, *tail;
     int started;
 } pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0 };
 
 static void scope_done(RtScope *s) {
     if (!s) return;
+    RtTask *wake = NULL;
     pthread_mutex_lock(&s->mu);
     s->pending--;
-    if (s->pending <= 0) pthread_cond_signal(&s->cv);
+    if (s->pending <= 0) {
+        if (s->join_task) wake = s->join_task;
+        else pthread_cond_signal(&s->cv);
+    }
     pthread_mutex_unlock(&s->mu);
+    if (wake) rt_task_wake(wake); /* outside s->mu: avoids s->mu/pool.mu inversion */
 }
 
 /* the currently-running task — rt_trap must settle its pending count
- * before pthread_exit, or the scope join waits forever */
-static _Thread_local Task *tls_task;
+ * before unwinding, or the scope join waits forever */
+static _Thread_local RtTask *tls_task;
 
-static void run_task(Task *t) {
+static void run_task(RtTask *t) {
     tls_scope = t->scope;
     tls_task = t;
-    t->fn(t->arg);
+    if (t->is_frame) {
+        if (setjmp(tls_jb) == 0) {
+            if (t->poll(t->frame, t) == RT_PENDING) {
+                tls_task = NULL;
+                return; /* parked on a wait queue; waker re-enqueues */
+            }
+        }
+        /* READY / CANCEL / trapped(longjmp) all land here */
+    } else {
+        t->fn(t->arg);
+    }
     tls_task = NULL;
     scope_done(t->scope);
     free(t);
@@ -121,7 +157,7 @@ static void *worker(void *_p) {
     for (;;) {
         pthread_mutex_lock(&pool.mu);
         while (!pool.head) pthread_cond_wait(&pool.cv, &pool.mu);
-        Task *t = pool.head;
+        RtTask *t = pool.head;
         pool.head = t->next;
         if (!pool.head) pool.tail = NULL;
         pthread_mutex_unlock(&pool.mu);
@@ -146,29 +182,9 @@ static void pool_start(void) {
     pthread_mutex_unlock(&pool.mu);
 }
 
-static void *task_wrap(void *p) {
-    Task *t = p;
-    run_task(t);
-    return 0;
-}
-
-void rt_spawn(void *(*fn)(void *), void *arg) {
-    RtScope *s = tls_scope;
-    if (s) {
-        pthread_mutex_lock(&s->mu);
-        s->pending++;
-        pthread_mutex_unlock(&s->mu);
-    }
-    if (!s) { /* outside scope: dedicated thread, nothing to join */
-        Task *t = malloc(sizeof *t);
-        *t = (Task){ fn, arg, NULL, NULL };
-        pthread_t th;
-        if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
-        return;
-    }
+static void pool_push(RtTask *t) {
     pool_start();
-    Task *t = malloc(sizeof *t);
-    *t = (Task){ fn, arg, s, NULL };
+    t->next = NULL;
     pthread_mutex_lock(&pool.mu);
     if (pool.tail) pool.tail->next = t; else pool.head = t;
     pool.tail = t;
@@ -176,23 +192,158 @@ void rt_spawn(void *(*fn)(void *), void *arg) {
     pthread_mutex_unlock(&pool.mu);
 }
 
+/* re-enqueue a suspended frame task: external drivers wait on their own
+ * cond; pool tasks go back on the shared queue */
+void rt_task_wake(RtTask *t) {
+    if (t->external) {
+        RtWake *w = t->wk;
+        pthread_mutex_lock(&w->mu);
+        w->ready = 1;
+        pthread_cond_signal(&w->cv);
+        pthread_mutex_unlock(&w->mu);
+    } else {
+        pool_push(t);
+    }
+}
+
+static void *task_wrap(void *p) {
+    RtTask *t = p;
+    run_task(t);
+    return 0;
+}
+
+/* blocking-pool frame task: a dedicated thread drives the state machine
+ * to completion (suspend points park this thread on the task's wake cv) */
+static void *task_wrap_frame(void *p) {
+    RtTask *t = p;
+    RtWake wk;
+    pthread_mutex_init(&wk.mu, NULL);
+    pthread_cond_init(&wk.cv, NULL);
+    wk.ready = 0;
+    t->wk = &wk;
+    tls_scope = t->scope;
+    tls_task = t;
+    if (setjmp(tls_jb) == 0) {
+        while (t->poll(t->frame, t) == RT_PENDING) {
+            pthread_mutex_lock(&wk.mu);
+            while (!wk.ready) pthread_cond_wait(&wk.cv, &wk.mu);
+            wk.ready = 0;
+            pthread_mutex_unlock(&wk.mu);
+        }
+    }
+    tls_task = NULL;
+    scope_done(t->scope);
+    t->wk = NULL;
+    pthread_mutex_destroy(&wk.mu);
+    pthread_cond_destroy(&wk.cv);
+    free(t);
+    return 0;
+}
+
+static void scope_pending_up(RtScope *s) {
+    if (!s) return;
+    pthread_mutex_lock(&s->mu);
+    s->pending++;
+    pthread_mutex_unlock(&s->mu);
+}
+
+void rt_spawn(void *(*fn)(void *), void *arg) {
+    RtScope *s = tls_scope;
+    scope_pending_up(s);
+    if (!s) { /* outside scope: dedicated thread, nothing to join */
+        RtTask *t = malloc(sizeof *t);
+        memset(t, 0, sizeof *t);
+        t->fn = fn; t->arg = arg;
+        pthread_t th;
+        if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
+        return;
+    }
+    RtTask *t = malloc(sizeof *t);
+    memset(t, 0, sizeof *t);
+    t->fn = fn; t->arg = arg; t->scope = s;
+    pool_push(t);
+}
+
 /* blocking pool: tasks that may block in FFI run on dedicated threads --
  * a blocked worker can never starve the work pool */
 void rt_spawnb(void *(*fn)(void *), void *arg) {
     RtScope *s = tls_scope;
-    if (s) {
-        pthread_mutex_lock(&s->mu);
-        s->pending++;
-        pthread_mutex_unlock(&s->mu);
-    }
-    Task *t = malloc(sizeof *t);
-    *t = (Task){ fn, arg, s, NULL };
+    scope_pending_up(s);
+    RtTask *t = malloc(sizeof *t);
+    memset(t, 0, sizeof *t);
+    t->fn = fn; t->arg = arg; t->scope = s;
     pthread_t th;
     if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
 }
 
+/* one allocation per task: [RtTask][frame bytes]. Generated code gets
+ * the frame pointer and fills param slots before rt_spawn_task /
+ * rt_spawnb_task / rt_run_root take the task live. */
+RtFrame *rt_task_new(RtPoll poll, int64_t bytes) {
+    RtTask *t = malloc(sizeof(RtTask) + (size_t)bytes);
+    memset(t, 0, sizeof(RtTask) + (size_t)bytes);
+    t->poll = poll;
+    t->is_frame = 1;
+    t->scope = tls_scope;
+    RtFrame *fr = (RtFrame *)(t + 1);
+    fr->cur_scope = tls_scope;
+    t->frame = fr;
+    return fr;
+}
+
+static RtTask *task_of(RtFrame *fr) { return ((RtTask *)fr) - 1; }
+
+void rt_spawn_task(RtFrame *fr) {
+    RtTask *t = task_of(fr);
+    scope_pending_up(t->scope);
+    pool_push(t);
+}
+
+void rt_spawnb_task(RtFrame *fr) {
+    RtTask *t = task_of(fr);
+    scope_pending_up(t->scope);
+    t->external = 1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, task_wrap_frame, t) == 0) pthread_detach(th);
+}
+
+/* drive one frame task to completion on the calling thread — the root
+ * task (oxl_main) and test-harness tasks use this; parked tasks signal
+ * wk via rt_task_wake */
+int rt_run_root(RtFrame *fr) {
+    RtTask *t = task_of(fr);
+    RtWake wk;
+    pthread_mutex_init(&wk.mu, NULL);
+    pthread_cond_init(&wk.cv, NULL);
+    wk.ready = 0;
+    t->external = 1;
+    t->wk = &wk;
+    RtTask *prev = tls_task;
+    tls_task = t;
+    tls_scope = t->scope;
+    int trapped = 0;
+    if (setjmp(tls_jb) == 0) {
+        while (t->poll(fr, t) == RT_PENDING) {
+            pthread_mutex_lock(&wk.mu);
+            while (!wk.ready) pthread_cond_wait(&wk.cv, &wk.mu);
+            wk.ready = 0;
+            pthread_mutex_unlock(&wk.mu);
+        }
+    } else {
+        trapped = 1;
+    }
+    tls_task = prev;
+    t->wk = NULL;
+    pthread_mutex_destroy(&wk.mu);
+    pthread_cond_destroy(&wk.cv);
+    free(t);
+    return trapped;
+}
+
 /* cooperative cancel check -- tasks observe at suspend points */
-static int cancelled(void) { return tls_scope && tls_scope->cancel; }
+int rt_cancelled(void) { return tls_scope && tls_scope->cancel; }
+
+int64_t rt_task_data(RtTask *t) { return t->chan_res; }
 
 static int join_scope(RtScope *s) {
     pthread_mutex_lock(&s->mu);
@@ -206,12 +357,44 @@ static int join_scope(RtScope *s) {
     return err;
 }
 
+/* frame-task join: register as the scope's joiner, or READY if drained */
+int rt_scope_join_poll(RtScope *s, RtTask *t) {
+    pthread_mutex_lock(&s->mu);
+    if (s->pending > 0) {
+        s->join_task = t;
+        pthread_mutex_unlock(&s->mu);
+        return RT_PENDING;
+    }
+    pthread_mutex_unlock(&s->mu);
+    return RT_READY;
+}
+
+int rt_scope_finish(RtScope *s) {
+    pthread_mutex_lock(&s->mu);
+    int err = s->trapped ? (int)s->err : 0;
+    pthread_mutex_unlock(&s->mu);
+    pthread_mutex_destroy(&s->mu);
+    pthread_cond_destroy(&s->cv);
+    free(s->arena_buf);
+    tls_scope = s->parent;
+    return err;
+}
+
+static void scope_propagate(RtScope *s, int err) {
+    if (s->parent) {
+        pthread_mutex_lock(&s->parent->mu);
+        s->parent->trapped = 1;
+        s->parent->err = err; /* keep the code — propagation must not swallow it */
+        pthread_mutex_unlock(&s->parent->mu);
+    } else {
+        fprintf(stderr, "trap %d escaped top scope\n", err);
+        abort();
+    }
+}
+
 void rt_scope_leave(RtScope *s) {
     int err = join_scope(s);
-    if (err) {
-        if (s->parent) s->parent->trapped = err; /* propagate */
-        else { fprintf(stderr, "trap %d escaped top scope\n", err); abort(); }
-    }
+    if (err) scope_propagate(s, err);
 }
 
 int rt_scope_try(RtScope *s) { return join_scope(s); }
@@ -219,7 +402,21 @@ int rt_scope_try(RtScope *s) { return join_scope(s); }
 void rt_trap(int64_t code) {
     RtScope *s = tls_scope;
     if (!s) { fprintf(stderr, "trap %lld outside scope\n", (long long)code); abort(); }
-    if (!tls_task) {
+    RtTask *t = tls_task;
+    if (t && t->is_frame) {
+        /* mark the whole chain from innermost to the task's spawn scope —
+         * inner scopes live inside this task's frame and never join */
+        for (RtScope *x = s; x; x = x->parent) {
+            pthread_mutex_lock(&x->mu);
+            if (!x->trapped) { x->trapped = 1; x->err = code; }
+            x->cancel = 1;
+            pthread_mutex_unlock(&x->mu);
+            if (x == t->scope) break;
+        }
+        tls_task = NULL;
+        longjmp(tls_jb, 1); /* run_task settles the pending slot */
+    }
+    if (!t) {
         /* trap on a non-task thread (main/foreign) — no joiner exists to
          * consume it; fail loudly instead of pthread_exit's silent exit-0 */
         fprintf(stderr, "trap %lld\n", (long long)code);
@@ -232,12 +429,9 @@ void rt_trap(int64_t code) {
     }
     s->cancel = 1; /* siblings observe + unwind */
     pthread_mutex_unlock(&s->mu);
-    if (tls_task) { /* settle this task's pending slot before dying */
-        Task *t = tls_task;
-        tls_task = NULL;
-        scope_done(t->scope);
-        free(t);
-    }
+    tls_task = NULL;
+    scope_done(t->scope);
+    free(t);
     pthread_exit(0);
 }
 
@@ -278,13 +472,25 @@ int64_t rt_now_ms(void) {
 }
 void rt_usleep(int64_t usecs) { usleep((useconds_t)usecs); }
 
-/* ---------------- channels (unbuffered, word payload) ---------------- */
+/* ---------------- channels (unbuffered, word payload) ----------------
+ * One chan, two surfaces: thread tasks block on cond vars, frame tasks
+ * park on wait queues and get re-enqueued by rt_task_wake. Rendezvous
+ * rule is unchanged: a send completes only once a receiver takes it. */
+
+typedef struct SendReq {
+    RtTask *t;
+    int64_t v;
+    struct SendReq *next;
+} SendReq;
 
 struct RtChan {
     pthread_mutex_t mu;
     pthread_cond_t cv_send, cv_recv;
     int64_t val;
     int has, closed;
+    int trecv;          /* thread receivers inside cv_recv wait */
+    RtTask *recvq;      /* parked frame receivers (task->next chain) */
+    SendReq *sendq;     /* parked frame sends */
 };
 
 RtChan *rt_mkchan(void) {
@@ -296,10 +502,18 @@ RtChan *rt_mkchan(void) {
 }
 
 void rt_send(RtChan *ch, int64_t v) {
-    if (cancelled()) pthread_exit(0);
+    if (rt_cancelled()) pthread_exit(0);
     pthread_mutex_lock(&ch->mu);
     while (ch->has && !ch->closed) pthread_cond_wait(&ch->cv_send, &ch->mu);
     if (!ch->closed) {
+        if (ch->recvq) { /* hand directly to a parked frame receiver */
+            RtTask *r = ch->recvq;
+            ch->recvq = r->next;
+            r->chan_res = v;
+            pthread_mutex_unlock(&ch->mu);
+            rt_task_wake(r);
+            return;
+        }
         ch->val = v;
         ch->has = 1;
         pthread_cond_broadcast(&ch->cv_recv);
@@ -309,9 +523,25 @@ void rt_send(RtChan *ch, int64_t v) {
 }
 
 int64_t rt_recv(RtChan *ch) {
-    if (cancelled()) pthread_exit(0);
-    pthread_mutex_lock(&ch->mu);
-    while (!ch->has && !ch->closed) pthread_cond_wait(&ch->cv_recv, &ch->mu);
+    if (rt_cancelled()) pthread_exit(0);
+    for (;;) {
+        pthread_mutex_lock(&ch->mu);
+        if (ch->sendq) { /* a parked frame sender delivers + gets woken */
+            SendReq *r = ch->sendq;
+            ch->sendq = r->next;
+            int64_t v = r->v;
+            RtTask *st = r->t;
+            free(r);
+            pthread_mutex_unlock(&ch->mu);
+            rt_task_wake(st);
+            return v;
+        }
+        if (ch->has || ch->closed) break;
+        ch->trecv++;
+        pthread_cond_wait(&ch->cv_recv, &ch->mu);
+        ch->trecv--;
+        pthread_mutex_unlock(&ch->mu);
+    }
     int64_t v = ch->val;
     ch->has = 0;
     /* broadcast, not signal: with racing senders a lone wakeup can land
@@ -321,12 +551,109 @@ int64_t rt_recv(RtChan *ch) {
     return v;
 }
 
+/* frame-task recv: READY delivers via task->chan_res (uniform for the
+ * immediate and the woken paths); PENDING parks on recvq */
+int rt_recv_poll(RtChan *ch, RtTask *t) {
+    pthread_mutex_lock(&ch->mu);
+    if (ch->sendq) {
+        SendReq *r = ch->sendq;
+        ch->sendq = r->next;
+        t->chan_res = r->v;
+        RtTask *st = r->t;
+        free(r);
+        pthread_mutex_unlock(&ch->mu);
+        rt_task_wake(st);
+        return RT_READY;
+    }
+    if (ch->has || ch->closed) {
+        t->chan_res = ch->val;
+        ch->has = 0;
+        pthread_cond_broadcast(&ch->cv_send);
+        pthread_mutex_unlock(&ch->mu);
+        return RT_READY;
+    }
+    t->next = ch->recvq;
+    ch->recvq = t;
+    pthread_mutex_unlock(&ch->mu);
+    return RT_PENDING;
+}
+
+int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
+    pthread_mutex_lock(&ch->mu);
+    if (ch->recvq) {
+        RtTask *r = ch->recvq;
+        ch->recvq = r->next;
+        r->chan_res = v;
+        pthread_mutex_unlock(&ch->mu);
+        rt_task_wake(r);
+        return RT_READY;
+    }
+    if (ch->closed) {
+        pthread_mutex_unlock(&ch->mu);
+        return RT_READY; /* send on closed completes silently (v0 rule) */
+    }
+    if (ch->trecv > 0) { /* a thread receiver is committed inside cv_wait */
+        ch->val = v;
+        ch->has = 1;
+        pthread_cond_broadcast(&ch->cv_recv);
+        pthread_mutex_unlock(&ch->mu);
+        return RT_READY;
+    }
+    SendReq *r = malloc(sizeof *r);
+    r->t = t;
+    r->v = v;
+    r->next = ch->sendq;
+    ch->sendq = r;
+    pthread_mutex_unlock(&ch->mu);
+    return RT_PENDING;
+}
+
 void rt_close(RtChan *ch) {
     pthread_mutex_lock(&ch->mu);
     ch->closed = 1;
     pthread_cond_broadcast(&ch->cv_send);
     pthread_cond_broadcast(&ch->cv_recv);
+    /* drain parked frame tasks: receivers complete with the slot value
+     * (matching the thread path); senders complete silently */
+    RtTask *r = ch->recvq;
+    ch->recvq = NULL;
+    SendReq *sq = ch->sendq;
+    ch->sendq = NULL;
     pthread_mutex_unlock(&ch->mu);
+    while (r) {
+        RtTask *n = r->next;
+        r->chan_res = ch->val;
+        rt_task_wake(r);
+        r = n;
+    }
+    while (sq) {
+        SendReq *n = sq->next;
+        rt_task_wake(sq->t);
+        free(sq);
+        sq = n;
+    }
+}
+
+/* frame-task sleep: a blocking-pool thread holds the delay, then the
+ * task is re-enqueued — sleep never occupies a work-pool worker */
+static void *sleep_tick(void *p) {
+    RtTask *x = p;
+    RtTask *w = x->arg;
+    int64_t s = x->chan_res;
+    free(x);
+    if (s > 0) sleep((unsigned)s);
+    rt_task_wake(w);
+    return 0;
+}
+int rt_sleep_poll(int64_t secs, RtTask *t) {
+    RtTask *timer = malloc(sizeof *timer);
+    memset(timer, 0, sizeof *timer);
+    /* reuse the thread-task slot to carry (secs, woken task) */
+    timer->arg = t;
+    timer->chan_res = secs;
+    pthread_t th;
+    if (pthread_create(&th, NULL, sleep_tick, timer) == 0) pthread_detach(th);
+    return RT_PENDING;
 }
 
 /* ---------------- strings / misc ---------------- */
@@ -368,7 +695,7 @@ void rt_print_f64(double v) { printf("%.15g", v); }
 void rt_println_f64(double v) { printf("%.15g\n", v); fflush(stdout); }
 
 void rt_sleep(int64_t secs) {
-    if (cancelled()) pthread_exit(0);
+    if (rt_cancelled()) pthread_exit(0);
     sleep((unsigned)secs);
 }
 

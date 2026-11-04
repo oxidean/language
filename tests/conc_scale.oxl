@@ -1,0 +1,48 @@
+// A1 scale check: K tasks parked on recv must live in frames, not
+// OS threads. Measure VmRSS externally during the parked window:
+//
+//   oxl run tests/conc_scale.oxl -- [tasks] [rounds] [park_ms]
+import "std/time"
+
+fn idle(ch: chan, n: int) {
+    i := 0
+    for i < n {
+        v := recv(ch)
+        i = i + 1
+    }
+}
+
+fn main() {
+    k := 10000
+    rounds := 5
+    park := 300
+    if argc() >= 2 {
+        k = atoi(argv(1))
+    }
+    if argc() >= 3 {
+        rounds = atoi(argv(2))
+    }
+    if argc() >= 4 {
+        park = atoi(argv(3))
+    }
+    ch := mkchan()
+    scope {
+        i := 0
+        for i < k {
+            spawn idle(ch, rounds)
+            i = i + 1
+        }
+        // parked window: RSS measured here, then drain all rounds
+        time.sleep_ms(park)
+        r := 0
+        for r < rounds {
+            i = 0
+            for i < k {
+                send(ch, i)
+                i = i + 1
+            }
+            r = r + 1
+        }
+    }
+    println("done")
+}

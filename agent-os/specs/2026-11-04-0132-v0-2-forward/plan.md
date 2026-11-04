@@ -17,7 +17,7 @@ This folder: plan.md, shape.md, standards.md, references.md, items/.
 
 ## Track A — Coroutine runtime (critical path, sequential)
 
-### Task A1: State-machine coroutine transform [not started]
+### Task A1: State-machine coroutine transform [done]
 
 `items/a1-coroutine-transform.md`. The performance pitch: suspendable
 fns become state machines; tasks are frames (~96 B measured), not

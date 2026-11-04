@@ -61,6 +61,14 @@ d=json.loads(sys.argv[1])
 assert len(d['items'])>20 and not any('skip' in i for i in d['items']), d
 PY
 
+echo "== a1 coroutine scale =="
+# 2k frame tasks parked on recv, then two drain rounds — a thread-per-task
+# executor cannot do this within pool limits; frames must
+out=$("$OXL" run tests/conc_scale.oxl -- 2000 2 50)
+[ "$out" = "done" ] || { echo "FAIL scale: $out"; exit 1; }
+out=$("$OXL" run tests/conc_ping.oxl -- 5000)
+grep -q "bounces=5000" <<<"$out" || { echo "FAIL ping: $out"; exit 1; }
+
 echo "== http pilot =="
 work=$(mktemp -d)
 "$OXL" build examples/http-crud-sqlite/main.oxl -o "$work/httpsrv"

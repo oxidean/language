@@ -24,19 +24,37 @@ scope {
 A call is **suspend-capable** if its call graph transitively reaches
 `spawn`, `scope`, `recv`, `sleep`, or any `extern` marked `blocking`.
 The compiler computes the suspend set by reachability; only
-suspend-capable functions get state-machine transform (target impl) or
-tasked-stack treatment (interim impl). User writes blocking-looking code;
-no `async`/`await` keywords exist.
+suspend-capable functions get the state-machine transform. User writes
+blocking-looking code; no `async`/`await` keywords exist.
 
-## Interim implementation (documented deviation)
+## Frame-task implementation
 
-v0.0.1 ships tasks as **pool OS threads** (one stack per live task,
-allocated from a fixed pool) rather than compiled state machines. The
-surface semantics — scopes, join, cancel, ownership-transfer channels —
-are final; the execution strategy is interim. Rationale: the
-state-machine transform is the program's #1 technical risk and is
-de-risked separately (see `prototype/`); blocking on it would stall every
-downstream track. Transition to stackless frames is ABI-internal.
+Suspend-capable functions compile to **stackless state machines**:
+
+- Each such function gets a generated frame struct (`o_frm_<fn>`):
+  a header (`cur_scope`, resume `state`, `child` link), parameter
+  slots, one slot per live local, embedded `RtScope`s for `scope {}`
+  blocks, and a `result` slot when the function returns a value.
+- The body becomes a `poll` driver (`o_poll_<fn>`). A `switch` on
+  `fr->state` jumps to the resume label; at a suspend point the driver
+  stores the next state and returns `RT_PENDING`. `RT_READY` means the
+  function returned; `RT_CANCEL` means it observed scope cancel.
+- Suspend calls in expressions are hoisted to statement level so every
+  suspend point is a plain statement boundary. Short-circuit `&&`/`||`
+  operands are never eagerly evaluated.
+- A suspend-point *call* allocates a child frame, links it via
+  `fr->child`, and drives `child`'s poll inline — the parent's task
+  record is shared, so nested suspends cost one small `malloc` each and
+  are freed when the child completes.
+- `spawn f(args)` allocates one block (task header + frame) via
+  `rt_task_new` and enqueues it on the work pool's shared queue.
+  Parked tasks hold *no* OS thread: ~10k idle tasks fit in ~2 MB RSS.
+- `spawnBlocking f(args)` sends the frame task to the blocking pool
+  (one thread per task) so blocking FFI can never starve workers.
+
+Tasks trap via `longjmp` to the driver thread's unwind slot; the trap
+marks the scope chain trapped/cancelled and the driver settles the
+pending count — identical containment to the thread model.
 
 ## Channels
 
@@ -56,8 +74,15 @@ close(ch)
 
 - `Executor` is a library type, not mandatory runtime: a program that
   never spawns pays nothing (no threads, no scheduler structures).
-- `exe := newPool(n)` — work-stealing pool over n OS threads.
-- Default: first `scope` in a program lazily creates a shared pool sized
-  to `GOMAXPROCS`-equivalent (CPU count).
-- Blocking `extern` calls run on a separate blocking pool so they cannot
-  starve task threads.
+- `exe := newPool(n)` — planned library surface. v0.2 ships the
+  built-in executor only.
+- Default: the first `spawn` lazily creates a shared work pool sized
+  to `GOMAXPROCS`-equivalent (CPU count, capped at 32). Workers pull
+  tasks off one MPMC queue and drive each task's `poll` until it
+  suspends or completes — cooperative, not preemptive.
+- Blocking `extern` calls and `spawnBlocking` tasks run on a separate
+  blocking pool so they cannot starve task threads.
+- Scale: a parked task costs one small heap block, not a thread.
+  Measured ~1.9 MB RSS with 10k parked tasks; ~2x faster than the
+  thread-pool executor at 1k+ tasks on the rendezvous bench
+  (`tests/conc_scale.oxl`, `tests/conc_ping.oxl`).

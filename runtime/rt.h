@@ -6,6 +6,8 @@
 #pragma once
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 typedef struct {
     const char *p;
@@ -20,10 +22,24 @@ typedef struct {
     uint8_t _pad;
 } ObjHdr;
 
+/* --- frames & tasks ---
+ * Suspendable fns compile to a heap frame (params + live locals +
+ * resume counter) and a poll driver. Tasks carry a frame, not a stack;
+ * the executor calls poll until it returns != PENDING. */
+typedef struct RtTask RtTask;
+typedef struct RtFrame {
+    struct RtScope *cur_scope; /* innermost live scope at last suspend */
+    int state;                 /* resume counter: 0 = entry */
+} RtFrame;
+typedef int (*RtPoll)(RtFrame *, RtTask *);
+#define RT_READY 0   /* poll result: fn returned (result slot set) */
+#define RT_PENDING 1 /* suspended; the waker re-enqueues the task */
+#define RT_CANCEL 2  /* observed scope cancel at a suspend point */
+
 /* --- scopes & tasks (concurrency.md) ---
- * Interim executor: fixed worker pool with a shared MPMC task queue.
- * Scopes join by pending-task count, not thread handles — the same
- * accounting the eventual state-machine tasks will use. */
+ * Executor: fixed worker pool driving frame tasks on a shared MPMC
+ * queue; blocking FFI still gets thread-per-task. Scopes join by
+ * pending-task count — join is itself a suspend point for frames. */
 typedef struct RtScope {
     volatile int pending;
     volatile int trapped;
@@ -32,16 +48,30 @@ typedef struct RtScope {
     struct RtScope *parent;
     pthread_mutex_t mu;
     pthread_cond_t cv;
+    RtTask *join_task; /* frame suspended at join, if any */
     /* arena: bump allocator freed on leave */
     char *arena_buf;
     int64_t arena_off, arena_cap;
 } RtScope;
 
+/* the calling thread's innermost scope — frame drivers save/restore it
+ * around poll() so interleaved tasks on one worker keep their own chain */
+extern _Thread_local RtScope *tls_scope;
+
 void rt_scope_enter(RtScope *s);
 void rt_scope_leave(RtScope *s);
 int rt_scope_try(RtScope *s); /* join; return trap code without propagating */
-void rt_spawn(void *(*fn)(void *), void *arg);   /* work pool */
+int rt_scope_join_poll(RtScope *s, RtTask *t); /* frame join: READY/PENDING */
+int rt_scope_finish(RtScope *s);              /* post-join teardown -> err */
+void rt_spawn(void *(*fn)(void *), void *arg);   /* fn task (non-susp fns) */
 void rt_spawnb(void *(*fn)(void *), void *arg);  /* blocking pool (FFI) */
+RtFrame *rt_task_new(RtPoll poll, int64_t bytes); /* one alloc: task+frame */
+void rt_spawn_task(RtFrame *fr);                  /* enqueue frame task in scope */
+void rt_spawnb_task(RtFrame *fr);                 /* frame task, blocking pool */
+int rt_run_root(RtFrame *fr);                     /* drive a task to completion */
+void rt_task_wake(RtTask *t);                    /* re-enqueue a suspended task */
+int rt_cancelled(void);
+int64_t rt_task_data(RtTask *t);                 /* delivered channel value */
 void rt_trap(int64_t code);
 
 /* --- Shared<T>: atomic word cell for cross-scope sharing --- */
@@ -66,12 +96,18 @@ void rt_borrow_mut(void *obj);
 void rt_unborrow(void *obj);
 void rt_free(void *obj);
 
-/* --- channels --- */
+/* --- channels ---
+ * Two surfaces on one chan: blocking rt_send/rt_recv for thread tasks,
+ * *_poll variants for frame tasks (READY = completed; PENDING = the
+ * task was parked on the chan's wait queue and will be re-enqueued). */
 typedef struct RtChan RtChan;
 RtChan *rt_mkchan(void);
 void rt_send(RtChan *ch, int64_t v);
 int64_t rt_recv(RtChan *ch);
+int rt_send_poll(RtChan *ch, int64_t v, RtTask *t);
+int rt_recv_poll(RtChan *ch, RtTask *t);
 void rt_close(RtChan *ch);
+int rt_sleep_poll(int64_t secs, RtTask *t);
 
 /* --- misc builtins --- */
 void rt_sleep(int64_t secs);

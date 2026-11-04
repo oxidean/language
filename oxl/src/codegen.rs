@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::check::{subst_ty, Ty, Ret};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 const RT_H: &str = include_str!("../../runtime/rt.h");
@@ -54,17 +54,36 @@ struct Gen<'a> {
     /// fn-scope defer stack — calls run LIFO at each return / fn end
     defers: Vec<Expr>,
     test_mode: bool,
+    /// suspend set from the checker — these fns compile to frames
+    susp: HashSet<String>,
+    /// inside a suspendable fn's driver right now
+    in_frame: bool,
+    /// scoped map: local name -> frame field (parallel to env)
+    fslots: Vec<HashMap<String, String>>,
+    /// collected local field decls for the frame struct
+    frame_decls: Vec<String>,
+    /// RtScope fields (one per `scope {}` site in this fn)
+    scope_decls: Vec<String>,
+    /// resume states used (for the switch prologue)
+    state_labels: Vec<usize>,
+    state_ctr: usize,
+    label_ctr: usize,
+    /// (continue-label, break-label) per enclosing loop
+    loop_labels: Vec<(String, String)>,
+    hoist_ctr: usize,
+    /// frame structs + poll drivers, placed before all fn bodies
+    frame_out: String,
 }
 
-pub fn generate(c: &Crate) -> String {
-    generate_mode(c, false)
+pub fn generate(c: &Crate, susp: &HashSet<String>) -> String {
+    generate_mode(c, false, susp)
 }
 
 fn mangle_ty(t: &Ty) -> String {
     t.name().chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect()
 }
 
-pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
+pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> String {
     let mut g = Gen {
         out: String::new(),
         trampolines: String::new(),
@@ -86,6 +105,17 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
         cur_fn: String::new(),
         defers: Vec::new(),
         test_mode,
+        susp: susp.clone(),
+        in_frame: false,
+        fslots: Vec::new(),
+        frame_decls: Vec::new(),
+        scope_decls: Vec::new(),
+        state_labels: Vec::new(),
+        state_ctr: 1,
+        label_ctr: 0,
+        loop_labels: Vec::new(),
+        hoist_ctr: 0,
+        frame_out: String::new(),
     };
     for it in &c.items {
         match it {
@@ -210,9 +240,15 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
         for it in &c.items {
             if let Item::Fn(f) = it {
                 if f.name.starts_with("test_") {
-                    let _ = writeln!(g.out,
-                        "    {{ RtScope _t{id}; rt_scope_enter(&_t{id}); o_f_{cn}(); int _e{id} = rt_scope_try(&_t{id});\n      rt_print_str(rt_str(\"  {n} ... \")); rt_println_str(rt_str(_e{id} ? \"FAIL\" : \"ok\")); }}",
-                        cn = cname(&f.name), n = f.name, id = id);
+                    if g.susp.contains(&f.name) {
+                        let _ = writeln!(g.out,
+                            "    {{ RtScope _t{id}; rt_scope_enter(&_t{id});\n      struct o_frm_{cn} *_fr = (struct o_frm_{cn} *)rt_task_new(o_poll_{cn}, (int64_t)sizeof(struct o_frm_{cn}));\n      rt_run_root((RtFrame *)_fr);\n      int _e{id} = rt_scope_try(&_t{id});\n      rt_print_str(rt_str(\"  {n} ... \")); rt_println_str(rt_str(_e{id} ? \"FAIL\" : \"ok\")); }}",
+                            cn = cname(&f.name), n = f.name, id = id);
+                    } else {
+                        let _ = writeln!(g.out,
+                            "    {{ RtScope _t{id}; rt_scope_enter(&_t{id}); o_f_{cn}(); int _e{id} = rt_scope_try(&_t{id});\n      rt_print_str(rt_str(\"  {n} ... \")); rt_println_str(rt_str(_e{id} ? \"FAIL\" : \"ok\")); }}",
+                            cn = cname(&f.name), n = f.name, id = id);
+                    }
                     id += 1;
                 }
             }
@@ -220,10 +256,11 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
         let _ = writeln!(g.out, "}}\n");
     }
 
-    // trampolines must precede the fn bodies that reference them
+    // trampolines + frame decls must precede the fn bodies that use them
     g.out = g.out.replace("/*GLOBALS*/", &global_inits);
     let mut final_out = g.out[..body_start].to_string();
     final_out.push_str(&g.trampolines);
+    final_out.push_str(&g.frame_out);
     final_out.push_str(&g.inst_out);
     final_out.push_str(&g.out[body_start..]);
     final_out
@@ -355,6 +392,14 @@ impl<'a> Gen<'a> {
     }
 
     fn func(&mut self, f: &Fn) {
+        if self.susp.contains(&f.name) {
+            self.func_frame(f, &f.name.clone());
+            if f.name == "main" && !self.test_mode {
+                let _ = writeln!(self.out,
+                    "void oxl_main(void) {{ /*GLOBALS*/ struct o_frm_main *_rt = (struct o_frm_main *)rt_task_new(o_poll_main, (int64_t)sizeof(struct o_frm_main));\n    rt_run_root((RtFrame *)_rt); }}\n");
+            }
+            return;
+        }
         let ret_c = self.ret_decl(f, true);
         let params: Vec<String> = f
             .params
@@ -386,6 +431,22 @@ impl<'a> Gen<'a> {
 
     /// emit a monomorphized copy of generic fn `f` as `o_f_{mangled}`
     fn func_inst(&mut self, f: &Fn, mangled: &str, bind: &[(String, Ty)]) {
+        if self.susp.contains(&f.name) {
+            let saved_subst = std::mem::replace(
+                &mut self.subst,
+                bind.iter().cloned().collect::<HashMap<_, _>>(),
+            );
+            if let RetTy::Pair(t) = &f.ret {
+                let _ = writeln!(
+                    self.frame_out,
+                    "struct o_ret_{} {{ {} val; int64_t err; }};",
+                    cname(&mangled), self.cty(&self.ty_of_ref(t))
+                );
+            }
+            self.func_frame(f, mangled);
+            self.subst = saved_subst;
+            return;
+        }
         let saved_subst = std::mem::replace(
             &mut self.subst,
             bind.iter().cloned().collect::<HashMap<_, _>>(),
@@ -715,6 +776,39 @@ impl<'a> Gen<'a> {
     fn spawn(&mut self, call: &Expr, blocking: bool) {
         if let ExprKind::Call { f, args } = &call.kind {
             if let ExprKind::Ident(fn_name) = &f.kind {
+                let fn_name = &fn_name.clone();
+                // suspendable callee → frame task (heap frame + poll driver)
+                if self.susp.contains(fn_name) {
+                    let (mangled, bind) = match call_bindings(self, fn_name, args) {
+                        Some(bind) => {
+                            let m = inst_name(fn_name, &bind);
+                            if !self.inst_done.contains(&m) {
+                                self.insts.push((fn_name.clone(), bind));
+                            }
+                            (m, true)
+                        }
+                        None => (fn_name.clone(), false),
+                    };
+                    let _ = bind;
+                    let pnames: Vec<String> = self
+                        .ast_fns
+                        .get(fn_name)
+                        .map(|af| af.params.iter().map(|p| p.name.clone()).collect())
+                        .unwrap_or_default();
+                    let _ = writeln!(self.out,
+                        "    {{ struct o_frm_{} *_t = (struct o_frm_{} *)rt_task_new(o_poll_{}, (int64_t)sizeof(struct o_frm_{}));",
+                        cname(&mangled), cname(&mangled), cname(&mangled), cname(&mangled));
+                    for (i, arg) in args.iter().enumerate() {
+                        let v = self.expr(arg);
+                        if let Some(pn) = pnames.get(i) {
+                            let _ = writeln!(self.out, "      _t->p_{pn} = {v};");
+                        }
+                    }
+                    let spawn_fn = if blocking { "rt_spawnb_task" } else { "rt_spawn_task" };
+                    let _ = writeln!(self.out,
+                        "      {spawn_fn}((RtFrame *)_t); }}");
+                    return;
+                }
                 let id = self.tmp();
                 // args struct + trampoline at file scope
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr_ty(a)).collect();
@@ -764,6 +858,12 @@ impl<'a> Gen<'a> {
             ExprKind::Bool(b) => format!("{b}"),
             ExprKind::Nil => "0".into(),
             ExprKind::Ident(n) => {
+                // frame locals/params read through fr->
+                if self.in_frame {
+                    if let Some(slot) = self.fslots.iter().rev().find_map(|s| s.get(n)) {
+                        return format!("fr->{slot}");
+                    }
+                }
                 // locals shadow globals; a bare global emits o_g_name
                 let local = self.env.iter().skip(1).any(|s| s.contains_key(n));
                 if !local && self.globals.contains_key(n) {
@@ -957,5 +1057,753 @@ impl<'a> Gen<'a> {
             }
         }
         "0 /*badcall*/".into()
+    }
+
+    // ---------------- state-machine transform (susp fns) ----------------
+
+    fn new_label(&mut self) -> String {
+        self.label_ctr += 1;
+        format!("L{}", self.label_ctr)
+    }
+
+    fn fresh(&mut self, pfx: &str) -> String {
+        self.hoist_ctr += 1;
+        format!("{pfx}{}", self.hoist_ctr)
+    }
+
+    /// is `n` a suspend point callee (susp fn or blocking builtin)?
+    fn susp_name(&self, n: &str) -> bool {
+        self.susp.contains(n) || matches!(n, "recv" | "send" | "sleep")
+    }
+
+    /// is this expr a call to a susp callee?
+    fn call_is_susp(&self, e: &Expr) -> bool {
+        if let ExprKind::Call { f, .. } = &e.kind {
+            if let ExprKind::Ident(n) = &f.kind {
+                return self.susp_name(n);
+            }
+        }
+        false
+    }
+
+    fn expr_has_susp(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Call { f, args } => {
+                matches!(&f.kind, ExprKind::Ident(n) if self.susp_name(n))
+                    || args.iter().any(|a| self.expr_has_susp(a))
+                    || self.expr_has_susp(f)
+            }
+            ExprKind::Bin { l, r, .. } => self.expr_has_susp(l) || self.expr_has_susp(r),
+            ExprKind::Un { e, .. } => self.expr_has_susp(e),
+            ExprKind::Field { obj, .. } => self.expr_has_susp(obj),
+            ExprKind::StructLit { fields, .. } => {
+                fields.iter().any(|(_, fe)| self.expr_has_susp(fe))
+            }
+            _ => false,
+        }
+    }
+
+    fn eint(v: i64) -> Expr {
+        Expr { kind: ExprKind::Int(v), span: crate::diag::Span { lo: 0, hi: 0 } }
+    }
+
+    fn eident(n: &str, sp: crate::diag::Span) -> Expr {
+        Expr { kind: ExprKind::Ident(n.to_string()), span: sp }
+    }
+
+    /// lift susp calls out of expressions into fresh `let` statements so
+    /// every suspend point sits at statement level. `a && susp()` /
+    /// `a || susp()` desugar to `b := a; if (b) { b = susp() }` etc. —
+    /// eager hoisting would evaluate the call unconditionally.
+    fn hoist_expr(&mut self, e: &Expr, pre: &mut Vec<Stmt>) -> Expr {
+        match &e.kind {
+            ExprKind::Call { f, args } => {
+                let f2 = self.hoist_expr(f, pre);
+                let args2: Vec<Expr> =
+                    args.iter().map(|a| self.hoist_expr(a, pre)).collect();
+                let call = Expr {
+                    kind: ExprKind::Call { f: Box::new(f2), args: args2 },
+                    span: e.span,
+                };
+                if self.call_is_susp(&call) {
+                    let tmp = self.fresh("_h");
+                    pre.push(Stmt::Let {
+                        name: tmp.clone(),
+                        ty: None,
+                        init: call,
+                        span: e.span,
+                    });
+                    Self::eident(&tmp, e.span)
+                } else {
+                    call
+                }
+            }
+            ExprKind::Bin { op, l, r } => {
+                if matches!(op, BinOp::And | BinOp::Or) && self.expr_has_susp(r) {
+                    let l2 = self.hoist_expr(l, pre);
+                    let b = self.fresh("_b");
+                    pre.push(Stmt::Let {
+                        name: b.clone(),
+                        ty: None,
+                        init: l2,
+                        span: e.span,
+                    });
+                    let mut inner = Vec::new();
+                    let r2 = self.hoist_expr(r, &mut inner);
+                    inner.push(Stmt::Assign {
+                        target: Self::eident(&b, e.span),
+                        val: r2,
+                        span: e.span,
+                    });
+                    let cond = if *op == BinOp::And {
+                        Self::eident(&b, e.span)
+                    } else {
+                        Expr {
+                            kind: ExprKind::Un {
+                                op: UnOp::Not,
+                                e: Box::new(Self::eident(&b, e.span)),
+                            },
+                            span: e.span,
+                        }
+                    };
+                    pre.push(Stmt::If {
+                        cond,
+                        then: Block { stmts: inner, span: e.span },
+                        els: None,
+                        span: e.span,
+                    });
+                    Self::eident(&b, e.span)
+                } else {
+                    let l2 = self.hoist_expr(l, pre);
+                    let r2 = self.hoist_expr(r, pre);
+                    Expr {
+                        kind: ExprKind::Bin {
+                            op: *op,
+                            l: Box::new(l2),
+                            r: Box::new(r2),
+                        },
+                        span: e.span,
+                    }
+                }
+            }
+            ExprKind::Un { op, e: i } => Expr {
+                kind: ExprKind::Un { op: *op, e: Box::new(self.hoist_expr(i, pre)) },
+                span: e.span,
+            },
+            ExprKind::Field { obj, name } => Expr {
+                kind: ExprKind::Field {
+                    obj: Box::new(self.hoist_expr(obj, pre)),
+                    name: name.clone(),
+                },
+                span: e.span,
+            },
+            ExprKind::StructLit { name, fields } => Expr {
+                kind: ExprKind::StructLit {
+                    name: name.clone(),
+                    fields: fields
+                        .iter()
+                        .map(|(n, fe)| (n.clone(), self.hoist_expr(fe, pre)))
+                        .collect(),
+                },
+                span: e.span,
+            },
+            _ => e.clone(),
+        }
+    }
+
+    /// hoist a call expr's ARGS only — the call itself stays in place
+    fn hoist_call_args(&mut self, call: &Expr, pre: &mut Vec<Stmt>) -> Expr {
+        if let ExprKind::Call { f, args } = &call.kind {
+            let args2: Vec<Expr> =
+                args.iter().map(|a| self.hoist_expr(a, pre)).collect();
+            Expr {
+                kind: ExprKind::Call { f: f.clone(), args: args2 },
+                span: call.span,
+            }
+        } else {
+            self.hoist_expr(call, pre)
+        }
+    }
+
+    fn hoist_block(&mut self, b: &Block) -> Block {
+        let mut stmts = Vec::new();
+        for s in &b.stmts {
+            self.hoist_stmt(s, &mut stmts);
+        }
+        Block { stmts, span: b.span }
+    }
+
+    fn hoist_stmt(&mut self, s: &Stmt, out: &mut Vec<Stmt>) {
+        match s {
+            Stmt::Let { name, ty, init, span } => {
+                let mut pre = Vec::new();
+                let i2 = self.hoist_expr(init, &mut pre);
+                out.append(&mut pre);
+                out.push(Stmt::Let {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    init: i2,
+                    span: *span,
+                });
+            }
+            Stmt::Let2 { a, b, call, span } => {
+                let mut pre = Vec::new();
+                let c2 = self.hoist_call_args(call, &mut pre);
+                out.append(&mut pre);
+                out.push(Stmt::Let2 {
+                    a: clone_bind(a),
+                    b: clone_bind(b),
+                    call: c2,
+                    span: *span,
+                });
+            }
+            Stmt::Assign { target, val, span } => {
+                let mut pre = Vec::new();
+                let t2 = self.hoist_expr(target, &mut pre);
+                let v2 = self.hoist_expr(val, &mut pre);
+                out.append(&mut pre);
+                out.push(Stmt::Assign { target: t2, val: v2, span: *span });
+            }
+            Stmt::Expr(e) => {
+                let mut pre = Vec::new();
+                // a stmt-level susp call IS the suspend point — hoist its
+                // args, not the call itself
+                let e2 = self.hoist_call_args(e, &mut pre);
+                out.append(&mut pre);
+                out.push(Stmt::Expr(e2));
+            }
+            Stmt::Return { vals, span } => {
+                // `return suspPair()` forwards as [v, err] — desugar to let2
+                if vals.len() == 1 && self.call_is_susp(&vals[0]) {
+                    if let ExprKind::Call { f, .. } = &vals[0].kind {
+                        if let ExprKind::Ident(n) = &f.kind {
+                            if let Some((_, Ret::Pair(_))) = self.fns.get(n) {
+                                let mut pre = Vec::new();
+                                let c2 = self.hoist_call_args(&vals[0], &mut pre);
+                                out.append(&mut pre);
+                                let (pa, pe) = (self.fresh("_pa"), self.fresh("_pe"));
+                                out.push(Stmt::Let2 {
+                                    a: Bind::Name(pa.clone()),
+                                    b: Bind::Name(pe.clone()),
+                                    call: c2,
+                                    span: *span,
+                                });
+                                out.push(Stmt::Return {
+                                    vals: vec![
+                                        Self::eident(&pa, *span),
+                                        Self::eident(&pe, *span),
+                                    ],
+                                    span: *span,
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }
+                let mut pre = Vec::new();
+                let vals2: Vec<Expr> =
+                    vals.iter().map(|v| self.hoist_expr(v, &mut pre)).collect();
+                out.append(&mut pre);
+                out.push(Stmt::Return { vals: vals2, span: *span });
+            }
+            Stmt::If { cond, then, els, span } => {
+                let mut pre = Vec::new();
+                let c2 = self.hoist_expr(cond, &mut pre);
+                out.append(&mut pre);
+                out.push(Stmt::If {
+                    cond: c2,
+                    then: self.hoist_block(then),
+                    els: els.as_ref().map(|e| self.hoist_block(e)),
+                    span: *span,
+                });
+            }
+            Stmt::For { cond, body, span } => {
+                let mut pre = Vec::new();
+                let c2 = self.hoist_expr(cond, &mut pre);
+                out.append(&mut pre);
+                out.push(Stmt::For {
+                    cond: c2,
+                    body: self.hoist_block(body),
+                    span: *span,
+                });
+            }
+            Stmt::Scope { body, span } => out.push(Stmt::Scope {
+                body: self.hoist_block(body),
+                span: *span,
+            }),
+            Stmt::Unsafe { body, span } => out.push(Stmt::Unsafe {
+                body: self.hoist_block(body),
+                span: *span,
+            }),
+            Stmt::Spawn { call, pinned, blocking, span } => {
+                let mut pre = Vec::new();
+                let c2 = self.hoist_call_args(call, &mut pre);
+                out.append(&mut pre);
+                out.push(Stmt::Spawn {
+                    call: c2,
+                    pinned: *pinned,
+                    blocking: *blocking,
+                    span: *span,
+                });
+            }
+            Stmt::Defer { call, span } => {
+                let mut pre = Vec::new();
+                let c2 = self.hoist_call_args(call, &mut pre);
+                out.append(&mut pre);
+                out.push(Stmt::Defer { call: c2, span: *span });
+            }
+            Stmt::Break { span } => out.push(Stmt::Break { span: *span }),
+            Stmt::Continue { span } => out.push(Stmt::Continue { span: *span }),
+        }
+    }
+
+    fn hoist_fn(&mut self, f: &Fn) -> Fn {
+        Fn {
+            name: f.name.clone(),
+            ty_params: f.ty_params.clone(),
+            params: f.params.iter().map(|p| Param {
+                name: p.name.clone(),
+                ty: p.ty.clone(),
+                span: p.span,
+            }).collect(),
+            ret: f.ret.clone(),
+            body: f.body.as_ref().map(|b| self.hoist_block(b)),
+            span: f.span,
+        }
+    }
+
+    /// the callee behind a susp call: a leaf builtin or an oxl fn
+    /// (generics resolve to their instantiation's frame type)
+    fn susp_frame_ty(&mut self, name: &str, args: &[Expr]) -> (String, String) {
+        let mangled = match call_bindings(self, name, args) {
+            Some(bind) => {
+                let m = inst_name(name, &bind);
+                if !self.inst_done.contains(&m) {
+                    self.insts.push((name.to_string(), bind));
+                }
+                m
+            }
+            None => name.to_string(),
+        };
+        (format!("o_frm_{}", cname(&mangled)), format!("o_poll_{}", cname(&mangled)))
+    }
+
+    /// `fr->cur_scope = tls_scope; tls_scope = saved; return <code>;`
+    fn susp_ret(&mut self, code: &str) {
+        let _ = writeln!(
+            self.out,
+            "    fr->cur_scope = tls_scope; tls_scope = saved; return {code};"
+        );
+    }
+
+    /// emit a suspend point for an oxl-fn call: allocate the child frame,
+    /// poll it, propagate PENDING/CANCEL, bind the result on READY
+    fn fsusp_call(&mut self, name: &str, args: &[Expr], dest: FDest) {
+        let (frty, poll) = self.susp_frame_ty(name, args);
+        let frname = frty.trim_start_matches("o_frm_").to_string();
+        let pnames: Vec<String> = self
+            .ast_fns
+            .get(name)
+            .map(|af| af.params.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
+        let argvs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+        let k = self.state_ctr;
+        self.state_ctr += 1;
+        self.state_labels.push(k);
+        let _ = writeln!(self.out,
+            "    {{ struct {frty} *_c = (struct {frty} *)malloc(sizeof(struct {frty}));\n      ((RtFrame *)_c)->cur_scope = tls_scope; ((RtFrame *)_c)->state = 0;");
+        for (i, v) in argvs.iter().enumerate() {
+            if let Some(pn) = pnames.get(i) {
+                let _ = writeln!(self.out, "      _c->p_{pn} = {v};");
+            }
+        }
+        let _ = writeln!(self.out,
+            "      fr->child = (RtFrame *)_c; fr->state = {k};\n    s{k}: ;\n      _p = {poll}(fr->child, task);\n      if (_p != RT_READY) {{ fr->cur_scope = tls_scope; tls_scope = saved; return _p; }}");
+        match dest {
+            FDest::Void => {}
+            FDest::Field(fd) => {
+                let _ = writeln!(self.out,
+                    "      fr->{fd} = ((struct o_frm_{frname} *)fr->child)->result;");
+            }
+            FDest::Assign(tc) => {
+                let _ = writeln!(self.out,
+                    "      {tc} = ((struct o_frm_{frname} *)fr->child)->result;");
+            }
+            FDest::Pair(fa, fb) => {
+                let _ = writeln!(self.out,
+                    "      {{ struct o_ret_{frname} _r = ((struct o_frm_{frname} *)fr->child)->result;");
+                if let Some(fa) = fa {
+                    let _ = writeln!(self.out, "        fr->{fa} = _r.val;");
+                }
+                if let Some(fb) = fb {
+                    let _ = writeln!(self.out, "        fr->{fb} = _r.err;");
+                }
+                let _ = writeln!(self.out, "      }}");
+            }
+        }
+        let _ = writeln!(self.out, "      free(fr->child);\n    }}");
+    }
+
+    /// leaf suspends: recv/send/sleep — park on the chan/timer wait queue
+    fn fsusp_leaf(&mut self, name: &str, args: &[Expr], dest: FDest) {
+        let argvs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+        let k = self.state_ctr;
+        self.state_ctr += 1;
+        self.state_labels.push(k);
+        let _ = writeln!(self.out,
+            "    if (rt_cancelled()) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_CANCEL; }}");
+        let _ = writeln!(self.out, "    fr->state = {k};");
+        let poll = match name {
+            "recv" => format!("rt_recv_poll({}, task)", argvs[0]),
+            "send" => format!("rt_send_poll({}, {}, task)", argvs[0], argvs[1]),
+            _ => format!("rt_sleep_poll({}, task)", argvs[0]),
+        };
+        let _ = writeln!(self.out,
+            "    if ({poll} == RT_PENDING) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }}");
+        let _ = writeln!(self.out, "    s{k}: ;");
+        match dest {
+            FDest::Field(fd) => {
+                let _ = writeln!(self.out, "    fr->{fd} = rt_task_data(task);");
+            }
+            FDest::Assign(tc) => {
+                let _ = writeln!(self.out, "    {tc} = rt_task_data(task);");
+            }
+            _ => {}
+        }
+    }
+
+    /// is the stmt's payload call a suspend point? returns the callee name
+    fn stmt_susp_call<'x>(&self, e: &'x Expr) -> Option<&'x str> {
+        if let ExprKind::Call { f, .. } = &e.kind {
+            if let ExprKind::Ident(n) = &f.kind {
+                if self.susp_name(n) {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    }
+
+    /// register a frame field for an oxl local, return its slot name
+    fn fslot(&mut self, name: &str, cty: &str) -> String {
+        let slot = format!("v{}", self.frame_decls.len());
+        self.frame_decls.push(format!("{cty} {slot};"));
+        self.fslots
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), slot.clone());
+        slot
+    }
+
+    /// flat label/goto emission of a suspendable fn body into self.out
+    /// (func_frame swaps buffers so this lands in frame_out)
+    fn fstmts(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            self.fstmt(s);
+        }
+    }
+
+    fn fstmt(&mut self, s: &Stmt) {
+        match s {
+            Stmt::Let { name, ty, init, .. } => {
+                if self.call_is_susp(init) {
+                    let t = match ty {
+                        Some(tr) => self.ty_of_ref(tr),
+                        None => self.expr_ty(init),
+                    };
+                    let ct = self.cty(&t);
+                    let fd = self.fslot(name, &ct);
+                    self.env.last_mut().unwrap().insert(name.clone(), t);
+                    if let ExprKind::Call { f, args } = &init.kind {
+                        if let ExprKind::Ident(n) = &f.kind {
+                            let n = n.clone();
+                            if matches!(n.as_str(), "recv" | "send" | "sleep") {
+                                self.fsusp_leaf(&n, args, FDest::Field(fd));
+                            } else {
+                                self.fsusp_call(&n, args, FDest::Field(fd));
+                            }
+                        }
+                    }
+                } else {
+                    let t = match ty {
+                        Some(tr) => self.ty_of_ref(tr),
+                        None => self.expr_ty(init),
+                    };
+                    let ct = self.cty(&t);
+                    let v = self.expr(init);
+                    let fd = self.fslot(name, &ct);
+                    self.env.last_mut().unwrap().insert(name.clone(), t);
+                    let _ = writeln!(self.out, "    fr->{fd} = {v};");
+                }
+            }
+            Stmt::Let2 { a, b, call, .. } => {
+                if let ExprKind::Call { f, args } = &call.kind {
+                    if let ExprKind::Ident(fn_name) = &f.kind {
+                        let fn_name = fn_name.clone();
+                        if self.susp.contains(&fn_name) {
+                            let fa = match a {
+                                Bind::Name(na) => {
+                                    let vt = match self.fns.get(&fn_name).map(|x| x.1.clone()) {
+                                        Some(Ret::Pair(t)) => {
+                                            match call_bindings(self, &fn_name, args) {
+                                                Some(bind) => {
+                                                    let m: HashMap<String, Ty> =
+                                                        bind.into_iter().collect();
+                                                    subst_ty(&t, &m)
+                                                }
+                                                None => self.dt(&t),
+                                            }
+                                        }
+                                        _ => Ty::Unknown,
+                                    };
+                                    let ct = self.cty(&vt);
+                                    let fd = self.fslot(na, &ct);
+                                    self.env.last_mut().unwrap().insert(na.clone(), vt);
+                                    Some(fd)
+                                }
+                                Bind::Blank => None,
+                            };
+                            let fb = match b {
+                                Bind::Name(nb) => {
+                                    let fd = self.fslot(nb, "int64_t");
+                                    self.env
+                                        .last_mut()
+                                        .unwrap()
+                                        .insert(nb.clone(), Ty::Err);
+                                    Some(fd)
+                                }
+                                Bind::Blank => None,
+                            };
+                            self.fsusp_call(&fn_name, args, FDest::Pair(fa, fb));
+                            return;
+                        }
+                    }
+                }
+                // non-susp path: same shape as stmt() but targets are fields
+                if let ExprKind::Call { f, args } = &call.kind {
+                    if let ExprKind::Ident(fn_name) = &f.kind {
+                        let n = self.tmp();
+                        let c = self.expr(call);
+                        let (ret_name, bind) = match call_bindings(self, fn_name, args) {
+                            Some(bind) => (inst_name(fn_name, &bind), Some(bind)),
+                            None => (fn_name.clone(), None),
+                        };
+                        let _ = writeln!(self.out, "    {{ struct o_ret_{} _r{n} = {c};", cname(&ret_name));
+                        let vt = match self.fns.get(fn_name).map(|x| x.1.clone()) {
+                            Some(Ret::Pair(t)) => match &bind {
+                                Some(bind) => {
+                                    let m: HashMap<String, Ty> =
+                                        bind.iter().cloned().collect();
+                                    subst_ty(&t, &m)
+                                }
+                                None => self.dt(&t),
+                            },
+                            _ => Ty::Unknown,
+                        };
+                        if let Bind::Name(na) = a {
+                            let ct = self.cty(&vt);
+                            let fd = self.fslot(na, &ct);
+                            self.env.last_mut().unwrap().insert(na.clone(), vt);
+                            let _ = writeln!(self.out, "      fr->{fd} = _r{n}.val;");
+                        }
+                        if let Bind::Name(nb) = b {
+                            let fd = self.fslot(nb, "int64_t");
+                            self.env
+                                .last_mut()
+                                .unwrap()
+                                .insert(nb.clone(), Ty::Err);
+                            let _ = writeln!(self.out, "      fr->{fd} = _r{n}.err;");
+                        }
+                        let _ = writeln!(self.out, "    }}");
+                    }
+                }
+            }
+            Stmt::Assign { target, val, .. } => {
+                if self.call_is_susp(val) {
+                    let tc = self.expr(target);
+                    if let ExprKind::Call { f, args } = &val.kind {
+                        if let ExprKind::Ident(n) = &f.kind {
+                            let n = n.clone();
+                            if matches!(n.as_str(), "recv" | "send" | "sleep") {
+                                self.fsusp_leaf(&n, args, FDest::Assign(tc));
+                            } else {
+                                self.fsusp_call(&n, args, FDest::Assign(tc));
+                            }
+                        }
+                    }
+                } else {
+                    let t = self.expr(target);
+                    let v = self.expr(val);
+                    let _ = writeln!(self.out, "    {t} = {v};");
+                }
+            }
+            Stmt::Expr(e) => {
+                if self.call_is_susp(e) {
+                    if let ExprKind::Call { f, args } = &e.kind {
+                        if let ExprKind::Ident(n) = &f.kind {
+                            let n = n.clone();
+                            if matches!(n.as_str(), "recv" | "send" | "sleep") {
+                                self.fsusp_leaf(&n, args, FDest::Void);
+                            } else {
+                                self.fsusp_call(&n, args, FDest::Void);
+                            }
+                            return;
+                        }
+                    }
+                }
+                let v = self.expr(e);
+                let _ = writeln!(self.out, "    {v};");
+            }
+            Stmt::Defer { call, .. } => {
+                self.defers.push(call.clone());
+            }
+            Stmt::Return { vals, .. } => {
+                self.emit_defers();
+                if !vals.is_empty() {
+                    if self.cur_ret_pair && vals.len() == 2 {
+                        let v = self.expr(&vals[0]);
+                        let e = self.expr(&vals[1]);
+                        let cf = self.cur_fn.clone();
+                        let _ = writeln!(self.out,
+                            "    fr->result = (struct o_ret_{}){{ {v}, {e} }};", cname(&cf));
+                    } else {
+                        let v = self.expr(&vals[0]);
+                        let _ = writeln!(self.out, "    fr->result = {v};");
+                    }
+                }
+                self.susp_ret("RT_READY");
+            }
+            Stmt::If { cond, then, els, .. } => {
+                let c = self.expr(cond);
+                let lelse = self.new_label();
+                let lend = self.new_label();
+                let _ = writeln!(self.out, "    if (!({c})) goto {lelse};");
+                self.env.push(HashMap::new());
+                self.fslots.push(HashMap::new());
+                self.fstmts(&then.stmts);
+                self.fslots.pop();
+                self.env.pop();
+                let _ = writeln!(self.out, "    goto {lend};\n    {lelse}: ;");
+                if let Some(e) = els {
+                    self.env.push(HashMap::new());
+                    self.fslots.push(HashMap::new());
+                    self.fstmts(&e.stmts);
+                    self.fslots.pop();
+                    self.env.pop();
+                }
+                let _ = writeln!(self.out, "    {lend}: ;");
+            }
+            Stmt::For { cond, body, .. } => {
+                let lhead = self.new_label();
+                let lend = self.new_label();
+                let c = self.expr(cond);
+                let _ = writeln!(self.out, "    {lhead}: ;\n    if (!({c})) goto {lend};");
+                self.loop_labels.push((lhead.clone(), lend.clone()));
+                self.env.push(HashMap::new());
+                self.fslots.push(HashMap::new());
+                self.fstmts(&body.stmts);
+                self.fslots.pop();
+                self.env.pop();
+                self.loop_labels.pop();
+                let _ = writeln!(self.out, "    goto {lhead};\n    {lend}: ;");
+            }
+            Stmt::Break { .. } => {
+                if let Some((_, lend)) = self.loop_labels.last() {
+                    let _ = writeln!(self.out, "    goto {lend};");
+                }
+            }
+            Stmt::Continue { .. } => {
+                if let Some((lhead, _)) = self.loop_labels.last() {
+                    let _ = writeln!(self.out, "    goto {lhead};");
+                }
+            }
+            Stmt::Scope { body, .. } => {
+                let i = self.scope_decls.len();
+                self.scope_decls.push(format!("RtScope sc{i};"));
+                let _ = writeln!(self.out, "    rt_scope_enter(&fr->sc{i});");
+                self.env.push(HashMap::new());
+                self.fslots.push(HashMap::new());
+                self.fstmts(&body.stmts);
+                self.fslots.pop();
+                self.env.pop();
+                let k = self.state_ctr;
+                self.state_ctr += 1;
+                self.state_labels.push(k);
+                let _ = writeln!(self.out,
+                    "    fr->state = {k};\n    if (rt_scope_join_poll(&fr->sc{i}, task) == RT_PENDING) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }}\n    s{k}: ;\n    {{ int64_t _e = rt_scope_finish(&fr->sc{i});\n      if (_e) {{ if (fr->sc{i}.parent) {{ fr->sc{i}.parent->trapped = 1; fr->sc{i}.parent->err = _e; }} else {{ fprintf(stderr, \"trap %lld escaped top scope\\n\", (long long)_e); abort(); }} }} }}");
+            }
+            Stmt::Spawn { call, blocking, .. } => self.spawn(call, *blocking),
+            Stmt::Unsafe { body, .. } => {
+                self.env.push(HashMap::new());
+                self.fslots.push(HashMap::new());
+                self.fstmts(&body.stmts);
+                self.fslots.pop();
+                self.env.pop();
+            }
+        }
+    }
+
+    /// emit `struct o_frm_<e>` + `int o_poll_<e>` driver for a susp fn
+    /// (or its monomorphized instantiation when `ename` is mangled)
+    fn func_frame(&mut self, f: &Fn, ename: &str) {
+        let hoisted = self.hoist_fn(f);
+        self.in_frame = true;
+        self.fslots = vec![HashMap::new()];
+        self.frame_decls = Vec::new();
+        self.scope_decls = Vec::new();
+        self.state_labels = Vec::new();
+        self.state_ctr = 1;
+        self.loop_labels = Vec::new();
+        self.cur_fn = ename.to_string();
+        self.cur_ret_pair = matches!(f.ret, RetTy::Pair(_));
+        self.defers.clear();
+        self.env.push(HashMap::new());
+        let mut pfields = String::new();
+        for p in &f.params {
+            let t = self.ty_of_ref(&p.ty);
+            let _ = write!(pfields, " {} p_{};", self.cty(&t), p.name);
+            self.env.last_mut().unwrap().insert(p.name.clone(), t);
+            self.fslots[0].insert(p.name.clone(), format!("p_{}", p.name));
+        }
+        let res_field = match &f.ret {
+            RetTy::Void => String::new(),
+            RetTy::One(t) => format!(" {} result;", self.cty(&self.ty_of_ref(t))),
+            RetTy::Pair(_) => format!(" struct o_ret_{} result;", cname(ename)),
+        };
+        let saved_out = std::mem::take(&mut self.out);
+        self.fslots.push(HashMap::new());
+        if let Some(b) = &hoisted.body {
+            self.fstmts(&b.stmts);
+        }
+        self.fslots.pop();
+        self.emit_defers();
+        let body = std::mem::replace(&mut self.out, saved_out);
+        self.env.pop();
+        let mut cases = String::from("case 0: goto s0;");
+        for k in &self.state_labels {
+            let _ = write!(cases, " case {k}: goto s{k};");
+        }
+        let ce = cname(ename);
+        let _ = writeln!(self.frame_out,
+            "struct o_frm_{ce} {{ RtScope *cur_scope; int state; RtFrame *child;{res_field}{pfields} {}}};\nint o_poll_{ce}(RtFrame *_f, RtTask *task);\n",
+            self.frame_decls.join(" " ) + " " + &self.scope_decls.join(" "));
+        let _ = writeln!(self.frame_out,
+            "int o_poll_{ce}(RtFrame *_f, RtTask *task) {{\n    struct o_frm_{ce} *fr = (struct o_frm_{ce} *)_f;\n    RtScope *saved = tls_scope;\n    tls_scope = fr->cur_scope;\n    int _p;\n    switch (fr->state) {{ {cases} default: tls_scope = saved; return RT_READY; }}\n    s0: ;\n{body}    fr->cur_scope = tls_scope; tls_scope = saved; return RT_READY;\n}}\n");
+        self.in_frame = false;
+    }
+}
+
+/// where a suspend point's result lands
+enum FDest {
+    Void,
+    Field(String),
+    Assign(String),
+    Pair(Option<String>, Option<String>),
+}
+
+fn clone_bind(b: &Bind) -> Bind {
+    match b {
+        Bind::Name(n) => Bind::Name(n.clone()),
+        Bind::Blank => Bind::Blank,
     }
 }

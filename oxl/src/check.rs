@@ -125,7 +125,9 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
     };
     ck.register(c);
     ck.check_items(c);
-    Checked { suspend: ck.suspend_set(c) }
+    let checked = Checked { suspend: ck.suspend_set(c) };
+    ck.check_suspend_rules(c, &checked.suspend);
+    checked
 }
 
 impl<'a> Checker<'a> {
@@ -897,7 +899,9 @@ impl<'a> Checker<'a> {
         let mut seeds: HashSet<String> = HashSet::new();
         fn block_has(b: &Block) -> bool {
             b.stmts.iter().any(|s| match s {
-                Stmt::Spawn { .. } | Stmt::Scope { .. } => true,
+                Stmt::Scope { .. } => true,
+                // spawn doesn't suspend the caller — but its args might
+                Stmt::Spawn { call, .. } => expr_susp(call),
                 Stmt::Defer { call, .. } => expr_susp(call),
                 Stmt::Expr(e) | Stmt::Assign { val: e, .. } | Stmt::Let { init: e, .. } => {
                     expr_susp(e)
@@ -952,6 +956,70 @@ impl<'a> Checker<'a> {
             }
         }
         susp
+    }
+
+    /// rules that need the computed suspend set:
+    /// - `defer` may not capture a suspend point (it runs during unwind)
+    /// - global initializers may not suspend (no task drives them)
+    fn check_suspend_rules(&mut self, c: &Crate, susp: &HashSet<String>) {
+        fn expr_has_susp(e: &Expr, susp: &HashSet<String>) -> bool {
+            match &e.kind {
+                ExprKind::Call { f, args } => {
+                    let susp_callee = matches!(&f.kind,
+                        ExprKind::Ident(n)
+                            if susp.contains(n) || n == "recv" || n == "send" || n == "sleep");
+                    susp_callee
+                        || args.iter().any(|a| expr_has_susp(a, susp))
+                        || matches!(&f.kind, ExprKind::Call { .. } | ExprKind::Field { .. })
+                }
+                ExprKind::Bin { l, r, .. } => {
+                    expr_has_susp(l, susp) || expr_has_susp(r, susp)
+                }
+                ExprKind::Un { e, .. } => expr_has_susp(e, susp),
+                ExprKind::Field { obj, .. } => expr_has_susp(obj, susp),
+                ExprKind::StructLit { fields, .. } => {
+                    fields.iter().any(|(_, e)| expr_has_susp(e, susp))
+                }
+                _ => false,
+            }
+        }
+        fn walk_block(b: &Block, susp: &HashSet<String>, diags: &mut Diags) {
+            for s in &b.stmts {
+                match s {
+                    Stmt::Defer { call, span } => {
+                        if expr_has_susp(call, susp) {
+                            diags.push(Diag::err(*span, "check",
+                                "`defer` cannot capture a suspending call — it runs during unwind"));
+                        }
+                    }
+                    Stmt::If { then, els, .. } => {
+                        walk_block(then, susp, diags);
+                        if let Some(e) = els {
+                            walk_block(e, susp, diags);
+                        }
+                    }
+                    Stmt::For { body, .. } | Stmt::Scope { body, .. }
+                    | Stmt::Unsafe { body, .. } => walk_block(body, susp, diags),
+                    _ => {}
+                }
+            }
+        }
+        for it in &c.items {
+            match it {
+                Item::Fn(f) => {
+                    if let Some(b) = &f.body {
+                        walk_block(b, susp, self.diags);
+                    }
+                }
+                Item::Global(g) => {
+                    if expr_has_susp(&g.init, susp) {
+                        self.diags.push(Diag::err(g.span, "check",
+                            "global initializer cannot suspend — move it into fn main"));
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 

@@ -330,12 +330,12 @@ fn compile_mode(src_file: &str, test_mode: bool) -> Result<String, ()> {
     // note: semantic diagnostics in imported files map spans against the
     // entry file's source (v0 limitation — spans are per-crate)
     let mut diags = diag::Diags::new(src_file, src);
-    check::check(&krate, &mut diags);
+    let checked = check::check(&krate, &mut diags);
     diags.report();
     if diags.has_errors() {
         return Err(());
     }
-    Ok(codegen::generate_mode(&krate, test_mode))
+    Ok(codegen::generate_mode(&krate, test_mode, &checked.suspend))
 }
 
 fn compile(src_file: &str) -> Result<String, ()> {
