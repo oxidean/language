@@ -112,7 +112,7 @@ stdlib grows further.
 
 ## Track E — Tooling (parallel-safe)
 
-### Task E1: LSP hover/goto + position index [not started]
+### Task E1: LSP hover/goto + position index [done]
 
 `items/e1-lsp-hover.md`. The remaining DX gap.
 

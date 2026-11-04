@@ -12,6 +12,10 @@ use std::process::{exit, Command, Stdio};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|a| a.as_str()) == Some("lsp") {
+        cmd_lsp();
+        return;
+    }
     if args.len() < 3 {
         eprintln!("oxl — one toolchain binary\n\n  oxl build <file.oxl> [-o out]\n  oxl run <file.oxl>\n  oxl test <file.oxl>\n  oxl fmt <file.oxl>\n  oxl doc <file.oxl>\n  oxl lsp");
         exit(2);
@@ -304,21 +308,26 @@ fn recv_base(t: &ast::TyRef) -> Option<String> {
     }
 }
 
-fn load_crate(path: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> Option<ast::Crate> {
+fn load_crate(
+    path: &Path,
+    seen: &mut std::collections::HashSet<PathBuf>,
+) -> Option<(ast::Crate, Vec<PathBuf>)> {
     load_mod(path, "", seen, true)
 }
 
 /// parse a file, recursively qualify its imports under their module stems,
 /// then qualify this file's own decls as `mod.name` (root: modname "").
+/// The returned Vec<PathBuf> is item-parallel: the file each item's spans
+/// index into (imported items keep their own file's coordinates).
 fn load_mod(
     path: &Path,
     modname: &str,
     seen: &mut std::collections::HashSet<PathBuf>,
     loud: bool,
-) -> Option<ast::Crate> {
+) -> Option<(ast::Crate, Vec<PathBuf>)> {
     let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon.clone()) {
-        return Some(ast::Crate { items: Vec::new() });
+        return Some((ast::Crate { items: Vec::new() }, Vec::new()));
     }
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -361,6 +370,7 @@ fn load_mod(
         }
     }
     let mut items = Vec::new();
+    let mut item_files: Vec<PathBuf> = Vec::new();
     // pass 1: resolve every import first so its alias/selective bindings are
     // visible to all decls regardless of source order
     for it in &krate.items {
@@ -375,8 +385,9 @@ fn load_mod(
                     for s in &imp.selective {
                         renames.insert(s.clone(), format!("{stem}.{s}"));
                     }
-                    if let Some(sub) = load_mod(&p, &stem, seen, loud) {
+                    if let Some((sub, sub_files)) = load_mod(&p, &stem, seen, loud) {
                         items.extend(sub.items);
+                        item_files.extend(sub_files);
                     }
                 }
                 None if loud => {
@@ -387,6 +398,7 @@ fn load_mod(
         }
     }
     // pass 2: qualify own decls against the complete maps
+    let own = krate.items.len();
     for it in krate.items {
         match it {
             ast::Item::Import(_) => {}
@@ -396,7 +408,9 @@ fn load_mod(
             }
         }
     }
-    Some(ast::Crate { items })
+    item_files.extend(std::iter::repeat(path.to_path_buf()).take(items.len() - item_files.len()));
+    debug_assert_eq!(items.len(), item_files.len(), "{own} own items");
+    Some((ast::Crate { items }, item_files))
 }
 
 /// apply the module's rename/alias maps to one non-import item in place
@@ -503,7 +517,7 @@ fn qualify_item(
 
 fn compile_mode(src_file: &str, test_mode: bool) -> Result<String, ()> {
     let mut seen = std::collections::HashSet::new();
-    let krate = match load_crate(Path::new(src_file), &mut seen) {
+    let (krate, item_files) = match load_crate(Path::new(src_file), &mut seen) {
         Some(k) => k,
         None => return Err(()),
     };
@@ -517,7 +531,8 @@ fn compile_mode(src_file: &str, test_mode: bool) -> Result<String, ()> {
     // note: semantic diagnostics in imported files map spans against the
     // entry file's source (v0 limitation — spans are per-crate)
     let mut diags = diag::Diags::new(src_file, src);
-    let checked = check::check(&krate, &mut diags);
+    let files: Vec<String> = item_files.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let checked = check::check(&krate, &files, &mut diags);
     diags.report();
     if diags.has_errors() {
         return Err(());
@@ -694,7 +709,12 @@ fn cmd_doc(args: &[String]) {
 
 /// analyze one in-memory buffer (imports resolved from disk); returns
 /// (line, col, message) diagnostics for the buffer itself
-fn analyze_source(path: &Path, src: &str) -> Vec<(usize, usize, String)> {
+struct Analysis {
+    diags: Vec<(usize, usize, String)>,
+    index: check::Index,
+}
+
+fn analyze(path: &Path, src: &str) -> Analysis {
     let mut diags = diag::Diags::new(path.to_string_lossy(), src);
     let toks = lexer::lex(src, &mut diags);
     let krate = parser::parse(&toks, &mut diags);
@@ -703,44 +723,61 @@ fn analyze_source(path: &Path, src: &str) -> Vec<(usize, usize, String)> {
     let mut renames: std::collections::HashMap<String, String> = Default::default();
     let mut aliases: std::collections::HashMap<String, String> = Default::default();
     let mut items = Vec::new();
+    let mut item_files: Vec<PathBuf> = Vec::new();
     for it in &krate.items {
         if let ast::Item::Import(imp) = it {
             if let Some(p) = resolve_import(path, &imp.path) {
                 let stem = mod_stem(&p);
-                aliases.insert(imp.alias.clone().unwrap_or_else(|| stem.clone()), stem.clone());
+                let alias = imp.alias.clone().unwrap_or_else(|| stem.clone());
+                aliases.insert(alias.clone(), stem.clone());
                 if imp.alias.is_none() {
                     aliases.insert(stem.clone(), stem.clone());
                 }
                 for s in &imp.selective {
                     renames.insert(s.clone(), format!("{stem}.{s}"));
                 }
-                if let Some(sub) = load_mod(&p, &stem, &mut seen, false) {
+                if let Some((sub, sub_files)) = load_mod(&p, &stem, &mut seen, false) {
                     items.extend(sub.items);
+                    item_files.extend(sub_files);
                 }
             }
         }
     }
+    let mut own = 0;
     for mut it in krate.items {
         if !matches!(it, ast::Item::Import(_)) {
             qualify_item(&mut it, &renames, &aliases);
             items.push(it);
+            own += 1;
         }
     }
-    check::check(&ast::Crate { items }, &mut diags);
-    diags
-        .list
-        .iter()
-        .map(|d| {
-            let (l, c) = diags.line_col(d.span.lo);
-            (l, c, format!("[{}] {}", d.code, d.msg))
-        })
-        .collect()
+    item_files.extend(std::iter::repeat(path.to_path_buf()).take(own));
+    let files: Vec<String> = item_files.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let checked = check::check(&ast::Crate { items }, &files, &mut diags);
+    if std::env::var("OXL_IDX_DEBUG").is_ok() {
+        for u in &checked.index.uses {
+            eprintln!("USE {} {:?} -> {} {:?} `{}`", u.file, u.span, u.def_file, u.def_span, u.sig);
+        }
+    }
+    Analysis {
+        diags: diags
+            .list
+            .iter()
+            .map(|d| {
+                let (l, c) = diags.line_col(d.span.lo);
+                (l, c, format!("[{}] {}", d.code, d.msg))
+            })
+            .collect(),
+        index: checked.index,
+    }
 }
 
-/// naive JSON string-field extraction (v0 — no serde dep)
+/// naive JSON string-field extraction (v0 — no serde dep); tolerates
+/// `"k": "v"` and `"k":"v"` spacing
 fn json_str<'a>(body: &'a str, key: &str) -> Option<String> {
-    let pat = format!("\"{key}\":\"");
-    let i = body.find(&pat)? + pat.len();
+    let pat = format!("\"{key}\":");
+    let at = body.find(&pat)? + pat.len();
+    let i = at + body[at..].find('"')? + 1;
     let mut out = String::new();
     let mut esc = false;
     for c in body[i..].chars() {
@@ -764,9 +801,7 @@ fn json_str<'a>(body: &'a str, key: &str) -> Option<String> {
     None
 }
 
-fn publish_diags(stdout: &mut impl Write, uri: &str, src: &str) {
-    let path = Path::new(uri.strip_prefix("file://").unwrap_or(uri));
-    let list = analyze_source(path, src);
+fn publish_diags(stdout: &mut impl Write, uri: &str, list: &[(usize, usize, String)]) {
     let mut ds = String::new();
     for (i, (l, c, msg)) in list.iter().enumerate() {
         if i > 0 {
@@ -786,11 +821,74 @@ fn publish_diags(stdout: &mut impl Write, uri: &str, src: &str) {
     stdout.flush().unwrap();
 }
 
-// --- stdio LSP: diagnostics on open/change/save ---
+/// naive JSON number-field extraction (matching json_str's first-hit)
+fn json_num(body: &str, key: &str) -> Option<usize> {
+    let pat = format!("\"{key}\":");
+    let i = body.find(&pat)? + pat.len();
+    let rest = &body[i..];
+    let end = rest.find([',', '}', ']']).unwrap_or(rest.len());
+    rest[..end].trim().parse().ok()
+}
+
+/// LSP position (0-based line, 0-based char col) → byte offset.
+/// Cols are chars, not UTF-16 units (v0 — non-BMP text misaligns).
+fn lsp_offset(src: &str, line: usize, col: usize) -> u32 {
+    let mut l = 0usize;
+    for (i, c) in src.char_indices() {
+        if l == line {
+            // scan `col` chars forward on this line
+            let mut off = i;
+            let mut k = 0;
+            for (j, c2) in src[i..].char_indices() {
+                if k == col || c2 == '\n' {
+                    return off as u32;
+                }
+                k += 1;
+                off = i + j + c2.len_utf8();
+            }
+            return off as u32;
+        }
+        if c == '\n' {
+            l += 1;
+        }
+    }
+    src.len() as u32
+}
+
+/// byte offset → LSP (0-based line, 0-based char col)
+fn lsp_line_col(src: &str, off: u32) -> (usize, usize) {
+    let (mut l, mut c) = (0usize, 0usize);
+    for (i, ch) in src.char_indices() {
+        if i as u32 >= off {
+            break;
+        }
+        if ch == '\n' {
+            l += 1;
+            c = 0;
+        } else {
+            c += 1;
+        }
+    }
+    (l, c)
+}
+
+/// the index entry with the smallest span containing `off`
+fn index_at<'a>(a: &'a Analysis, file: &str, off: u32) -> Option<&'a check::UseRec> {
+    a.index
+        .uses
+        .iter()
+        .filter(|u| u.file == file && u.span.lo <= off && off < u.span.hi)
+        .min_by_key(|u| u.span.hi - u.span.lo)
+}
+
+// --- stdio LSP: diagnostics + hover/definition over the position index ---
 fn cmd_lsp() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut r = std::io::BufReader::new(stdin.lock());
+    // per-doc state: the buffer text and the analysis built from it
+    let mut docs: std::collections::HashMap<String, (String, Analysis)> =
+        std::collections::HashMap::new();
     loop {
         // read headers
         let mut len = 0usize;
@@ -821,16 +919,68 @@ fn cmd_lsp() {
         }
         if body.contains("didOpen") || body.contains("didChange") {
             if let (Some(uri), Some(text)) = (json_str(&body, "uri"), json_str(&body, "text")) {
-                publish_diags(&mut stdout, &uri, &text);
+                let path = Path::new(uri.strip_prefix("file://").unwrap_or(&uri));
+                let a = analyze(path, &text);
+                publish_diags(&mut stdout, &uri, &a.diags);
+                docs.insert(uri, (text, a));
+            }
+            continue;
+        }
+        if body.contains("didClose") {
+            if let Some(uri) = json_str(&body, "uri") {
+                docs.remove(&uri);
             }
             continue;
         }
         let resp = if body.contains("\"initialize\"") {
             let id = extract_id(&body);
-            format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"capabilities\":{{\"textDocumentSync\":1}}}}}}")
+            format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"capabilities\":{{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true}}}}}}")
         } else if body.contains("\"shutdown\"") {
             let id = extract_id(&body);
             format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":null}}")
+        } else if body.contains("textDocument/hover") || body.contains("textDocument/definition") {
+            let id = extract_id(&body);
+            let uri = json_str(&body, "uri").unwrap_or_default();
+            let (line, col) = (
+                json_num(&body, "line").unwrap_or(0),
+                json_num(&body, "character").unwrap_or(0),
+            );
+            let def = body.contains("textDocument/definition");
+            let file = uri.strip_prefix("file://").unwrap_or(&uri).to_string();
+            let hit = docs.get(&uri).and_then(|(src, a)| {
+                index_at(a, &file, lsp_offset(src, line, col))
+            });
+            match (hit, def) {
+                (Some(u), false) => format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"contents\":{{\"kind\":\"plaintext\",\"value\":\"{}\"}}}}}}",
+                    u.sig.replace('\\', "\\\\").replace('"', "\\\"")
+                ),
+                (Some(u), true) => {
+                    // def spans index into their own file's source — the
+                    // open doc uses its buffer, imports read from disk
+                    let src = docs
+                        .get(&uri)
+                        .map(|(s, _)| s.clone())
+                        .filter(|_| u.def_file == file)
+                        .or_else(|| std::fs::read_to_string(&u.def_file).ok())
+                        .unwrap_or_default();
+                    let (l0, c0) = lsp_line_col(&src, u.def_span.lo);
+                    let (l1, c1) = lsp_line_col(&src, u.def_span.hi);
+                    let uri2 = if u.def_file.starts_with('/') {
+                        format!("file://{}", u.def_file)
+                    } else {
+                        // relative decl paths resolve against the doc dir
+                        let base = Path::new(&file).parent().unwrap_or(Path::new("."));
+                        let p = base.join(&u.def_file);
+                        let p = p.canonicalize().unwrap_or(p);
+                        format!("file://{}", p.display())
+                    };
+                    format!(
+                        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"uri\":\"{uri2}\",\"range\":{{\"start\":{{\"line\":{l0},\"character\":{c0}}},\"end\":{{\"line\":{l1},\"character\":{c1}}}}}}}}}"
+                    )
+                }
+                (None, _) => format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":null}}"),
+            }
         } else {
             continue;
         };

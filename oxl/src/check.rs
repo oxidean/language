@@ -93,13 +93,33 @@ struct IfaceDef {
 enum MTarget {
     /// direct call to the qualified `T.m` fn (receiver prepended)
     Fn(String),
-    /// vtable dispatch — the iface decl's params + ret
-    Vt(Vec<Ty>, Ret),
+    /// vtable dispatch — `I.m` key + the iface decl's params + ret
+    Vt(String, Vec<Ty>, Ret),
     NoMethod,
+}
+
+/// one recorded use-site → its decl (E1 position index)
+#[derive(Clone, Debug)]
+pub struct UseRec {
+    /// file the use-span indexes into
+    pub file: String,
+    pub span: Span,
+    /// hover text (`fn f(x: int) -> str`, `x: own Point`, ...)
+    pub sig: String,
+    /// decl location — `None` for builtin/lang decls with no source
+    pub def_file: String,
+    pub def_span: Span,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Index {
+    /// use-site records (use spans AND decl-name spans — hover works on both)
+    pub uses: Vec<UseRec>,
 }
 
 pub struct Checked {
     pub suspend: HashSet<String>,
+    pub index: Index,
 }
 
 struct Env {
@@ -108,18 +128,27 @@ struct Env {
     /// value flows somewhere ownership transfers (call arg, return,
     /// field store, channel send). Parallel to `scopes`.
     moved: Vec<HashMap<String, bool>>,
+    /// E1: binding-site span per name — hover/goto on locals resolves
+    /// to the visible binding's span. Parallel to `scopes`.
+    decls: Vec<HashMap<String, Span>>,
 }
 impl Env {
     fn new() -> Self {
-        Env { scopes: vec![HashMap::new()], moved: vec![HashMap::new()] }
+        Env {
+            scopes: vec![HashMap::new()],
+            moved: vec![HashMap::new()],
+            decls: vec![HashMap::new()],
+        }
     }
     fn push(&mut self) {
         self.scopes.push(HashMap::new());
         self.moved.push(HashMap::new());
+        self.decls.push(HashMap::new());
     }
     fn pop(&mut self) {
         self.scopes.pop();
         self.moved.pop();
+        self.decls.pop();
     }
     fn get(&self, n: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(n).cloned())
@@ -127,10 +156,15 @@ impl Env {
     fn names(&self) -> HashSet<String> {
         self.scopes.iter().flat_map(|s| s.keys().cloned()).collect()
     }
-    fn set(&mut self, n: String, t: Ty) {
+    fn set(&mut self, n: String, t: Ty, span: Span) {
         self.scopes.last_mut().unwrap().insert(n.clone(), t);
         // a (re)binding starts un-moved — clears any stale bit on shadow
         self.moved.last_mut().unwrap().remove(&n);
+        self.decls.last_mut().unwrap().insert(n, span);
+    }
+    /// span of the visible binding for `n` (innermost scope first)
+    fn decl_span(&self, n: &str) -> Option<Span> {
+        self.scope_of(n).and_then(|i| self.decls[i].get(n).copied())
     }
     fn scope_of(&self, n: &str) -> Option<usize> {
         (0..self.scopes.len()).rev().find(|&i| self.scopes[i].contains_key(n))
@@ -164,6 +198,13 @@ impl Env {
 
 pub struct Checker<'a> {
     diags: &'a mut Diags,
+    /// item-parallel origin files (spans index into their own file)
+    files: &'a [String],
+    /// file of the item currently being registered/checked
+    cur_file: String,
+    /// qualified decl name → (sig text, def file, def span)
+    decls: HashMap<String, (String, String, Span)>,
+    index: Index,
     fns: HashMap<String, FnSig>,
     structs: HashMap<String, Vec<(String, Ty)>>,
     /// enum name -> [(variant, fields)]; fields f0..fn for positional
@@ -199,9 +240,13 @@ const BUILTINS: &[&str] = &[
     "now", "now_ms", "usleep", "ftoi", "itof", "atof", "ftoa",
 ];
 
-pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
+pub fn check(c: &Crate, files: &[String], diags: &mut Diags) -> Checked {
     let mut ck = Checker {
         diags,
+        files,
+        cur_file: String::new(),
+        decls: HashMap::new(),
+        index: Index::default(),
         fns: HashMap::new(),
         structs: HashMap::new(),
         enums: HashMap::new(),
@@ -221,7 +266,10 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
     };
     ck.register(c);
     ck.check_items(c);
-    let checked = Checked { suspend: ck.suspend_set(c) };
+    let checked = Checked {
+        suspend: ck.suspend_set(c),
+        index: std::mem::take(&mut ck.index),
+    };
     // B4 deferred: susp set only exists once call edges are collected
     for (n, sp) in &ck.fnval_uses {
         if checked.suspend.contains(n) {
@@ -248,10 +296,79 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
 }
 
 impl<'a> Checker<'a> {
+    /// file the i-th merged item's spans index into
+    fn item_file(&self, i: usize) -> String {
+        self.files.get(i).cloned().unwrap_or_else(|| self.diags.file.clone())
+    }
+
+    /// E1: record a decl — keyed for use-site lookups, plus a self-use so
+    /// the decl name itself hovers/jumps (smallest-span wins at query time)
+    fn rec_decl(&mut self, key: &str, span: Span, sig: String) {
+        self.decls
+            .insert(key.to_string(), (sig.clone(), self.cur_file.clone(), span));
+        self.index.uses.push(UseRec {
+            file: self.cur_file.clone(),
+            span,
+            sig,
+            def_file: self.cur_file.clone(),
+            def_span: span,
+        });
+    }
+
+    /// the `.name` region of a callee/field expr (dotted uses point at the
+    /// member, not the receiver): `x.m` → m's span, `f` → f's span.
+    /// Call sites arrive flattened to `Ident("x.m")`; the source text at
+    /// `f.span` IS the callee's name — the member starts after the last
+    /// `.` and runs the last component's length. (span.hi can overrun
+    /// into the call's `(`, so anchor at `lo`.)
+    fn member_span(&self, f: &Expr) -> Span {
+        match &f.kind {
+            ExprKind::Field { obj, name } => {
+                let lo = obj.span.hi + 1;
+                Span::new(lo, lo + name.len() as u32)
+            }
+            ExprKind::Ident(n) => match n.rfind('.') {
+                Some(d) => {
+                    let lo = f.span.lo + (d + 1) as u32;
+                    Span::new(lo, lo + (n.len() - d - 1) as u32)
+                }
+                None => f.span,
+            },
+            _ => f.span,
+        }
+    }
+
+    /// E1: record a use-site → its decl (no-op for builtins/locals —
+    /// those aren't `decls` keys)
+    fn rec_use(&mut self, span: Span, key: &str) {
+        if let Some((sig, f, sp)) = self.decls.get(key) {
+            self.index.uses.push(UseRec {
+                file: self.cur_file.clone(),
+                span,
+                sig: sig.clone(),
+                def_file: f.clone(),
+                def_span: *sp,
+            });
+        }
+    }
+
+    /// E1: record a local-binding use — sig is `name: ty`, def is the
+    /// visible binding's span
+    fn rec_local(&mut self, span: Span, name: &str, t: &Ty, env: &Env) {
+        self.index.uses.push(UseRec {
+            file: self.cur_file.clone(),
+            span,
+            sig: format!("{name}: {}", t.name()),
+            def_file: self.cur_file.clone(),
+            def_span: env.decl_span(name).unwrap_or(span),
+        });
+    }
+
     fn register(&mut self, c: &Crate) {
         // pass 0: struct/enum names so self-references and forward use
         // resolve (recursive payloads like `own Expr` inside `Expr`)
-        for it in &c.items {
+        for (i, it) in c.items.iter().enumerate() {
+            self.cur_file = self.item_file(i);
             if let Item::Struct(s) = it {
                 self.structs.insert(s.name.clone(), Vec::new());
             }
@@ -269,9 +386,29 @@ impl<'a> Checker<'a> {
                 self.ifaces.insert(i.name.clone(), IfaceDef {
                     ops: i.ops.clone(), methods,
                 });
+                self.rec_decl(&i.name, i.span, format!("interface {}", i.name));
+                for m in &i.methods {
+                    let ps = m
+                        .params
+                        .iter()
+                        .map(|p| format!("{}: {}", p.name, ty_text(&p.ty)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let r = match &m.ret {
+                        RetTy::Void => String::new(),
+                        RetTy::One(t) => format!(" -> {}", ty_text(t)),
+                        RetTy::Pair(t) => format!(" -> [{}, err]", ty_text(t)),
+                    };
+                    self.rec_decl(
+                        &format!("{}.{}", i.name, m.name),
+                        m.span,
+                        format!("fn {}.{m_name}({ps}){r}", i.name, m_name = m.name),
+                    );
+                }
             }
         }
-        for it in &c.items {
+        for (i, it) in c.items.iter().enumerate() {
+            self.cur_file = self.item_file(i);
             if let Item::Enum(e) = it {
                 let mut seen = HashSet::new();
                 let mut variants = Vec::new();
@@ -293,6 +430,20 @@ impl<'a> Checker<'a> {
                     variants.push((v.name.clone(), fields));
                 }
                 self.enums.insert(e.name.clone(), variants);
+                self.rec_decl(&e.name, e.span, format!("enum {}", e.name));
+                for v in &e.variants {
+                    let sig = match &v.payload {
+                        VariantPayload::Unit => format!("{}.{}", e.name, v.name),
+                        VariantPayload::Pos(ts) => format!(
+                            "{}.{}({})",
+                            e.name,
+                            v.name,
+                            ts.iter().map(ty_text).collect::<Vec<_>>().join(", ")
+                        ),
+                        VariantPayload::Named(_) => format!("{}.{} {{ .. }}", e.name, v.name),
+                    };
+                    self.rec_decl(&format!("{}.{}", e.name, v.name), v.span, sig);
+                }
             }
             if let Item::Struct(s) = it {
                     let mut fields = Vec::new();
@@ -306,10 +457,19 @@ impl<'a> Checker<'a> {
                         }
                         fields.push((f.name.clone(), t));
                     }
+                    self.rec_decl(&s.name, s.span, format!("struct {}", s.name));
+                    for f in &s.fields {
+                        self.rec_decl(
+                            &format!("{}.{}", s.name, f.name),
+                            f.span,
+                            format!("{}: {}", f.name, ty_text(&f.ty)),
+                        );
+                    }
                     self.structs.insert(s.name.clone(), fields);
             }
         }
-        for it in &c.items {
+        for (i, it) in c.items.iter().enumerate() {
+            self.cur_file = self.item_file(i);
             match it {
                 Item::Fn(f) | Item::Extern(f) => {
                     self.ty_scope = f.ty_params.iter().map(|(t, _)| t.clone()).collect();
@@ -354,6 +514,7 @@ impl<'a> Checker<'a> {
                         f.name.clone(),
                         FnSig { params, ret, is_extern: matches!(it, Item::Extern(_)), ty_params: f.ty_params.clone() },
                     );
+                    self.rec_decl(&f.name, f.span, fn_sig_text(f));
                 }
                 Item::Import(_) => {} // resolved by the driver before checking
                 Item::Global(g) => {
@@ -366,6 +527,7 @@ impl<'a> Checker<'a> {
                     } else {
                         it
                     };
+                    self.rec_decl(&g.name, g.span, format!("{}: {}", g.name, t.name()));
                     self.globals.insert(g.name.clone(), t);
                 }
                 Item::Struct(_) | Item::Interface(_) | Item::Enum(_) => {}
@@ -420,7 +582,8 @@ impl<'a> Checker<'a> {
     }
 
     fn check_items(&mut self, c: &Crate) {
-        for it in &c.items {
+        for (i, it) in c.items.iter().enumerate() {
+            self.cur_file = self.item_file(i);
             if let Item::Fn(f) = it {
                 self.cur_fn = f.name.clone();
                 let sig = self.fns[&f.name].clone();
@@ -431,12 +594,12 @@ impl<'a> Checker<'a> {
                 let mut env = Env::new();
                 let pskip = if let Some(r) = &f.recv {
                     if let Some(t) = sig.params.first() {
-                        env.set(r.name.clone(), t.clone());
+                        env.set(r.name.clone(), t.clone(), r.span);
                     }
                     1
                 } else { 0 };
                 for (p, t) in f.params.iter().zip(sig.params.iter().skip(pskip)) {
-                    env.set(p.name.clone(), t.clone());
+                    env.set(p.name.clone(), t.clone(), p.span);
                 }
                 if let Some(b) = &f.body {
                     self.block(b, &mut env);
@@ -464,7 +627,7 @@ impl<'a> Checker<'a> {
                 } else {
                     it
                 };
-                env.set(name.clone(), t);
+                env.set(name.clone(), t, *span);
             }
             Stmt::Let2 { a, b, call, span } => {
                 self.in_let2 = true;
@@ -480,10 +643,10 @@ impl<'a> Checker<'a> {
                     }
                 };
                 if let Bind::Name(n) = a {
-                    env.set(n.clone(), val_ty);
+                    env.set(n.clone(), val_ty, *span);
                 }
                 match b {
-                    Bind::Name(n) => env.set(n.clone(), Ty::Err),
+                    Bind::Name(n) => env.set(n.clone(), Ty::Err, *span),
                     Bind::Blank => self.diags.push(Diag::err(
                         *span, "check",
                         "cannot discard `err` — handle it or pass it up",
@@ -651,11 +814,11 @@ impl<'a> Checker<'a> {
                     env.moved = pre_moved.clone();
                     env.push();
                     match &arm.kind {
-                        SelKind::Recv { chan, bind, .. } => {
+                        SelKind::Recv { chan, bind, span } => {
                             let ct = self.expr(chan, env);
                             self.assignable(&Ty::Chan, &ct, chan.span);
                             if let Some(n) = bind {
-                                env.set(n.clone(), Ty::Int); // word payload (v0)
+                                env.set(n.clone(), Ty::Int, *span); // word payload (v0)
                             }
                         }
                         SelKind::Timeout { ms, .. } => {
@@ -724,7 +887,7 @@ impl<'a> Checker<'a> {
                         let ot = self.expr(&oe, env);
                         return match self.method_target(&ot, mname) {
                             MTarget::Fn(q) => self.fns.get(&q).map(|s| s.ret.clone()),
-                            MTarget::Vt(_, r) => Some(r),
+                            MTarget::Vt(_, _, r) => Some(r),
                             MTarget::NoMethod => None,
                         };
                     }
@@ -902,13 +1065,14 @@ impl<'a> Checker<'a> {
             Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => self.method_target(b, m),
             Ty::Iface(w) => self.ifaces.get(w)
                 .and_then(|d| d.methods.iter().find(|mm| mm.name == m))
-                .map(|mm| MTarget::Vt(mm.params.clone(), mm.ret.clone()))
+                .map(|mm| MTarget::Vt(format!("{w}.{m}"), mm.params.clone(), mm.ret.clone()))
                 .unwrap_or(MTarget::NoMethod),
             Ty::Var(v) => self.cur_ty_params.iter()
                 .find(|(n, _)| n == v)
-                .and_then(|(_, c)| self.ifaces.get(c))
-                .and_then(|d| d.methods.iter().find(|mm| mm.name == m))
-                .map(|mm| MTarget::Vt(mm.params.clone(), mm.ret.clone()))
+                .and_then(|(_, c)| self.ifaces.get(c).map(|d| (c, d)))
+                .and_then(|(c, d)| d.methods.iter().find(|mm| mm.name == m)
+                    .map(|mm| (c, mm)))
+                .map(|(c, mm)| MTarget::Vt(format!("{c}.{m}"), mm.params.clone(), mm.ret.clone()))
                 .unwrap_or(MTarget::NoMethod),
             _ => MTarget::NoMethod,
         }
@@ -1056,6 +1220,11 @@ impl<'a> Checker<'a> {
             ExprKind::Nil => Ty::Err, // nil is the empty err
             ExprKind::Ident(n) => match env.get(n).or_else(|| self.globals.get(n).cloned()) {
                 Some(t) => {
+                    if env.get(n).is_some() {
+                        self.rec_local(e.span, n, &t, env);
+                    } else {
+                        self.rec_use(e.span, n);
+                    }
                     if env.is_moved(n) {
                         self.diags.push(Diag::err(e.span, "own",
                             format!("use of moved value `{n}`")));
@@ -1064,6 +1233,7 @@ impl<'a> Checker<'a> {
                 }
                 None => {
                     if let Some(sig) = self.fns.get(n).cloned() {
+                        self.rec_use(e.span, n);
                         // named fn as a value (B4) — restrictions:
                         // generics need a call site, [T,err] has no shared
                         // ret struct, susp fns can't cross the boundary
@@ -1108,7 +1278,7 @@ impl<'a> Checker<'a> {
                 let saved = std::mem::replace(&mut self.closure_ret, Some(None));
                 env.push();
                 for (p, t) in params.iter().zip(ptys.iter()) {
-                    env.set(p.name.clone(), t.clone());
+                    env.set(p.name.clone(), t.clone(), p.span);
                 }
                 self.block(body, env);
                 env.pop();
@@ -1125,6 +1295,8 @@ impl<'a> Checker<'a> {
                     if let Some(vars) = self.enums.get(&on).cloned() {
                         match vars.iter().find(|(n, _)| n == name) {
                             Some((_, fields)) if fields.is_empty() => {
+                                self.rec_use(obj.span, &on);
+                                self.rec_use(Span::new(obj.span.hi + 1, e.span.hi), &format!("{on}.{name}"));
                                 return Ty::Enum(on.clone());
                             }
                             Some(_) => {
@@ -1154,7 +1326,10 @@ impl<'a> Checker<'a> {
                         fields
                             .iter()
                             .find(|(n, _)| n == name)
-                            .map(|(_, t)| t.clone())
+                            .map(|(_, t)| {
+                                self.rec_use(Span::new(obj.span.hi + 1, e.span.hi), &format!("{sn}.{name}"));
+                                t.clone()
+                            })
                             .unwrap_or_else(|| {
                                 self.diags.push(Diag::err(e.span, "type",
                                     format!("`{sn}` has no field `{name}`")));
@@ -1171,6 +1346,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::StructLit { name, fields } => {
+                self.rec_use(e.span, name);
                 // named variant construction: `ExprKind.Bin{op, l, r}`
                 if let Some((en, vn, want)) = self.enum_variant(name) {
                     if want.iter().any(|(n, _)| !(n.starts_with('f') && n[1..].chars().all(|c| c.is_ascii_digit()))) || want.is_empty() {
@@ -1231,6 +1407,9 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::As { e: inner, ty } => {
+                if let TyKind::Named(n) = &ty.kind {
+                    self.rec_use(ty.span, n);
+                }
                 let ot = self.expr(inner, env);
                 let wt = self.resolve(ty);
                 // `e as E.V` on an `own E` dereferences the handle
@@ -1369,7 +1548,7 @@ impl<'a> Checker<'a> {
                         Pattern::Wild => wild = true,
                         Pattern::Bind(n) => {
                             wild = true;
-                            env.set(n.clone(), st.clone());
+                            env.set(n.clone(), st.clone(), arm.span);
                             // binding an `own` scrutinee moves it into the var
                             self.move_own(scrut, env);
                         }
@@ -1416,7 +1595,7 @@ impl<'a> Checker<'a> {
                                     }
                                     for (b, (_, ft)) in binds.iter().zip(fields.iter()) {
                                         if b != "_" {
-                                            env.set(b.clone(), ft.clone());
+                                            env.set(b.clone(), ft.clone(), arm.span);
                                         }
                                     }
                                 }
@@ -1434,7 +1613,7 @@ impl<'a> Checker<'a> {
                                     covered.insert(vn);
                                     for b in binds {
                                         match fields.iter().find(|(n, _)| n == b) {
-                                            Some((_, ft)) => env.set(b.clone(), ft.clone()),
+                                            Some((_, ft)) => env.set(b.clone(), ft.clone(), arm.span),
                                             None => self.diags.push(Diag::err(arm.span, "check",
                                                 format!("`{path}` has no field `{b}`"))),
                                         }
@@ -1554,6 +1733,7 @@ impl<'a> Checker<'a> {
             // enum variant construction: `ExprKind.Int(7)` qualifies to
             // an Ident call on the dotted path
             if let Some((en, vn, fields)) = self.enum_variant(name) {
+                self.rec_use(self.member_span(f), name);
                 if fields.iter().all(|(n, _)| n.starts_with('f') && n[1..].chars().all(|c| c.is_ascii_digit())) {
                     // positional payload: args in declaration order
                     let given: Vec<(&String, &Expr)> = fields.iter().map(|(n, _)| n)
@@ -1584,6 +1764,7 @@ impl<'a> Checker<'a> {
             }
             // a local fn value shadows a same-named fn or builtin
             if let Some(Ty::Fn(ps, r)) = env.get(name) {
+                self.rec_local(f.span, name, &Ty::Fn(ps.clone(), r.clone()), env);
                 return self.call_fnvalue(&ps, &r, args, sp, env);
             }
             // method dispatch (D3): `x.m(..)` resolves via the receiver's
@@ -1615,7 +1796,8 @@ impl<'a> Checker<'a> {
                                 recv = Some(oe);
                                 qname = q;
                             }
-                            MTarget::Vt(mps, mret) => {
+                            MTarget::Vt(key, mps, mret) => {
+                                self.rec_use(self.member_span(f), &key);
                                 return self.call_iface(&mps, &mret, args, sp, env);
                             }
                             MTarget::NoMethod => {
@@ -1653,6 +1835,7 @@ impl<'a> Checker<'a> {
             let name = qname.as_str();
             if self.fns.contains_key(name) {
                 self.calls.entry(self.cur_fn.clone()).or_default().insert(name.to_string());
+                self.rec_use(self.member_span(f), name);
             }
             match name {
                 "print" | "println" => {
@@ -1711,6 +1894,7 @@ impl<'a> Checker<'a> {
                     if let Some(a) = args.first() {
                         if let Expr { kind: ExprKind::Ident(n), .. } = a {
                             if self.structs.contains_key(n) {
+                                self.rec_use(a.span, n);
                                 return Ty::Own(Box::new(Ty::Struct(n.clone())));
                             }
                         }
@@ -1757,7 +1941,12 @@ impl<'a> Checker<'a> {
                             ExprKind::Ident(n) => self.resolve(&TyRef {
                                 kind: TyKind::Named(n.clone()), span: a.span,
                             }),
-                            ExprKind::TyLit(tr) => self.resolve(tr),
+                            ExprKind::TyLit(tr) => {
+                                if let TyKind::Named(n) = &tr.kind {
+                                    self.rec_use(tr.span, n);
+                                }
+                                self.resolve(tr)
+                            }
                             _ => {
                                 self.diags.push(Diag::err(a.span, "check",
                                     "`mkslice` takes a type name — mkslice(int, 8)"));

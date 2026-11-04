@@ -39,7 +39,7 @@ oxl run file.oxl [args...]    # compile + run
 oxl test file.oxl             # run all fn test_*() in a scope each
 oxl fmt file.oxl [-w]         # normalize indentation/whitespace
 oxl doc file.oxl              # /// comments → markdown
-oxl lsp                        # stdio LSP: live diagnostics in editors
+oxl lsp                        # stdio LSP: diagnostics, hover, goto-definition
 ```
 
 ## Language surface (v0)

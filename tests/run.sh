@@ -242,6 +242,38 @@ if ! "$OXL" fmt --check $(find stdlib bootstrap tests examples -name '*.oxl' | s
     echo "FAIL fmt: run \`oxl fmt -w\` on the corpus"; exit 1
 fi
 
+
+echo "== lsp hover/definition =="
+python3 - "$OXL" <<'PYEOF'
+import json, subprocess, sys, os
+oxl = sys.argv[1]
+p = subprocess.Popen([oxl, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+def send(m):
+    b = json.dumps(m).encode()
+    p.stdin.write(b"Content-Length: %d\r\n\r\n" % len(b) + b); p.stdin.flush()
+def recv():
+    h = {}
+    while True:
+        l = p.stdout.readline().decode().strip()
+        if not l: break
+        k, v = l.split(":", 1); h[k.strip()] = v.strip()
+    return json.loads(p.stdout.read(int(h["Content-Length"])).decode())
+uri = "file://" + os.path.abspath("bootstrap/parser.oxl")
+src = open("bootstrap/parser.oxl").read()
+send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}); recv()
+send({"jsonrpc":"2.0","method":"initialized","params":{}})
+send({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"oxl","version":1,"text":src}}}); recv()
+lines = src.split("\n")
+i = next(i for i,l in enumerate(lines) if "lexlib.lex(src)" in l)
+col = lines[i].index("lexlib.lex") + 7
+pos = {"textDocument":{"uri":uri},"position":{"line":i,"character":col}}
+send({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":pos})
+h = recv(); assert "fn lexlib.lex(src: str)" in json.dumps(h), h
+send({"jsonrpc":"2.0","id":3,"method":"textDocument/definition","params":pos})
+d = recv(); assert d["result"]["uri"].endswith("bootstrap/lexlib.oxl"), d
+send({"jsonrpc":"2.0","method":"exit","params":{}})
+PYEOF
+
 echo "== http pilot =="
 work=$(mktemp -d)
 "$OXL" build examples/http-crud-sqlite/main.oxl -o "$work/httpsrv"

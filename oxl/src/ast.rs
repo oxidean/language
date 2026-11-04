@@ -164,6 +164,55 @@ pub enum TyKind {
     Fn { params: Vec<TyRef>, ret: Option<Box<TyRef>> },
 }
 
+/// canonical `own T`/`[]T`/`fn(..) -> T` text (fmt printer + hover sigs)
+pub fn ty_text(t: &TyRef) -> String {
+    match &t.kind {
+        TyKind::Named(n) => n.clone(),
+        TyKind::Own(i) => format!("own {}", ty_text(i)),
+        TyKind::Ref(i) => format!("ref {}", ty_text(i)),
+        TyKind::Mut(i) => format!("mut {}", ty_text(i)),
+        TyKind::Chan => "chan".into(),
+        TyKind::Slice(i) => format!("[]{}", ty_text(i)),
+        TyKind::Fn { params, ret } => {
+            let ps = params.iter().map(ty_text).collect::<Vec<_>>().join(", ");
+            match ret {
+                Some(r) => format!("fn({ps}) -> {}", ty_text(r)),
+                None => format!("fn({ps})"),
+            }
+        }
+    }
+}
+
+/// `fn name(params) -> ret` signature text (hover display)
+pub fn fn_sig_text(f: &Fn) -> String {
+    let mut s = String::from("fn ");
+    if let Some(r) = &f.recv {
+        s.push_str(&format!("({} {}) ", r.name, ty_text(&r.ty)));
+    }
+    s.push_str(&f.name);
+    if !f.ty_params.is_empty() {
+        let ps: Vec<String> = f
+            .ty_params
+            .iter()
+            .map(|(t, c)| if c.is_empty() { t.clone() } else { format!("{t} {c}") })
+            .collect();
+        s.push_str(&format!("[{}]", ps.join(", ")));
+    }
+    let params = f
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", p.name, ty_text(&p.ty)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    s.push_str(&format!("({params})"));
+    match &f.ret {
+        RetTy::Void => {}
+        RetTy::One(t) => s.push_str(&format!(" -> {}", ty_text(t))),
+        RetTy::Pair(t) => s.push_str(&format!(" -> [{}, err]", ty_text(t))),
+    }
+    s
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
