@@ -1,0 +1,6 @@
+// B3 negative: out-of-range index must trap (nonzero exit), not corrupt
+fn main() {
+    s := mkslice(int, 3)
+    s[5] = 1 // len 3 → index 5 out of range
+    println("unreachable")
+}

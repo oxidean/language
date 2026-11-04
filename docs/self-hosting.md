@@ -37,8 +37,12 @@ Ordered by what the checker/codegen port actually needs:
    `bootstrap/parser.oxl` already uses it for its AST.
 2. ~~**`match`**~~ — **done (B2).** `to_json` now pattern-dispatches
    with `match`; the grammar parses `match` too (self-parse round-trips).
-3. **Slices `[]T`** — token streams want contiguous arrays, not linked
-   lists. `mkbuf`/`poke8` is the escape hatch today.
+3. ~~**Slices `[]T`**~~ — **done (B3).** `[]T` fat-header slices with
+   `mkslice`, bounds-checked `s[i]`, doubling `push`, and shared-backing
+   `s[a:b]` views — see `docs/semantics/slices.md`. The bootstrap parser
+   keeps its linked `Json` spine (incremental child lists beat
+   re-teaching `jadd` growth at self-parse scale); token storage can
+   migrate when the checker port wants it.
 4. **Function values** — recursive descent doesn't need them, but
    visitor-style AST passes and stdlib `sort`/`map` will.
 5. **Methods / `interface` dispatch** — today's `interface` is only an

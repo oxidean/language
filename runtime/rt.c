@@ -1160,6 +1160,30 @@ OxlStr rt_itoa(int64_t v) {
     return rt_str(p);
 }
 
+/* ---------------- slices ({ptr,len,cap} headers, B3) ---------------- */
+
+RtSlice rt_mkslice(int64_t n, int64_t esz) {
+    RtSlice s;
+    s.len = n;
+    s.cap = n;
+    s.ptr = n > 0 ? rt_alloc(n * esz) : 0;
+    if (s.ptr) memset(s.ptr, 0, (size_t)(n * esz));
+    return s;
+}
+
+RtSlice rt_slice_push(RtSlice s, int64_t esz, void *v) {
+    if (s.len >= s.cap) {
+        int64_t ncap = s.cap > 0 ? s.cap * 2 : 4;
+        void *nb = rt_alloc(ncap * esz);
+        if (s.ptr) memcpy(nb, s.ptr, (size_t)(s.len * esz));
+        s.ptr = nb;
+        s.cap = ncap;
+    }
+    memcpy((char *)s.ptr + s.len * esz, v, (size_t)esz);
+    s.len++;
+    return s;
+}
+
 const char *rt_cstr(OxlStr s) {
     char *p = rt_alloc(s.n + 1);
     memcpy(p, s.p, s.n);

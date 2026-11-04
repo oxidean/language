@@ -108,6 +108,19 @@ fn qualify_expr(
             }
         }
         ast::ExprKind::Field { obj, .. } => qualify_expr(obj, renames, aliases),
+        ast::ExprKind::Index { obj, idx } => {
+            qualify_expr(obj, renames, aliases);
+            qualify_expr(idx, renames, aliases);
+        }
+        ast::ExprKind::Slice { obj, lo, hi } => {
+            qualify_expr(obj, renames, aliases);
+            if let Some(x) = lo {
+                qualify_expr(x, renames, aliases);
+            }
+            if let Some(x) = hi {
+                qualify_expr(x, renames, aliases);
+            }
+        }
         ast::ExprKind::Bin { l, r, .. } => {
             qualify_expr(l, renames, aliases);
             qualify_expr(r, renames, aliases);
@@ -150,6 +163,7 @@ fn qualify_ty(
             qualify_ty(i, renames, aliases)
         }
         ast::TyKind::Chan => {}
+        ast::TyKind::Slice(i) => qualify_ty(i, renames, aliases),
     }
 }
 

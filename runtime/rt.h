@@ -117,6 +117,17 @@ int rt_sleep_poll(int64_t secs, RtTask *t);
 int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t);
 int64_t rt_select_arm(RtTask *t); /* cleanup parked waiters; returns arm */
 
+/* --- slices: {ptr,len,cap} fat header, erased element type ---
+ * backing store comes from rt_alloc (scope arena when inside a scope,
+ * heap otherwise) so slices die with their scope like other values */
+typedef struct {
+    void *ptr;
+    int64_t len;
+    int64_t cap;
+} RtSlice;
+RtSlice rt_mkslice(int64_t n, int64_t esz);            /* len==cap==n, zeroed */
+RtSlice rt_slice_push(RtSlice s, int64_t esz, void *v); /* grow + append */
+
 /* --- misc builtins --- */
 void rt_sleep(int64_t secs);
 OxlStr rt_str_lit(const char *s);

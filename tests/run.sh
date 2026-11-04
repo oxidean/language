@@ -57,6 +57,18 @@ fi
 diag=$("$OXL" build /tmp/matchnex.oxl -o /tmp/matchnex 2>&1 || true)
 grep -q "missing B" <<<"$diag" || { echo "FAIL: missing-variant diagnostic: $diag"; exit 1; }
 
+echo "== slices (b3) =="
+out=$("$OXL" run tests/slices.oxl)
+[ "$(tail -1 <<<"$out")" = "slices ok" ] || { echo "FAIL slices: $out"; exit 1; }
+# out-of-range index must trap, not corrupt
+if "$OXL" run tests/slice_oob.oxl >/dev/null 2>&1; then
+    echo "FAIL slice_oob: expected nonzero exit"; exit 1
+fi
+# inverted view range must trap, not corrupt
+if "$OXL" run tests/slice_range.oxl >/dev/null 2>&1; then
+    echo "FAIL slice_range: expected nonzero exit"; exit 1
+fi
+
 echo "== defer (b5) =="
 out=$("$OXL" run tests/defer_test.oxl)
 [ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }

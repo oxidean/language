@@ -17,6 +17,7 @@ pub enum Ty {
     Mut(Box<Ty>),
     Struct(String),
     Enum(String),
+    Slice(Box<Ty>),
     Var(String), // generic type parameter (instantiated at call sites)
     Unknown,
 }
@@ -37,6 +38,7 @@ impl Ty {
             Ty::Mut(t) => format!("mut {}", t.name()),
             Ty::Struct(n) => n.clone(),
             Ty::Enum(n) => n.clone(),
+            Ty::Slice(t) => format!("[]{}", t.name()),
             Ty::Var(n) => n.clone(),
             Ty::Unknown => "?".into(),
         }
@@ -106,6 +108,7 @@ pub struct Checker<'a> {
 
 const BUILTINS: &[&str] = &[
     "print", "println", "mkchan", "send", "recv", "close", "sleep", "new",
+    "mkslice", "push",
     "assert", "itoa", "argc", "argv", "len", "byteat", "substr", "find", "atoi",
     "mkbuf", "bufstr", "poke8", "poke16", "poke32", "htons", "htonl",
     "cstr", "sqlite_open", "sqlite_exec", "sqlite_query", "sqlite_close",
@@ -270,6 +273,7 @@ impl<'a> Checker<'a> {
             TyKind::Ref(t) => Ty::Ref(Box::new(self.resolve(t))),
             TyKind::Mut(t) => Ty::Mut(Box::new(self.resolve(t))),
             TyKind::Chan => Ty::Chan,
+            TyKind::Slice(t) => Ty::Slice(Box::new(self.resolve(t))),
         }
     }
 
@@ -512,6 +516,7 @@ impl<'a> Checker<'a> {
             }
             // own argument into ref/mut param still binds the inner var
             (Ty::Ref(w) | Ty::Mut(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) => self.bind_vars(w, g, bind),
+            (Ty::Slice(w), Ty::Slice(g)) => self.bind_vars(w, g, bind),
             _ => {}
         }
     }
@@ -545,7 +550,8 @@ impl<'a> Checker<'a> {
             || (*want == Ty::Err && *got == Ty::Int)
             || (*want == Ty::Int && *got == Ty::Err)
             // nil (Ty::Err) is the null pointer for owned/borrowed refs
-            || (*got == Ty::Err && matches!(want, Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan))
+            // and the empty slice
+            || (*got == Ty::Err && matches!(want, Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Slice(_)))
             || matches!((want, got), (Ty::Ref(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) | (Ty::Mut(w), Ty::Own(g) | Ty::Mut(g)) if **w == **g);
         if !ok {
             self.diags.push(Diag::err(
@@ -959,6 +965,47 @@ impl<'a> Checker<'a> {
                     Ty::Void
                 }
             }
+            ExprKind::Index { obj, idx } => {
+                let ot = self.expr(obj, env);
+                let it = self.expr(idx, env);
+                self.assignable(&Ty::Int, &it, idx.span);
+                match &ot {
+                    Ty::Slice(el) => (**el).clone(),
+                    Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
+                        Ty::Slice(el) => (**el).clone(),
+                        _ => {
+                            self.diags.push(Diag::err(obj.span, "type",
+                                format!("`[]` on `{}` — not a slice", ot.name())));
+                            Ty::Unknown
+                        }
+                    },
+                    Ty::Unknown => Ty::Unknown,
+                    _ => {
+                        self.diags.push(Diag::err(obj.span, "type",
+                            format!("`[]` on `{}` — not a slice", ot.name())));
+                        Ty::Unknown
+                    }
+                }
+            }
+            ExprKind::Slice { obj, lo, hi } => {
+                let ot = self.expr(obj, env);
+                for x in [lo, hi].into_iter().flatten() {
+                    let xt = self.expr(x, env);
+                    self.assignable(&Ty::Int, &xt, x.span);
+                }
+                match &ot {
+                    Ty::Slice(_) => ot.clone(),
+                    Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) if matches!(&**b, Ty::Slice(_)) => {
+                        (**b).clone()
+                    }
+                    Ty::Unknown => Ty::Unknown,
+                    _ => {
+                        self.diags.push(Diag::err(obj.span, "type",
+                            format!("`[..]` on `{}` — not a slice", ot.name())));
+                        Ty::Unknown
+                    }
+                }
+            }
         }
     }
 
@@ -1082,9 +1129,70 @@ impl<'a> Checker<'a> {
                 "len" => {
                     if let Some(a) = args.first() {
                         let t = self.expr(a, env);
-                        self.assignable(&Ty::Str, &t, a.span);
+                        match &t {
+                            Ty::Str | Ty::Slice(_) => {}
+                            Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b)
+                                if matches!(&**b, Ty::Slice(_)) => {}
+                            Ty::Unknown => {}
+                            _ => self.diags.push(Diag::err(a.span, "type",
+                                format!("`len` takes str or slice — got `{}`", t.name()))),
+                        }
                     }
                     return Ty::Int;
+                }
+                "mkslice" => {
+                    // mkslice(T, n) — zeroed []T with len==cap==n
+                    let et = match args.first() {
+                        Some(a) => match &a.kind {
+                            ExprKind::Ident(n) => self.resolve(&TyRef {
+                                kind: TyKind::Named(n.clone()), span: a.span,
+                            }),
+                            _ => {
+                                self.diags.push(Diag::err(a.span, "check",
+                                    "`mkslice` takes a type name — mkslice(int, 8)"));
+                                Ty::Unknown
+                            }
+                        },
+                        None => {
+                            self.diags.push(Diag::err(sp, "check",
+                                "`mkslice` takes (T, n)"));
+                            Ty::Unknown
+                        }
+                    };
+                    match args.get(1) {
+                        Some(n) => {
+                            let nt = self.expr(n, env);
+                            self.assignable(&Ty::Int, &nt, n.span);
+                        }
+                        None => self.diags.push(Diag::err(sp, "check",
+                            "`mkslice` takes (T, n)")),
+                    }
+                    return Ty::Slice(Box::new(et));
+                }
+                "push" => {
+                    // s = push(s, v) — returns the (possibly grown) header
+                    let st = match args.first() {
+                        Some(a) => self.expr(a, env),
+                        None => Ty::Unknown,
+                    };
+                    match &st {
+                        Ty::Slice(el) => {
+                            if let Some(v) = args.get(1) {
+                                let vt = self.expr(v, env);
+                                self.assignable(el, &vt, v.span);
+                            } else {
+                                self.diags.push(Diag::err(sp, "check",
+                                    "`push` takes (slice, value)"));
+                            }
+                            return st.clone();
+                        }
+                        Ty::Unknown => return Ty::Unknown,
+                        _ => {
+                            self.diags.push(Diag::err(sp, "type",
+                                format!("`push` on `{}` — not a slice", st.name())));
+                            return Ty::Unknown;
+                        }
+                    }
                 }
                 "byteat" | "find" | "atoi" => {
                     for a in args {
@@ -1313,6 +1421,12 @@ impl<'a> Checker<'a> {
                             _ => false,
                         })
                 }
+                ExprKind::Index { obj, idx } => expr_susp(obj) || expr_susp(idx),
+                ExprKind::Slice { obj, lo, hi } => {
+                    expr_susp(obj)
+                        || lo.as_ref().map(|e| expr_susp(e)).unwrap_or(false)
+                        || hi.as_ref().map(|e| expr_susp(e)).unwrap_or(false)
+                }
                 _ => false,
             }
         }
@@ -1373,6 +1487,14 @@ impl<'a> Checker<'a> {
                             Pattern::Lit(le) => expr_has_susp(le, susp),
                             _ => false,
                         })
+                }
+                ExprKind::Index { obj, idx } => {
+                    expr_has_susp(obj, susp) || expr_has_susp(idx, susp)
+                }
+                ExprKind::Slice { obj, lo, hi } => {
+                    expr_has_susp(obj, susp)
+                        || lo.as_ref().map(|e| expr_has_susp(e, susp)).unwrap_or(false)
+                        || hi.as_ref().map(|e| expr_has_susp(e, susp)).unwrap_or(false)
                 }
                 _ => false,
             }
@@ -1449,6 +1571,19 @@ impl<'a> Checker<'a> {
                     scan_match(e, susp, diags, false)
                 }
                 ExprKind::Field { obj, .. } => scan_match(obj, susp, diags, false),
+                ExprKind::Index { obj, idx } => {
+                    scan_match(obj, susp, diags, false);
+                    scan_match(idx, susp, diags, false);
+                }
+                ExprKind::Slice { obj, lo, hi } => {
+                    scan_match(obj, susp, diags, false);
+                    if let Some(x) = lo {
+                        scan_match(x, susp, diags, false);
+                    }
+                    if let Some(x) = hi {
+                        scan_match(x, susp, diags, false);
+                    }
+                }
                 ExprKind::StructLit { fields, .. } => {
                     for (_, fe) in fields {
                         scan_match(fe, susp, diags, false);
@@ -1545,6 +1680,7 @@ pub fn subst_ty(t: &Ty, bind: &HashMap<String, Ty>) -> Ty {
         Ty::Own(b) => Ty::Own(Box::new(subst_ty(b, bind))),
         Ty::Ref(b) => Ty::Ref(Box::new(subst_ty(b, bind))),
         Ty::Mut(b) => Ty::Mut(Box::new(subst_ty(b, bind))),
+        Ty::Slice(b) => Ty::Slice(Box::new(subst_ty(b, bind))),
         _ => t.clone(),
     }
 }

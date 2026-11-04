@@ -329,6 +329,11 @@ impl<'a> Parser<'a> {
         if self.eat_kw(Kw::Chan) {
             return Some(TyRef { kind: TyKind::Chan, span: sp });
         }
+        if self.eat_p(P::LBracket) {
+            self.expect_p(P::RBracket, "`]`");
+            let inner = self.ty()?;
+            return Some(TyRef { kind: TyKind::Slice(Box::new(inner)), span: sp });
+        }
         let (mut name, _) = self.ident()?;
         while self.cur().tok == Tok::P(P::Dot) {
             if let Some(Tok::Ident(n)) = self.toks.get(self.i + 1).map(|t| t.tok.clone()) {
@@ -657,6 +662,43 @@ impl<'a> Parser<'a> {
                     let ty = self.ty()?;
                     let span = Span::join(e.span, self.span());
                     e = Expr { kind: ExprKind::As { e: Box::new(e), ty }, span };
+                }
+                // `s[i]` / `s[a:b]` — slice index / view. The `[` must be
+                // adjacent to the expression's end — `[v, err] = f()` on a
+                // following line is a destructure stmt, not an index op.
+                Tok::P(P::LBracket)
+                    if self.i > 0 && self.toks[self.i - 1].span.hi == self.cur().span.lo =>
+                {
+                    self.bump();
+                    let mut lo: Option<Box<Expr>> = None;
+                    let mut hi: Option<Box<Expr>> = None;
+                    let mut is_slice = false;
+                    if self.cur().tok == Tok::P(P::Colon) {
+                        is_slice = true;
+                    } else if self.cur().tok != Tok::P(P::RBracket) {
+                        lo = Some(Box::new(self.expr(0, false)?));
+                    }
+                    if self.eat_p(P::Colon) {
+                        is_slice = true;
+                        if self.cur().tok != Tok::P(P::RBracket) {
+                            hi = Some(Box::new(self.expr(0, false)?));
+                        }
+                    }
+                    self.expect_p(P::RBracket, "`]`");
+                    let span = Span::join(e.span, self.span());
+                    e = if is_slice {
+                        Expr { kind: ExprKind::Slice { obj: Box::new(e), lo, hi }, span }
+                    } else {
+                        match lo {
+                            Some(idx) => Expr {
+                                kind: ExprKind::Index { obj: Box::new(e), idx }, span,
+                            },
+                            None => {
+                                self.diags.push(Diag::err(span, "parse", "empty `[]` index"));
+                                return None;
+                            }
+                        }
+                    };
                 }
                 _ => break,
             }

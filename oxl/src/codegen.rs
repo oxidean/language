@@ -45,6 +45,7 @@ struct Gen<'a> {
     out: String,
     trampolines: String,
     inst_out: String,
+    inst_protos: String,
     tmp: usize,
     scope_id: usize,
     env: Vec<HashMap<String, Ty>>,
@@ -106,6 +107,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         out: String::new(),
         trampolines: String::new(),
         inst_out: String::new(),
+        inst_protos: String::new(),
         tmp: 0,
         scope_id: 0,
         env: vec![HashMap::new()],
@@ -330,11 +332,13 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
 
     // trampolines + frame decls must precede the fn bodies that use them
     g.out = g.out.replace("/*GLOBALS*/", &global_inits);
+    // inst protos precede every body (regular, inst, and frame poll fns)
     let mut final_out = g.out[..body_start].to_string();
     final_out.push_str(&g.trampolines);
     final_out.push_str(&g.frame_head);
-    final_out.push_str(&g.frame_out);
+    final_out.push_str(&g.inst_protos);
     final_out.push_str(&g.inst_out);
+    final_out.push_str(&g.frame_out);
     final_out.push_str(&g.out[body_start..]);
     final_out
 }
@@ -360,6 +364,7 @@ fn bind_generic(want: &Ty, got: &Ty, bind: &mut HashMap<String, Ty>) {
         (Ty::Ref(w) | Ty::Mut(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) => {
             bind_generic(w, g, bind)
         }
+        (Ty::Slice(w), Ty::Slice(g)) => bind_generic(w, g, bind),
         _ => {}
     }
 }
@@ -403,6 +408,7 @@ impl<'a> Gen<'a> {
             TyKind::Ref(t) => Ty::Ref(Box::new(self.ty_of_ref(t))),
             TyKind::Mut(t) => Ty::Mut(Box::new(self.ty_of_ref(t))),
             TyKind::Chan => Ty::Chan,
+            TyKind::Slice(t) => Ty::Slice(Box::new(self.ty_of_ref(t))),
         }
     }
 
@@ -417,6 +423,7 @@ impl<'a> Gen<'a> {
             Ty::Chan => "RtChan*".into(),
             Ty::Struct(n) => format!("struct o_s_{}", cname(n)),
             Ty::Enum(n) => format!("struct o_en_{}", cname(n)),
+            Ty::Slice(_) => "RtSlice".into(),
             Ty::Var(v) => self
                 .subst
                 .get(v)
@@ -425,8 +432,10 @@ impl<'a> Gen<'a> {
             Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
                 Ty::Struct(n) => format!("struct o_s_{}*", cname(n)),
                 Ty::Enum(n) => format!("struct o_en_{}*", cname(n)),
+                Ty::Slice(_) => "RtSlice*".into(),
                 Ty::Var(v) => match self.subst.get(v) {
                     Some(Ty::Struct(n)) => format!("struct o_s_{}*", cname(n)),
+                    Some(Ty::Slice(_)) => "RtSlice*".into(),
                     _ => "void*".into(),
                 },
                 _ => "void*".into(),
@@ -529,17 +538,19 @@ impl<'a> Gen<'a> {
             bind.iter().cloned().collect::<HashMap<_, _>>(),
         );
         let saved_out = std::mem::take(&mut self.out);
-        // ret struct (if [T, err]) + prototype into inst_out
+        // ret struct (if [T, err]) + prototype — inst_protos lands
+        // ahead of ALL bodies so frame poll fns and other insts can
+        // call this instantiation before its definition
         if let RetTy::Pair(t) = &f.ret {
             let _ = writeln!(
-                self.inst_out,
+                self.inst_protos,
                 "struct o_ret_{} {{ {} val; int64_t err; }};",
                 cname(&mangled), self.cty(&self.ty_of_ref(t))
             );
         }
         let mut proto = String::new();
         self.proto_named(&mut proto, f, mangled);
-        self.inst_out.push_str(&proto);
+        self.inst_protos.push_str(&proto);
         // body — emitted into the swapped-out self.out (stmt() writes there)
         let ret_c = self.ret_decl_named(f, mangled);
         let params: Vec<String> = f
@@ -652,6 +663,18 @@ impl<'a> Gen<'a> {
                     }
                     match n.as_str() {
                         "mkchan" => return Ty::Chan,
+                        "mkslice" => {
+                            if let Some(a) = args.first() {
+                                if let ExprKind::Ident(tn) = &a.kind {
+                                    return Ty::Slice(Box::new(self.ty_of_ref(&TyRef {
+                                        kind: TyKind::Named(tn.clone()),
+                                        span: a.span,
+                                    })));
+                                }
+                            }
+                            return Ty::Slice(Box::new(Ty::Unknown));
+                        }
+                        "push" => return self.expr_ty(&args[0]),
                         "recv" | "argc" | "len" | "byteat" | "find" | "atoi" | "ftoi"
                         | "htons" | "htonl" | "sqlite_exec" | "writefile" | "sget" | "scas"
                         | "sadd" | "now" | "now_ms" => {
@@ -731,6 +754,15 @@ impl<'a> Gen<'a> {
                     })
                     .unwrap_or(Ty::Void)
             }
+            ExprKind::Index { obj, .. } => self.slice_elem(obj),
+            ExprKind::Slice { obj, .. } => match self.dt(&self.expr_ty(obj)) {
+                t @ Ty::Slice(_) => t,
+                Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match *b {
+                    t @ Ty::Slice(_) => t,
+                    _ => Ty::Unknown,
+                },
+                _ => Ty::Unknown,
+            },
             ExprKind::Bin { op, l, r } => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                 | BinOp::And | BinOp::Or => Ty::Bool,
@@ -1091,6 +1123,49 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::Match { e: scrut, arms } => self.match_expr(e, scrut, arms),
+            ExprKind::Index { obj, idx } => {
+                // lvalue form `*({ ...; ptr + i; })` — valid both sides of `=`
+                let el = self.slice_elem(obj);
+                let ect = self.cty(&el);
+                let sv = self.slice_val(obj);
+                let iv = self.expr(idx);
+                format!(
+                    "(*({{ RtSlice _ms = {sv}; int64_t _mi = {iv}; \
+                     if (_mi < 0 || _mi >= _ms.len) rt_trap(10); \
+                     ({ect}*)_ms.ptr + _mi; }}))")
+            }
+            ExprKind::Slice { obj, lo, hi } => {
+                let el = self.slice_elem(obj);
+                let ect = self.cty(&el);
+                let sv = self.slice_val(obj);
+                let av = lo.as_ref().map(|x| self.expr(x)).unwrap_or_else(|| "0LL".into());
+                let bv = hi.as_ref().map(|x| self.expr(x)).unwrap_or_else(|| "_ms.len".into());
+                format!(
+                    "({{ RtSlice _ms = {sv}; int64_t _ma = {av}; int64_t _mb = {bv}; \
+                     if (_ma < 0 || _mb < _ma || _mb > _ms.len) rt_trap(10); \
+                     (RtSlice){{ ({ect}*)_ms.ptr + _ma, _mb - _ma, _ms.cap - _ma }}; }})")
+            }
+        }
+    }
+
+    /// element type of a slice-valued expr (unwraps `own`/`ref`/`mut` headers)
+    fn slice_elem(&self, obj: &Expr) -> Ty {
+        match self.dt(&self.expr_ty(obj)) {
+            Ty::Slice(el) => *el,
+            Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match *b {
+                Ty::Slice(el) => *el,
+                _ => Ty::Unknown,
+            },
+            _ => Ty::Unknown,
+        }
+    }
+
+    /// slice expr as a value — `own`/`ref`/`mut` headers dereference
+    fn slice_val(&mut self, obj: &Expr) -> String {
+        let ov = self.expr(obj);
+        match self.dt(&self.expr_ty(obj)) {
+            Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) => format!("(*{ov})"),
+            _ => ov,
         }
     }
 
@@ -1336,6 +1411,47 @@ impl<'a> Gen<'a> {
                     return format!(
                         "({{ {ct} *_nb = rt_alloc(sizeof({ct})); *_nb = ({v}); _nb; }})");
                 }
+                "mkslice" => {
+                    // mkslice(T, n) — element C type from the type-name arg
+                    let et = args.first().and_then(|a| match &a.kind {
+                        ExprKind::Ident(n) => Some(self.ty_of_ref(&TyRef {
+                            kind: TyKind::Named(n.clone()),
+                            span: a.span,
+                        })),
+                        _ => None,
+                    }).unwrap_or(Ty::Unknown);
+                    let n = if args.len() > 1 { argvs[1].clone() } else { "0LL".into() };
+                    return format!("rt_mkslice({n}, sizeof({}))", self.cty(&et));
+                }
+                "push" => {
+                    // push(s, v) → stmt-expr: bind v once, grow+append header
+                    let st = self.dt(&self.expr_ty(&args[0]));
+                    let (el, owned) = match &st {
+                        Ty::Slice(el) => ((**el).clone(), false),
+                        Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
+                            Ty::Slice(el) => ((**el).clone(), true),
+                            _ => (Ty::Unknown, false),
+                        },
+                        _ => (Ty::Unknown, false),
+                    };
+                    let ect = self.cty(&el);
+                    let sv = if owned { format!("(*{})", argvs[0]) } else { argvs[0].clone() };
+                    let v = argvs.get(1).cloned().unwrap_or_default();
+                    return format!(
+                        "({{ {ect} _pv = {v}; rt_slice_push({sv}, sizeof({ect}), &_pv); }})");
+                }
+                "len" => {
+                    // slice header → .len; strings keep rt_len
+                    return match self.dt(&self.expr_ty(&args[0])) {
+                        Ty::Slice(_) => format!("({}).len", argvs[0]),
+                        Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b)
+                            if matches!(*b, Ty::Slice(_)) =>
+                        {
+                            format!("(*{}).len", argvs[0])
+                        }
+                        _ => format!("rt_len({})", argvs[0]),
+                    };
+                }
                 _ => {
                     if let Some(b) = self.builtin_emit(name, &argvs) {
                         return b;
@@ -1462,6 +1578,14 @@ impl<'a> Gen<'a> {
             ExprKind::StructLit { fields, .. } => {
                 fields.iter().any(|(_, fe)| self.expr_has_susp(fe))
             }
+            ExprKind::Index { obj, idx } => {
+                self.expr_has_susp(obj) || self.expr_has_susp(idx)
+            }
+            ExprKind::Slice { obj, lo, hi } => {
+                self.expr_has_susp(obj)
+                    || lo.as_ref().is_some_and(|x| self.expr_has_susp(x))
+                    || hi.as_ref().is_some_and(|x| self.expr_has_susp(x))
+            }
             _ => false,
         }
     }
@@ -1574,6 +1698,21 @@ impl<'a> Gen<'a> {
                         .iter()
                         .map(|(n, fe)| (n.clone(), self.hoist_expr(fe, pre)))
                         .collect(),
+                },
+                span: e.span,
+            },
+            ExprKind::Index { obj, idx } => Expr {
+                kind: ExprKind::Index {
+                    obj: Box::new(self.hoist_expr(obj, pre)),
+                    idx: Box::new(self.hoist_expr(idx, pre)),
+                },
+                span: e.span,
+            },
+            ExprKind::Slice { obj, lo, hi } => Expr {
+                kind: ExprKind::Slice {
+                    obj: Box::new(self.hoist_expr(obj, pre)),
+                    lo: lo.as_ref().map(|x| Box::new(self.hoist_expr(x, pre))),
+                    hi: hi.as_ref().map(|x| Box::new(self.hoist_expr(x, pre))),
                 },
                 span: e.span,
             },

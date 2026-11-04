@@ -122,6 +122,7 @@ pub enum TyKind {
     Ref(Box<TyRef>),
     Mut(Box<TyRef>),
     Chan,
+    Slice(Box<TyRef>),
 }
 
 #[derive(Clone, Debug)]
@@ -222,8 +223,12 @@ pub enum ExprKind {
     Un { op: UnOp, e: Box<Expr> },
     /// `e as T` — v0.2 only `E.V` (enum variant payload extraction)
     As { e: Box<Expr>, ty: TyRef },
-    /// `match e { arms }` — stmt-position when any arm is a block
+    /// `match e { arms }` — value match when arms are `=> expr`
     Match { e: Box<Expr>, arms: Vec<MatchArm> },
+    /// `s[i]` — bounds-checked slice index (lvalue)
+    Index { obj: Box<Expr>, idx: Box<Expr> },
+    /// `s[a:b]` — slice view, shared backing (lo/hi optional)
+    Slice { obj: Box<Expr>, lo: Option<Box<Expr>>, hi: Option<Box<Expr>> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
