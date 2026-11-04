@@ -4,6 +4,15 @@ set -euo pipefail
 OXL="${1:-oxl}"
 cd "$(dirname "$0")/.."
 
+# GNU timeout doesn't exist on stock macOS; fall back to gtimeout
+# (brew coreutils), else run unbounded.
+with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then timeout "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
+    else shift; "$@"
+    fi
+}
+
 echo "== hello =="
 out=$("$OXL" run examples/hello.oxl)
 [ "$out" = "hello, world" ] || { echo "FAIL hello: $out"; exit 1; }
@@ -200,18 +209,18 @@ echo "== bootstrap codegen =="
 cgen_dir=$(mktemp -d)
 for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl; do
     "$OXL" run bootstrap/codegen.oxl -- "$f" > "$cgen_dir/out.c"
-    cc -O2 -pthread -Iruntime "$cgen_dir/out.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/out" || { echo "FAIL codegen cc $f"; exit 1; }
+    "${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/out.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/out" || { echo "FAIL codegen cc $f"; exit 1; }
     got=$("$cgen_dir/out")
     want=$("$OXL" run "$f")
     [ "$got" = "$want" ] || { echo "FAIL codegen $f"; exit 1; }
 done
 # --test mode: scope-wrapped runner like `oxl test`
 "$OXL" run bootstrap/codegen.oxl -- --test examples/smoke_test.oxl > "$cgen_dir/t.c"
-cc -O2 -pthread -Iruntime "$cgen_dir/t.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/t" || { echo "FAIL codegen cc --test"; exit 1; }
+"${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/t.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/t" || { echo "FAIL codegen cc --test"; exit 1; }
 "$cgen_dir/t" | grep -q "test_chan ... ok" || { echo "FAIL codegen --test"; exit 1; }
 # bootstrap chain: codegen compiled by itself emits identical C
 "$OXL" run bootstrap/codegen.oxl -- bootstrap/codegen.oxl > "$cgen_dir/self.c"
-cc -O2 -pthread -Iruntime "$cgen_dir/self.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/self" || { echo "FAIL codegen self-cc"; exit 1; }
+"${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/self.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/self" || { echo "FAIL codegen self-cc"; exit 1; }
 "$cgen_dir/self" examples/hello.oxl > "$cgen_dir/chain.c"
 "$OXL" run bootstrap/codegen.oxl -- examples/hello.oxl > "$cgen_dir/direct.c"
 cmp "$cgen_dir/chain.c" "$cgen_dir/direct.c" || { echo "FAIL bootstrap chain"; exit 1; }
@@ -228,7 +237,7 @@ echo "== a2 select =="
 out=$("$OXL" run tests/select.oxl)
 [ "$(tail -1 <<<"$out")" = "select done" ] || { echo "FAIL select: $out"; exit 1; }
 # parked select must unwedge on sibling trap — exits nonzero, not a hang
-if timeout 10 "$OXL" run tests/select_cancel.oxl >/dev/null 2>&1; then
+if with_timeout 10 "$OXL" run tests/select_cancel.oxl >/dev/null 2>&1; then
     echo "FAIL select_cancel: expected nonzero exit"; exit 1
 fi
 

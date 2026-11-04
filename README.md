@@ -24,12 +24,18 @@ HTTP CRUD + SQLite pilot. See the roadmap below for what's v0 vs later.
 ## Building the toolchain
 
 Requires: Rust (cargo), a C compiler (`cc`), pthreads, sqlite3 dev
-headers (runtime links `-lsqlite3`).
+headers (runtime links `-lsqlite3`). Supported platforms: Linux
+(x86_64) and macOS (aarch64); Windows is not yet supported (the
+runtime is POSIX/pthread — a portability layer is future work).
 
 ```sh
 cd oxl && cargo build --release
 # binary: oxl/target/release/oxl
 ```
+
+`oxl build`/`run` invoke the system `cc` for the final link; set
+`LANG_CC` to override (e.g. `LANG_CC=clang-18`). `tests/run.sh`
+honors the same override.
 
 ## Using it
 
