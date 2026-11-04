@@ -69,6 +69,26 @@ if "$OXL" run tests/slice_range.oxl >/dev/null 2>&1; then
     echo "FAIL slice_range: expected nonzero exit"; exit 1
 fi
 
+echo "== fn values (b4) =="
+out=$("$OXL" run tests/fnval.oxl)
+[ "$(tail -1 <<<"$out")" = "fnval ok" ] || { echo "FAIL fnval: $out"; exit 1; }
+# fn values can't suspend, capture susp, compare, or wrap generics/pairs
+for bad in susp clsusp ctrans gen pair eq; do
+    cat > /tmp/fnv_$bad.oxl <<EOF
+$(case $bad in
+  susp)   printf 'fn s() { sleep(1) }\nfn main() { f := s }' ;;
+  clsusp) printf 'fn main() { f := { |x: int| sleep(1); return x } }' ;;
+  ctrans) printf 'fn w() { sleep(1) }\nfn main() { f := { |x: int| w(); return x } }' ;;
+  gen)    printf 'fn id[T any](x: T) -> T { return x }\nfn main() { f := id[int] }' ;;
+  pair)   printf 'fn p() -> [int, err] { return 1, nil }\nfn main() { f := p }' ;;
+  eq)     printf 'fn a() {}\nfn main() { f := a; if f == a { println(1) } }' ;;
+esac)
+EOF
+    if "$OXL" build /tmp/fnv_$bad.oxl -o /tmp/fnv_$bad 2>/dev/null; then
+        echo "FAIL: fnval/$bad compiled (should be rejected)"; exit 1
+    fi
+done
+
 echo "== defer (b5) =="
 out=$("$OXL" run tests/defer_test.oxl)
 [ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }

@@ -46,6 +46,11 @@ struct Gen<'a> {
     trampolines: String,
     inst_out: String,
     inst_protos: String,
+    // B4: fn-value wrappers + closures
+    fnv_wraps: std::collections::BTreeSet<String>,
+    closure_protos: String,
+    closure_bodies: String,
+    closure_n: usize,
     tmp: usize,
     scope_id: usize,
     env: Vec<HashMap<String, Ty>>,
@@ -108,6 +113,10 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         trampolines: String::new(),
         inst_out: String::new(),
         inst_protos: String::new(),
+        fnv_wraps: std::collections::BTreeSet::new(),
+        closure_protos: String::new(),
+        closure_bodies: String::new(),
+        closure_n: 0,
         tmp: 0,
         scope_id: 0,
         env: vec![HashMap::new()],
@@ -299,6 +308,30 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
             g.func_inst(f, &mangled, &bind);
         }
     }
+    // B4: zero-env wrappers giving named fns the (void* env, args...)
+    // calling convention every fn value shares
+    for n in g.fnv_wraps.clone() {
+        if let Some((ps, ret)) = g.fns.get(&n).cloned() {
+            let ret_c = match &ret {
+                crate::check::Ret::One(t) => g.cty(t),
+                _ => "void".into(),
+            };
+            let mut psig = String::new();
+            for (i, p) in ps.iter().enumerate() {
+                psig += &format!(", {} a{i}", g.cty(p));
+            }
+            let argl: Vec<String> = (0..ps.len()).map(|i| format!("a{i}")).collect();
+            let callee = if g.externs.contains(&n) {
+                n.clone()
+            } else {
+                format!("o_f_{}", cname(&n))
+            };
+            let ret_kw = if ret_c == "void" { "" } else { "return " };
+            let _ = writeln!(g.inst_protos,
+                "static {ret_c} o_fnv_wrap_{}(void* _e{psig}) {{ {ret_kw}{callee}({}); }}",
+                cname(&n), argl.join(", "));
+        }
+    }
     // global initializers run first inside oxl_main (base scope exists)
     let mut global_inits = String::new();
     for it in &c.items {
@@ -332,14 +365,18 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
 
     // trampolines + frame decls must precede the fn bodies that use them
     g.out = g.out.replace("/*GLOBALS*/", &global_inits);
-    // inst protos precede every body (regular, inst, and frame poll fns)
+    // inst protos precede every body (regular, inst, and frame poll fns);
+    // closure protos likewise — closure wrapper bodies go last since
+    // they only reference protos
     let mut final_out = g.out[..body_start].to_string();
     final_out.push_str(&g.trampolines);
     final_out.push_str(&g.frame_head);
     final_out.push_str(&g.inst_protos);
+    final_out.push_str(&g.closure_protos);
     final_out.push_str(&g.inst_out);
     final_out.push_str(&g.frame_out);
     final_out.push_str(&g.out[body_start..]);
+    final_out.push_str(&g.closure_bodies);
     final_out
 }
 
@@ -365,6 +402,12 @@ fn bind_generic(want: &Ty, got: &Ty, bind: &mut HashMap<String, Ty>) {
             bind_generic(w, g, bind)
         }
         (Ty::Slice(w), Ty::Slice(g)) => bind_generic(w, g, bind),
+        (Ty::Fn(wps, wr), Ty::Fn(gps, gr)) => {
+            for (w, g) in wps.iter().zip(gps.iter()) {
+                bind_generic(w, g, bind);
+            }
+            bind_generic(wr, gr, bind);
+        }
         _ => {}
     }
 }
@@ -409,6 +452,10 @@ impl<'a> Gen<'a> {
             TyKind::Mut(t) => Ty::Mut(Box::new(self.ty_of_ref(t))),
             TyKind::Chan => Ty::Chan,
             TyKind::Slice(t) => Ty::Slice(Box::new(self.ty_of_ref(t))),
+            TyKind::Fn { params, ret } => Ty::Fn(
+                params.iter().map(|p| self.ty_of_ref(p)).collect(),
+                Box::new(ret.as_ref().map(|r| self.ty_of_ref(r)).unwrap_or(Ty::Void)),
+            ),
         }
     }
 
@@ -424,6 +471,7 @@ impl<'a> Gen<'a> {
             Ty::Struct(n) => format!("struct o_s_{}", cname(n)),
             Ty::Enum(n) => format!("struct o_en_{}", cname(n)),
             Ty::Slice(_) => "RtSlice".into(),
+            Ty::Fn(..) => "RtFnv".into(),
             Ty::Var(v) => self
                 .subst
                 .get(v)
@@ -621,13 +669,35 @@ impl<'a> Gen<'a> {
 
     fn expr_ty(&self, e: &Expr) -> Ty {
         match &e.kind {
+            ExprKind::TyLit(_) => Ty::Void,
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
             ExprKind::Str(_) => Ty::Str,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Nil => Ty::Err,
-            ExprKind::Ident(n) => self.lookup(n),
+            ExprKind::Ident(n) => {
+                let t = self.lookup(n);
+                if t != Ty::Unknown {
+                    t
+                } else {
+                    // named fn as a value — {env=0, wrapper} pair
+                    match self.fns.get(n) {
+                        Some((ps, ret)) if !self.ty_params.contains_key(n) => Ty::Fn(
+                            ps.clone(),
+                            Box::new(match ret {
+                                crate::check::Ret::One(t) => t.clone(),
+                                _ => Ty::Void,
+                            }),
+                        ),
+                        _ => Ty::Unknown,
+                    }
+                }
+            }
             ExprKind::Call { f, args } => {
+                // indirect call through a fn value → its ret type
+                if let Ty::Fn(_, r) = self.fn_callee_ty(f) {
+                    return *r;
+                }
                 if let ExprKind::Ident(n) = &f.kind {
                     // enum variant ctor → the enum type; `.kind()` → int
                     if let Some((en, _, _)) = self.enum_variant(n) {
@@ -665,11 +735,17 @@ impl<'a> Gen<'a> {
                         "mkchan" => return Ty::Chan,
                         "mkslice" => {
                             if let Some(a) = args.first() {
-                                if let ExprKind::Ident(tn) = &a.kind {
-                                    return Ty::Slice(Box::new(self.ty_of_ref(&TyRef {
-                                        kind: TyKind::Named(tn.clone()),
-                                        span: a.span,
-                                    })));
+                                match &a.kind {
+                                    ExprKind::Ident(tn) => {
+                                        return Ty::Slice(Box::new(self.ty_of_ref(&TyRef {
+                                            kind: TyKind::Named(tn.clone()),
+                                            span: a.span,
+                                        })));
+                                    }
+                                    ExprKind::TyLit(tr) => {
+                                        return Ty::Slice(Box::new(self.ty_of_ref(tr)));
+                                    }
+                                    _ => {}
                                 }
                             }
                             return Ty::Slice(Box::new(Ty::Unknown));
@@ -763,6 +839,10 @@ impl<'a> Gen<'a> {
                 },
                 _ => Ty::Unknown,
             },
+            ExprKind::Closure { params, body } => Ty::Fn(
+                params.iter().map(|p| self.ty_of_ref(&p.ty)).collect(),
+                Box::new(self.closure_ret_ty(body)),
+            ),
             ExprKind::Bin { op, l, r } => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                 | BinOp::And | BinOp::Or => Ty::Bool,
@@ -943,6 +1023,37 @@ impl<'a> Gen<'a> {
 
     fn spawn(&mut self, call: &Expr, blocking: bool) {
         if let ExprKind::Call { f, args } = &call.kind {
+            // spawn f() where f is a fn value — pack the fat pair as a0
+            if let Ty::Fn(ps, r) = self.fn_callee_ty(f) {
+                let id = self.tmp();
+                let mut tr = format!("struct o_args_{id} {{ RtFnv a0;");
+                for (i, p) in ps.iter().enumerate() {
+                    tr.push_str(&format!(" {} a{};", self.cty(p), i + 1));
+                }
+                tr.push_str(" };\n");
+                let ret_c = self.cty(&r);
+                let mut sig = String::from("void*");
+                let mut argl = String::new();
+                for (i, p) in ps.iter().enumerate() {
+                    sig += &format!(", {}", self.cty(p));
+                    argl += &format!(", a->a{}", i + 1);
+                }
+                tr.push_str(&format!(
+                    "static void* l_tr_{id}(void* _p) {{ struct o_args_{id}* a = _p; \
+                     (({ret_c} (*)({sig}))a->a0.fp)(a->a0.env{argl}); return 0; }}\n"));
+                self.trampolines.push_str(&tr);
+                let _ = writeln!(self.out,
+                    "    {{ struct o_args_{id}* a = rt_alloc(sizeof(struct o_args_{id}));");
+                let fv = self.expr(f);
+                let _ = writeln!(self.out, "      a->a0 = {fv};");
+                for (i, arg) in args.iter().enumerate() {
+                    let v = self.expr(arg);
+                    let _ = writeln!(self.out, "      a->a{} = {v};", i + 1);
+                }
+                let spawn_fn = if blocking { "rt_spawnb" } else { "rt_spawn" };
+                let _ = writeln!(self.out, "      {spawn_fn}(l_tr_{id}, a); }}");
+                return;
+            }
             if let ExprKind::Ident(fn_name) = &f.kind {
                 let fn_name = &fn_name.clone();
                 // suspendable callee → frame task (heap frame + poll driver)
@@ -1036,6 +1147,15 @@ impl<'a> Gen<'a> {
                 let local = self.env.iter().skip(1).any(|s| s.contains_key(n));
                 if !local && self.globals.contains_key(n) {
                     format!("o_g_{}", cname(&n))
+                } else if !local
+                    && self.fns.contains_key(n)
+                    && !self.ty_params.contains_key(n)
+                    && !self.susp.contains(n)
+                    && !matches!(self.fns[n].1, crate::check::Ret::Pair(_))
+                {
+                    // named fn as a value — zero-env fat pair
+                    self.fnv_wraps.insert(n.clone());
+                    format!("(RtFnv){{ 0, (void*)o_fnv_wrap_{} }}", cname(&n))
                 } else {
                     n.clone()
                 }
@@ -1145,7 +1265,155 @@ impl<'a> Gen<'a> {
                      if (_ma < 0 || _mb < _ma || _mb > _ms.len) rt_trap(10); \
                      (RtSlice){{ ({ect}*)_ms.ptr + _ma, _mb - _ma, _ms.cap - _ma }}; }})")
             }
+            ExprKind::Closure { params, body } => self.closure_expr(e, params, body),
+            // checker rejects TyLit outside mkslice — unreachable there
+            ExprKind::TyLit(_) => "0".into(),
         }
+    }
+
+    /// callee `f` resolves to a `fn(...)` value type — var callee when
+    /// the name is a local (shadow rule), any other expr when its type
+    /// is Fn. Named fns keep the direct-call path.
+    fn fn_callee_ty(&self, f: &Expr) -> Ty {
+        match &f.kind {
+            ExprKind::Ident(n) => match self.lookup(n) {
+                t @ Ty::Fn(..) => self.dt(&t),
+                _ => Ty::Unknown,
+            },
+            _ => self.dt(&self.expr_ty(f)),
+        }
+    }
+
+    /// closure return type: first `return <expr>` in the body, else void
+    fn closure_ret_ty(&self, b: &Block) -> Ty {
+        for s in &b.stmts {
+            match s {
+                Stmt::Return { vals, .. } if vals.len() == 1 => {
+                    return self.expr_ty(&vals[0]);
+                }
+                Stmt::If { then, els, .. } => {
+                    let t = self.closure_ret_ty(then);
+                    if t != Ty::Void {
+                        return t;
+                    }
+                    if let Some(e) = els {
+                        let t = self.closure_ret_ty(e);
+                        if t != Ty::Void {
+                            return t;
+                        }
+                    }
+                }
+                Stmt::For { body, .. } | Stmt::Scope { body, .. } | Stmt::Unsafe { body, .. } => {
+                    let t = self.closure_ret_ty(body);
+                    if t != Ty::Void {
+                        return t;
+                    }
+                }
+                Stmt::Select { arms, .. } => {
+                    for a in arms {
+                        let t = self.closure_ret_ty(&a.body);
+                        if t != Ty::Void {
+                            return t;
+                        }
+                    }
+                }
+                Stmt::Expr(e) | Stmt::Let { init: e, .. } => {
+                    if let ExprKind::Match { arms, .. } = &e.kind {
+                        for a in arms {
+                            if let MatchBody::Block(b) = &a.body {
+                                let t = self.closure_ret_ty(b);
+                                if t != Ty::Void {
+                                    return t;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ty::Void
+    }
+
+    /// `{ |params| stmts }` — env struct + wrapper fn + {env, fp} value
+    fn closure_expr(&mut self, e: &Expr, params: &[Param], body: &Block) -> String {
+        let id = self.closure_n;
+        self.closure_n += 1;
+        let mut scan = crate::check::BodyScan::default();
+        crate::check::scan_block(body, &mut scan);
+        let pnames: std::collections::HashSet<&str> =
+            params.iter().map(|p| p.name.as_str()).collect();
+        // captures come from refs ∪ callees — `base(x)` lands the callee in
+        // `callees`, but a named fn callee never resolves through `lookup`
+        // so only real locals (incl. fn-valued vars) get captured
+        let mut captures: Vec<(String, Ty)> = scan
+            .refs
+            .union(&scan.callees)
+            .filter(|n| !pnames.contains(n.as_str()))
+            .filter_map(|n| match self.lookup(n) {
+                Ty::Unknown => None,
+                t => Some((n.clone(), t)),
+            })
+            .collect();
+        captures.sort_by(|a, b| a.0.cmp(&b.0));
+        let ptys: Vec<Ty> = params.iter().map(|p| self.ty_of_ref(&p.ty)).collect();
+        let ret = self.closure_ret_ty(body);
+        let ret_c = self.cty(&ret);
+        let mut psig = String::new();
+        for (p, t) in params.iter().zip(ptys.iter()) {
+            psig += &format!(", {} {}", self.cty(t), cname(&p.name));
+        }
+        let mut env_fields = String::new();
+        for (n, t) in &captures {
+            env_fields += &format!(" {} {};", self.cty(t), cname(n));
+        }
+        let _ = writeln!(self.closure_protos, "struct o_env_{id} {{{env_fields} }};");
+        let _ = writeln!(self.closure_protos,
+            "static {ret_c} o_cl_{id}(struct o_env_{id} *_e{psig});");
+        // wrapper body — emitted like a plain fn, captures become locals
+        let saved_out = std::mem::take(&mut self.out);
+        let saved_frame = self.in_frame;
+        self.in_frame = false;
+        let saved_fslots = std::mem::take(&mut self.fslots);
+        let saved_ret_pair = self.cur_ret_pair;
+        self.cur_ret_pair = false;
+        let saved_defers = std::mem::take(&mut self.defers);
+        let saved_fn = std::mem::replace(&mut self.cur_fn, format!("o_cl_{id}"));
+        let _ = writeln!(self.out, "static {ret_c} o_cl_{id}(struct o_env_{id} *_e{psig}) {{");
+        let mut scope = HashMap::new();
+        for (n, t) in &captures {
+            let _ = writeln!(self.out, "    {} {} = _e->{};", self.cty(t), cname(n), cname(n));
+            scope.insert(n.clone(), t.clone());
+        }
+        for (p, t) in params.iter().zip(ptys.iter()) {
+            scope.insert(p.name.clone(), t.clone());
+        }
+        self.env.push(scope);
+        for s in &body.stmts {
+            self.stmt(s);
+        }
+        self.emit_defers();
+        self.env.pop();
+        let _ = writeln!(self.out, "}}");
+        self.closure_bodies.push_str(&self.out);
+        self.out = saved_out;
+        self.in_frame = saved_frame;
+        self.fslots = saved_fslots;
+        self.cur_ret_pair = saved_ret_pair;
+        self.defers = saved_defers;
+        self.cur_fn = saved_fn;
+        // the value: heap-free env populated from the enclosing scope
+        let mut inits = String::new();
+        for (n, _) in &captures {
+            let v = self.expr(&Expr {
+                kind: ExprKind::Ident(n.clone()),
+                span: e.span,
+            });
+            inits += &format!(" _e->{} = {v};", cname(n));
+        }
+        format!(
+            "({{ struct o_env_{id} *_e = rt_alloc(sizeof(struct o_env_{id}));{inits} \
+             (RtFnv){{ _e, (void*)o_cl_{id} }}; }})")
     }
 
     /// element type of a slice-valued expr (unwraps `own`/`ref`/`mut` headers)
@@ -1356,6 +1624,22 @@ impl<'a> Gen<'a> {
 
     fn call(&mut self, f: &Expr, args: &[Expr]) -> String {
         let argvs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+        // indirect call through a fn value: bind once, jump through fp
+        if let Ty::Fn(ps, r) = self.fn_callee_ty(f) {
+            let fv = self.expr(f);
+            let ret_c = self.cty(&r);
+            let mut sig = String::from("void*");
+            for p in &ps {
+                sig += &format!(", {}", self.cty(p));
+            }
+            let argl = if argvs.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", argvs.join(", "))
+            };
+            return format!(
+                "({{ RtFnv _fv = {fv}; (({ret_c} (*)({sig}))_fv.fp)(_fv.env{argl}); }})");
+        }
         if let ExprKind::Ident(name) = &f.kind {
             // enum variant construction: `ExprKind.Int(7)`
             if let Some((en, _v, i)) = self.enum_variant(name) {
@@ -1418,6 +1702,7 @@ impl<'a> Gen<'a> {
                             kind: TyKind::Named(n.clone()),
                             span: a.span,
                         })),
+                        ExprKind::TyLit(tr) => Some(self.ty_of_ref(tr)),
                         _ => None,
                     }).unwrap_or(Ty::Unknown);
                     let n = if args.len() > 1 { argvs[1].clone() } else { "0LL".into() };

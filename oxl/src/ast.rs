@@ -123,6 +123,9 @@ pub enum TyKind {
     Mut(Box<TyRef>),
     Chan,
     Slice(Box<TyRef>),
+    /// `fn(int, int) -> bool` / `fn(a: int) -> int` — fn value type;
+    /// ret None = void. `[T, err]` returns are not supported in v0.2.
+    Fn { params: Vec<TyRef>, ret: Option<Box<TyRef>> },
 }
 
 #[derive(Clone, Debug)]
@@ -229,6 +232,12 @@ pub enum ExprKind {
     Index { obj: Box<Expr>, idx: Box<Expr> },
     /// `s[a:b]` — slice view, shared backing (lo/hi optional)
     Slice { obj: Box<Expr>, lo: Option<Box<Expr>>, hi: Option<Box<Expr>> },
+    /// `{ |a: int, b: int| stmts }` — closure; captures enclosing
+    /// locals by value into a generated env struct
+    Closure { params: Vec<Param>, body: Block },
+    /// a type in expression position — `fn(int) -> int`; only valid
+    /// as `mkslice`'s element-type arg
+    TyLit(TyRef),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

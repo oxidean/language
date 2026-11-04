@@ -43,8 +43,11 @@ Ordered by what the checker/codegen port actually needs:
    keeps its linked `Json` spine (incremental child lists beat
    re-teaching `jadd` growth at self-parse scale); token storage can
    migrate when the checker port wants it.
-4. **Function values** — recursive descent doesn't need them, but
-   visitor-style AST passes and stdlib `sort`/`map` will.
+4. ~~**Function values**~~ — **done (B4).** `fn(A) -> R` types,
+   named-fn values via zero-env wrappers, copy-capture closures
+   `{ |a: int| ... }` on `RtFnv {env, fp}` pairs, indirect calls and
+   `spawn f()`. v0.2 rejects susp/generic/pair-returning fns as values
+   and `==` on them — see `docs/semantics/fnvals.md`.
 5. **Methods / `interface` dispatch** — today's `interface` is only an
    op-constraint vocabulary for generics, not a type.
 6. **Maps/sets in stdlib** — the checker's env and fn tables want real

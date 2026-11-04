@@ -128,6 +128,14 @@ typedef struct {
 RtSlice rt_mkslice(int64_t n, int64_t esz);            /* len==cap==n, zeroed */
 RtSlice rt_slice_push(RtSlice s, int64_t esz, void *v); /* grow + append */
 
+/* --- function values (B4): {env, fnptr} fat pair. The callee
+ * signature is always (void* env, args...) — named fns get a
+ * zero-env wrapper so every call goes through the same shape */
+typedef struct {
+    void *env;
+    void *fp;
+} RtFnv;
+
 /* --- misc builtins --- */
 void rt_sleep(int64_t secs);
 OxlStr rt_str_lit(const char *s);

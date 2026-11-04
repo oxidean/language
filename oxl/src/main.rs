@@ -121,6 +121,12 @@ fn qualify_expr(
                 qualify_expr(x, renames, aliases);
             }
         }
+        ast::ExprKind::Closure { params, body } => {
+            for p in params {
+                qualify_ty(&mut p.ty, renames, aliases);
+            }
+            qualify_block(body, renames, aliases);
+        }
         ast::ExprKind::Bin { l, r, .. } => {
             qualify_expr(l, renames, aliases);
             qualify_expr(r, renames, aliases);
@@ -164,6 +170,14 @@ fn qualify_ty(
         }
         ast::TyKind::Chan => {}
         ast::TyKind::Slice(i) => qualify_ty(i, renames, aliases),
+        ast::TyKind::Fn { params, ret } => {
+            for p in params {
+                qualify_ty(p, renames, aliases);
+            }
+            if let Some(r) = ret {
+                qualify_ty(r, renames, aliases);
+            }
+        }
     }
 }
 

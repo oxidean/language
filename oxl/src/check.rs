@@ -18,6 +18,8 @@ pub enum Ty {
     Struct(String),
     Enum(String),
     Slice(Box<Ty>),
+    /// `fn(int, int) -> bool` — fn value ({env, fnptr}); ret Void = no `->`
+    Fn(Vec<Ty>, Box<Ty>),
     Var(String), // generic type parameter (instantiated at call sites)
     Unknown,
 }
@@ -39,6 +41,10 @@ impl Ty {
             Ty::Struct(n) => n.clone(),
             Ty::Enum(n) => n.clone(),
             Ty::Slice(t) => format!("[]{}", t.name()),
+            Ty::Fn(ps, r) => format!(
+                "fn({}){}",
+                ps.iter().map(|p| p.name()).collect::<Vec<_>>().join(", "),
+                if **r == Ty::Void { String::new() } else { format!(" -> {}", r.name()) }),
             Ty::Var(n) => n.clone(),
             Ty::Unknown => "?".into(),
         }
@@ -83,6 +89,9 @@ impl Env {
     fn get(&self, n: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(n).cloned())
     }
+    fn names(&self) -> HashSet<String> {
+        self.scopes.iter().flat_map(|s| s.keys().cloned()).collect()
+    }
     fn set(&mut self, n: String, t: Ty) {
         self.scopes.last_mut().unwrap().insert(n, t);
     }
@@ -104,6 +113,13 @@ pub struct Checker<'a> {
     cur_ty_params: Vec<(String, String)>,
     loop_depth: i32,
     globals: HashMap<String, Ty>,
+    // B4 deferred checks — susp isn't known until bodies are checked:
+    /// named fns taken as values — validated against `suspend` post-pass
+    fnval_uses: Vec<(String, Span)>,
+    /// (span, callee idents inside closure, has structural susp seed)
+    closure_checks: Vec<(Span, HashSet<String>, bool)>,
+    /// Some(inferred) while checking a closure body — `return` feeds it
+    closure_ret: Option<Option<Ty>>,
 }
 
 const BUILTINS: &[&str] = &[
@@ -131,10 +147,26 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
         cur_ty_params: Vec::new(),
         loop_depth: 0,
         globals: HashMap::new(),
+        fnval_uses: Vec::new(),
+        closure_checks: Vec::new(),
+        closure_ret: None,
     };
     ck.register(c);
     ck.check_items(c);
     let checked = Checked { suspend: ck.suspend_set(c) };
+    // B4 deferred: susp set only exists once call edges are collected
+    for (n, sp) in &ck.fnval_uses {
+        if checked.suspend.contains(n) {
+            ck.diags.push(Diag::err(*sp, "type",
+                format!("suspendable fn `{n}` can't be a value (v0.2)")));
+        }
+    }
+    for (sp, callees, seeded) in &ck.closure_checks {
+        if *seeded || callees.iter().any(|n| checked.suspend.contains(n)) {
+            ck.diags.push(Diag::err(*sp, "type",
+                "closures may not suspend — spawn/scope/select/recv/send/sleep inside `{ |..| }`".to_string()));
+        }
+    }
     ck.check_suspend_rules(c, &checked.suspend);
     checked
 }
@@ -274,6 +306,10 @@ impl<'a> Checker<'a> {
             TyKind::Mut(t) => Ty::Mut(Box::new(self.resolve(t))),
             TyKind::Chan => Ty::Chan,
             TyKind::Slice(t) => Ty::Slice(Box::new(self.resolve(t))),
+            TyKind::Fn { params, ret } => Ty::Fn(
+                params.iter().map(|p| self.resolve(p)).collect(),
+                Box::new(ret.as_ref().map(|r| self.resolve(r)).unwrap_or(Ty::Void)),
+            ),
         }
     }
 
@@ -360,6 +396,28 @@ impl<'a> Checker<'a> {
                 self.expr(call, env);
             }
             Stmt::Return { vals, span } => {
+                // inside `{ |..| }` — feed the closure's inferred ret
+                if self.closure_ret.is_some() {
+                    if vals.len() > 1 {
+                        self.diags.push(Diag::err(*span, "check",
+                            "`[T, err]` returns aren't supported in closures"));
+                        return;
+                    }
+                    let t = if vals.is_empty() {
+                        Ty::Void
+                    } else {
+                        self.expr(&vals[0], env)
+                    };
+                    let prev = self.closure_ret.as_mut().unwrap();
+                    match prev {
+                        None => *prev = Some(t),
+                        Some(w) => {
+                            let w = w.clone();
+                            self.assignable(&w, &t, *span);
+                        }
+                    }
+                    return;
+                }
                 let cur_ret = self.cur_ret.clone();
                 match &cur_ret {
                     Ret::Void => {
@@ -517,6 +575,12 @@ impl<'a> Checker<'a> {
             // own argument into ref/mut param still binds the inner var
             (Ty::Ref(w) | Ty::Mut(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) => self.bind_vars(w, g, bind),
             (Ty::Slice(w), Ty::Slice(g)) => self.bind_vars(w, g, bind),
+            (Ty::Fn(wps, wr), Ty::Fn(gps, gr)) => {
+                for (w, g) in wps.iter().zip(gps.iter()) {
+                    self.bind_vars(w, g, bind);
+                }
+                self.bind_vars(wr, gr, bind);
+            }
             _ => {}
         }
     }
@@ -604,7 +668,22 @@ impl<'a> Checker<'a> {
             ExprKind::Ident(n) => match env.get(n).or_else(|| self.globals.get(n).cloned()) {
                 Some(t) => t,
                 None => {
-                    if self.fns.contains_key(n) || BUILTINS.contains(&n.as_str()) {
+                    if let Some(sig) = self.fns.get(n).cloned() {
+                        // named fn as a value (B4) — restrictions:
+                        // generics need a call site, [T,err] has no shared
+                        // ret struct, susp fns can't cross the boundary
+                        if !sig.ty_params.is_empty() {
+                            self.diags.push(Diag::err(e.span, "check",
+                                format!("generic fn `{n}` can't be a value — call it to instantiate")));
+                        } else if matches!(sig.ret, Ret::Pair(_)) {
+                            self.diags.push(Diag::err(e.span, "check",
+                                format!("`{n}` returns `[T, err]` — pair returns can't be fn values (v0.2)")));
+                        } else {
+                            self.fnval_uses.push((n.clone(), e.span));
+                            let r = match &sig.ret { Ret::One(t) => t.clone(), _ => Ty::Void };
+                            return Ty::Fn(sig.params.clone(), Box::new(r));
+                        }
+                    } else if BUILTINS.contains(&n.as_str()) {
                         self.diags.push(Diag::err(e.span, "check", format!("`{n}` is a function — call it")));
                     } else {
                         self.diags.push(Diag::err(e.span, "check", format!("undefined `{n}`")));
@@ -612,6 +691,37 @@ impl<'a> Checker<'a> {
                     Ty::Unknown
                 }
             },
+            ExprKind::Closure { params, body } => {
+                let ptys: Vec<Ty> = params.iter().map(|p| self.resolve(&p.ty)).collect();
+                let pnames: HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                // copy-capture: a captured name may not be re-bound inside —
+                // the generated env local would collide with the `let`
+                let mut scan = BodyScan::default();
+                scan_block(body, &mut scan);
+                let outer = env.names();
+                for n in scan.binds.iter() {
+                    if !pnames.contains(n)
+                        && outer.contains(n)
+                        && scan.refs.contains(n)
+                    {
+                        self.diags.push(Diag::err(e.span, "check",
+                            format!("closure local `{n}` shadows a captured variable — rename one")));
+                    }
+                }
+                self.closure_checks.push((e.span, scan.callees, scan.seeded));
+                let saved = std::mem::replace(&mut self.closure_ret, Some(None));
+                env.push();
+                for (p, t) in params.iter().zip(ptys.iter()) {
+                    env.set(p.name.clone(), t.clone());
+                }
+                self.block(body, env);
+                env.pop();
+                let inferred = std::mem::replace(&mut self.closure_ret, saved)
+                    .flatten()
+                    .unwrap_or(Ty::Void);
+                Ty::Fn(ptys, Box::new(inferred))
+            }
             ExprKind::Call { f, args } => self.call(f, args, e.span, env),
             ExprKind::Field { obj, name } => {
                 // unit variant: `ExprKind.Nil` — obj is the enum name
@@ -758,7 +868,12 @@ impl<'a> Checker<'a> {
                         Ty::Bool
                     }
                     BinOp::Eq | BinOp::Ne => {
-                        self.assignable(&lt, &rt, e.span);
+                        if matches!(lt, Ty::Fn(..)) || matches!(rt, Ty::Fn(..)) {
+                            self.diags.push(Diag::err(e.span, "type",
+                                "fn values aren't comparable (v0.2)"));
+                        } else {
+                            self.assignable(&lt, &rt, e.span);
+                        }
                         Ty::Bool
                     }
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
@@ -1006,6 +1121,11 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            ExprKind::TyLit(_) => {
+                self.diags.push(Diag::err(e.span, "type",
+                    "type literal only allowed as `mkslice` element type"));
+                Ty::Unknown
+            }
         }
     }
 
@@ -1041,6 +1161,10 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::Unknown;
                 }
+            }
+            // a local fn value shadows a same-named fn or builtin
+            if let Some(Ty::Fn(ps, r)) = env.get(name) {
+                return self.call_fnvalue(&ps, &r, args, sp, env);
             }
             if self.fns.contains_key(name) {
                 self.calls.entry(self.cur_fn.clone()).or_default().insert(name.clone());
@@ -1147,6 +1271,7 @@ impl<'a> Checker<'a> {
                             ExprKind::Ident(n) => self.resolve(&TyRef {
                                 kind: TyKind::Named(n.clone()), span: a.span,
                             }),
+                            ExprKind::TyLit(tr) => self.resolve(tr),
                             _ => {
                                 self.diags.push(Diag::err(a.span, "check",
                                     "`mkslice` takes a type name — mkslice(int, 8)"));
@@ -1367,8 +1492,29 @@ impl<'a> Checker<'a> {
                 }
             };
         }
-        self.diags.push(Diag::err(sp, "check", "can only call named functions (v0)"));
-        Ty::Unknown
+        // non-Ident callee — indirect call through a fn value
+        match self.expr(f, env) {
+            Ty::Fn(ps, r) => self.call_fnvalue(&ps, &r, args, sp, env),
+            Ty::Unknown => Ty::Unknown,
+            t => {
+                self.diags.push(Diag::err(sp, "type",
+                    format!("call of non-function `{}`", t.name())));
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// `f(args)` where `f` is a `fn(...)` value — check arity + args
+    fn call_fnvalue(&mut self, ps: &[Ty], r: &Ty, args: &[Expr], sp: Span, env: &mut Env) -> Ty {
+        if args.len() != ps.len() {
+            self.diags.push(Diag::err(sp, "check",
+                format!("fn value takes {} args, got {}", ps.len(), args.len())));
+        }
+        for (a, want) in args.iter().zip(ps.iter()) {
+            let got = self.expr(a, env);
+            self.assignable(want, &got, a.span);
+        }
+        r.clone()
     }
 
     /// Suspend-capable = reaches spawn/scope/recv/send/sleep transitively.
@@ -1681,6 +1827,10 @@ pub fn subst_ty(t: &Ty, bind: &HashMap<String, Ty>) -> Ty {
         Ty::Ref(b) => Ty::Ref(Box::new(subst_ty(b, bind))),
         Ty::Mut(b) => Ty::Mut(Box::new(subst_ty(b, bind))),
         Ty::Slice(b) => Ty::Slice(Box::new(subst_ty(b, bind))),
+        Ty::Fn(ps, r) => Ty::Fn(
+            ps.iter().map(|p| subst_ty(p, bind)).collect(),
+            Box::new(subst_ty(r, bind)),
+        ),
         _ => t.clone(),
     }
 }
@@ -1690,5 +1840,154 @@ fn subst_ret(r: &Ret, bind: &HashMap<String, Ty>) -> Ret {
         Ret::One(t) => Ret::One(subst_ty(t, bind)),
         Ret::Pair(t) => Ret::Pair(subst_ty(t, bind)),
         Ret::Void => Ret::Void,
+    }
+}
+
+/// one-pass body scan for closures (B4): every ident referenced
+/// (`refs`), every name bound locally (`binds`), every ident used as a
+/// call callee (`callees`), and whether a structural suspend seed
+/// (scope/select/spawn or a susp-builtin call) appears (`seeded`).
+#[derive(Default)]
+pub(crate) struct BodyScan {
+    pub refs: HashSet<String>,
+    pub binds: HashSet<String>,
+    pub callees: HashSet<String>,
+    pub seeded: bool,
+}
+
+pub(crate) fn scan_block(b: &Block, s: &mut BodyScan) {
+    for st in &b.stmts {
+        scan_stmt(st, s);
+    }
+}
+
+fn scan_stmt(st: &Stmt, s: &mut BodyScan) {
+    match st {
+        Stmt::Let { name, init, .. } => {
+            s.binds.insert(name.clone());
+            scan_expr(init, s);
+        }
+        Stmt::Let2 { a, b, call, .. } => {
+            for bd in [a, b] {
+                if let Bind::Name(n) = bd {
+                    s.binds.insert(n.clone());
+                }
+            }
+            scan_expr(call, s);
+        }
+        Stmt::Expr(e) => scan_expr(e, s),
+        Stmt::Assign { target, val, .. } => {
+            scan_expr(target, s);
+            scan_expr(val, s);
+        }
+        Stmt::If { cond, then, els, .. } => {
+            scan_expr(cond, s);
+            scan_block(then, s);
+            if let Some(e) = els {
+                scan_block(e, s);
+            }
+        }
+        Stmt::For { cond, body, .. } => {
+            scan_expr(cond, s);
+            scan_block(body, s);
+        }
+        Stmt::Scope { body, .. } => {
+            s.seeded = true;
+            scan_block(body, s);
+        }
+        Stmt::Unsafe { body, .. } => scan_block(body, s),
+        Stmt::Spawn { call, .. } | Stmt::Defer { call, .. } => {
+            s.seeded = true;
+            scan_expr(call, s);
+        }
+        Stmt::Select { arms, .. } => {
+            s.seeded = true;
+            for a in arms {
+                match &a.kind {
+                    SelKind::Recv { chan, bind, .. } => {
+                        scan_expr(chan, s);
+                        if let Some(n) = bind {
+                            s.binds.insert(n.clone());
+                        }
+                    }
+                    SelKind::Timeout { ms, .. } => scan_expr(ms, s),
+                    SelKind::Else { .. } => {}
+                }
+                scan_block(&a.body, s);
+            }
+        }
+        Stmt::Return { vals, .. } => vals.iter().for_each(|v| scan_expr(v, s)),
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+    }
+}
+
+fn scan_expr(e: &Expr, s: &mut BodyScan) {
+    match &e.kind {
+        ExprKind::Ident(n) => {
+            s.refs.insert(n.clone());
+        }
+        ExprKind::Call { f, args } => {
+            if let ExprKind::Ident(n) = &f.kind {
+                s.callees.insert(n.clone());
+                if matches!(n.as_str(), "recv" | "send" | "sleep" | "usleep") {
+                    s.seeded = true;
+                }
+            } else {
+                scan_expr(f, s);
+            }
+            args.iter().for_each(|a| scan_expr(a, s));
+        }
+        ExprKind::Bin { l, r, .. } => {
+            scan_expr(l, s);
+            scan_expr(r, s);
+        }
+        ExprKind::Un { e, .. } | ExprKind::As { e, .. } => scan_expr(e, s),
+        ExprKind::Field { obj, .. } => scan_expr(obj, s),
+        ExprKind::StructLit { fields, .. } => {
+            fields.iter().for_each(|(_, fe)| scan_expr(fe, s))
+        }
+        ExprKind::Index { obj, idx } => {
+            scan_expr(obj, s);
+            scan_expr(idx, s);
+        }
+        ExprKind::Slice { obj, lo, hi } => {
+            scan_expr(obj, s);
+            if let Some(x) = lo {
+                scan_expr(x, s);
+            }
+            if let Some(x) = hi {
+                scan_expr(x, s);
+            }
+        }
+        ExprKind::Match { e, arms } => {
+            scan_expr(e, s);
+            for a in arms {
+                match &a.pat {
+                    Pattern::Lit(le) => scan_expr(le, s),
+                    Pattern::VarPos { binds, .. } | Pattern::VarNamed { binds, .. } => {
+                        binds.iter().for_each(|n| {
+                            s.binds.insert(n.clone());
+                        })
+                    }
+                    Pattern::Bind(n) => {
+                        s.binds.insert(n.clone());
+                    }
+                    _ => {}
+                }
+                match &a.body {
+                    MatchBody::Expr(be) => scan_expr(be, s),
+                    MatchBody::Block(b) => scan_block(b, s),
+                }
+            }
+        }
+        // nested closures contribute their own free refs — the outer
+        // env must carry them so the inner env can be populated
+        ExprKind::Closure { params, body } => {
+            params.iter().for_each(|p| {
+                s.binds.insert(p.name.clone());
+            });
+            scan_block(body, s);
+        }
+        _ => {}
     }
 }

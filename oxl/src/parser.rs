@@ -329,6 +329,31 @@ impl<'a> Parser<'a> {
         if self.eat_kw(Kw::Chan) {
             return Some(TyRef { kind: TyKind::Chan, span: sp });
         }
+        if self.eat_kw(Kw::Fn) {
+            // fn(int, int) -> bool / fn(a: int) / fn() — named params
+            // are optional and documentation-only
+            self.expect_p(P::LParen, "`(`");
+            let mut params = Vec::new();
+            while !self.eat_p(P::RParen) && !self.at_eof() {
+                if let Tok::Ident(_) = self.cur().tok {
+                    if self.peek().tok == Tok::P(P::Colon) {
+                        self.bump();
+                        self.bump();
+                    }
+                }
+                params.push(self.ty()?);
+                if !self.eat_p(P::Comma) {
+                    self.expect_p(P::RParen, "`)`");
+                    break;
+                }
+            }
+            let ret = if self.eat_p(P::Arrow) {
+                Some(Box::new(self.ty()?))
+            } else {
+                None
+            };
+            return Some(TyRef { kind: TyKind::Fn { params, ret }, span: sp });
+        }
         if self.eat_p(P::LBracket) {
             self.expect_p(P::RBracket, "`]`");
             let inner = self.ty()?;
@@ -734,6 +759,12 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Some(Expr { kind: ExprKind::Nil, span: sp })
             }
+            // `fn(int) -> int` type literal — only meaningful as mkslice's
+            // element-type arg; the checker rejects it anywhere else
+            Tok::Kw(Kw::Fn) if self.peek().tok == Tok::P(P::LParen) => {
+                let tr = self.ty()?;
+                Some(Expr { kind: ExprKind::TyLit(tr), span: sp })
+            }
             Tok::Ident(mut name) => {
                 self.bump();
                 // qualified struct literal: a.b.T{ ... } — only when the
@@ -780,6 +811,39 @@ impl<'a> Parser<'a> {
                 let e = self.expr(0, false)?;
                 self.expect_p(P::RParen, "`)`");
                 Some(e)
+            }
+            // `{ |a: int, b: int| stmts }` — closure (B4); body runs to
+            // `}`, return type is inferred from `return` statements
+            Tok::P(P::LBrace) => {
+                self.bump();
+                if !self.expect_p(P::Pipe, "`|` — closures are `{ |args| stmts }`") {
+                    return None;
+                }
+                let mut params = Vec::new();
+                while !self.eat_p(P::Pipe) && !self.at_eof() {
+                    let (pname, psp) = self.ident()?;
+                    self.expect_p(P::Colon, "`:`");
+                    let ty = self.ty()?;
+                    params.push(Param { name: pname, ty, span: psp });
+                    if !self.eat_p(P::Comma) {
+                        self.expect_p(P::Pipe, "`|`");
+                        break;
+                    }
+                }
+                let mut stmts = Vec::new();
+                while !self.eat_p(P::RBrace) && !self.at_eof() {
+                    if let Some(s) = self.stmt() {
+                        stmts.push(s);
+                    }
+                    self.eat_p(P::Semi);
+                }
+                Some(Expr {
+                    kind: ExprKind::Closure {
+                        params,
+                        body: Block { stmts, span: sp },
+                    },
+                    span: sp,
+                })
             }
             // match e { pat => expr, pat => { stmts }, _ => ... }
             Tok::Kw(Kw::Match) => {
