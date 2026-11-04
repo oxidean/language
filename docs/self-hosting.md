@@ -34,8 +34,9 @@ The goal: the compiler, written in the language, compiled by itself.
   runner. **It compiles itself** — the emitted binary regenerates
   byte-identical C, closing the classic bootstrap chain.
 
-All three components are compiled by the Rust bootstrap compiler and run
-in CI (`tests/run.sh`), so the self-host claim can't rot.
+All five bootstrap components are compiled by the Rust bootstrap
+compiler and run in CI (`tests/run.sh`), so the self-host claim can't
+rot.
 
 ## What the language already has (sufficient for frontend)
 

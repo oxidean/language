@@ -9,9 +9,9 @@ matching to stay readable and safe.
 ## Design sketch
 
 ```
-match e.kind {
-    ExprKind::Int(v) => handle_int(v)
-    ExprKind::Bin{op, l, r} => handle_bin(op, l, r)
+match e {
+    ExprKind.Int(v) => handle_int(v)
+    ExprKind.Bin{op, l, r} => handle_bin(op, l, r)
     _ => default_case()
 }
 ```

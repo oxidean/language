@@ -17,7 +17,7 @@ Go-shaped, deliberately shallow:
 - Interface types: `interface Writer { write(s: str) -> int }` (today's
   op-constraint `interface` gains *method* decls). A struct satisfies
   it structurally (has the methods) — no explicit `implements`.
-- Interface values: `var w Writer = my_impl` — fat pair `{data, vtable}`
+- Interface values: `let w: Writer = my_impl` — fat pair `{data, vtable}`
   in codegen (itab, Go-style).
 - Dispatch: `w.write(s)` → indirect call through vtable.
 - Generics: `interface` constraints already exist — method-declaring

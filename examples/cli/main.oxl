@@ -11,6 +11,20 @@ fn parse_count(s: str) -> [int, err] {
     if len(s) == 0 {
         return 0, 1
     }
+    // digits only — atoi stops at the first non-digit, so "2oops"
+    // would silently pass as 2 without this check
+    i := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if c < 48 || c > 57 {
+            return 0, 2
+        }
+        i = i + 1
+    }
+    // beyond int32 digit-count an atoi overflow silently clamps
+    if len(s) > 9 {
+        return 0, 2
+    }
     n := atoi(s)
     if n <= 0 {
         return 0, 2

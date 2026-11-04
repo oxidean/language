@@ -4,7 +4,9 @@ Every item deliberately deferred from v0.0.1, spec'd and ordered.
 Per-item design sketches live in `items/`; this file is the order of
 battle. Nothing here is scheduled — milestone-gated, not date-gated.
 
-**Status (2026-11-04): spec only — no implementation started.**
+**Status (2026-11-04): landed except C1 (partial — the bootstrap
+checker still lags the Rust checker) and D4 (deferred, spec-sanctioned
+slip).**
 
 Execution model: Track A (coroutine) is the critical path and gets its
 own focused session. Tracks B→F are parallel-safe worktree items once

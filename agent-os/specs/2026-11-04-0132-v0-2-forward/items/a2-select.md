@@ -12,8 +12,14 @@ surface is decided before the runtime work (A1) makes re-design costly.
 select {
     recv(ch_a) => handle_a(v)          // arm: channel op + body
     recv(ch_b) => handle_b(v)
-    timeout(50) => on_timeout()        // optional
-    else => fallback()                 // optional: non-blocking
+    timeout(50) => on_timeout()        // bounded wait
+}
+
+select {
+    recv(ch_a) => handle_a(v)
+    else => fallback()                 // non-blocking default — an
+                                       // `else` and a `timeout` never
+                                       // mix in one `select`
 }
 ```
 

@@ -22,7 +22,7 @@ enum ExprKind {
 
 - Declaration: `enum Name { Variant(payload), Variant { named: ty }, UnitVariant }` —
   positional payloads, named payloads, and unit variants all legal.
-- Construction: `ExprKind::Int(7)`, `ExprKind::Bin{op:"+", l:l, r:r}`.
+- Construction: `ExprKind.Int(7)`, `ExprKind.Bin{op:"+", l:l, r:r}`.
 - Consumption: `match` (B2) reads payloads; until B2 lands, a `kind()`
   tag accessor + `as` casts are the escape hatch (keeps B1 shippable
   alone).
@@ -36,7 +36,7 @@ enum ExprKind {
 
 - `bootstrap/parser.oxl`'s `Json`-tree replaced by a typed `Expr`
   enum — same output, typed internals
-- Round-trip: `ExprKind::Bin{...}` constructed, matched, read back
+- Round-trip: `ExprKind.Bin{...}` constructed, matched, read back
 - Payloads: int, str, `own` struct, nested `own` enum — all work
 - `enum` in generics position: `enum Opt[T] { Some(T), None }` —
   monomorphized like other generics (may defer to a fast-follow if it

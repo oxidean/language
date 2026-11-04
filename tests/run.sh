@@ -110,11 +110,9 @@ out=$("$OXL" run tests/collections_test.oxl)
 
 echo "== defer (b5) =="
 out=$("$OXL" run tests/defer_test.oxl)
-[ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }
-grep -q "^9$" <<<"$out" || { echo "FAIL defer error-return path: $out"; exit 1; }
-# loop registers per-iteration (drains 2 1 0); untaken branch registers nothing (7 only)
-grep -q $'2\n1\n0' <<<"$out" || { echo "FAIL defer loop/capture: $out"; exit 1; }
-if grep -q "^99$" <<<"$out"; then echo "FAIL defer untaken branch: $out"; exit 1; fi
+# fixed sequence: LIFO drain (3 2 1), error-path defer (9), per-iteration
+# loop defers (2 1 0), the untaken branch registering nothing (7 only)
+[ "$out" = $'3\n2\n1\n9\n2\n1\n0\n7\ndone' ] || { echo "FAIL defer: $out"; exit 1; }
 # trap unwind still drains the task's defer stack before aborting
 cat > /tmp/d5trap.oxl <<'EOF'
 fn dmark(x: int) { println(itoa(x)) }

@@ -17,21 +17,32 @@ let db = sqlite_open(cstr("pilot.db"))
 
 struct App { d: int }
 
+// control bytes have no place in a stored name: NUL truncates the row
+// at read (rt_sqlite_query treats columns as C strings) and raw bytes
+// < 0x20 would make the JSON response invalid — jstr doesn't escape
+// them. One byteat scan rejects the whole class, newlines included.
+fn has_ctl(s: str) -> bool {
+    i := 0
+    for i < len(s) {
+        if byteat(s, i) < 32 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
     status := 404
     body := "oxl http server — try /items\n"
     if find(path, "/items") == 0 {
         if find(method, "POST") == 0 {
             status = 201
-            if find(reqbody, "\n") >= 0 || find(reqbody, "\r") >= 0 {
+            if has_ctl(reqbody) {
                 // sqlite_query emits newline-delimited rows — a stored
-                // newline would split one row into two items on read.
-                // Reject it at the boundary rather than corrupt reads.
+                // newline would also split one row into two on read.
                 status = 400
-                body = "{\"error\":\"name must not contain a newline\"}\n"
-            } else if sqlite_exec(db, cstr("CREATE TABLE IF NOT EXISTS items(name TEXT)")) != 0 {
-                status = 500
-                body = "{\"error\":\"db init failed\"}\n"
+                body = "{\"error\":\"name must not contain control bytes\"}\n"
             } else if sqlite_exec_bind(db, cstr("INSERT INTO items VALUES(?)"), reqbody) != 0 {
                 // ^ request body is bound, never concatenated into SQL
                 status = 500
@@ -41,6 +52,12 @@ fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
                 json.jadd(r, "created", json.jstr(reqbody))
                 body = json.tojson(r) + "\n"
             }
+        } else if sqlite_exec(db, cstr("SELECT rowid, name FROM items")) != 0 {
+            // sqlite_exec can't return rows, but its status answers
+            // what sqlite_query's bare "" conflates: a failed SELECT
+            // vs. an empty table. Failure is a 500, not {items:[]}.
+            status = 500
+            body = "{\"error\":\"query failed\"}\n"
         } else {
             status = 200
             // rows arrive as "id|name" lines — reshape into real JSON
@@ -72,5 +89,12 @@ fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
 }
 
 fn main() {
+    // table exists before the first request — a fresh db must serve
+    // {items:[]}, not a query error, and the SELECT probe above only
+    // means "failed" once the table is guaranteed to exist.
+    if sqlite_exec(db, cstr("CREATE TABLE IF NOT EXISTS items(name TEXT)")) != 0 {
+        println("pilot: db init failed")
+        exit(1)
+    }
     http.serve(8080, App{d: 0})
 }

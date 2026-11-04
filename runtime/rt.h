@@ -57,6 +57,12 @@ struct RtScope {
     pthread_cond_t cv;
     RtTask *join_task; /* frame suspended at join, if any */
     RtTask *parked;    /* tasks suspended inside this scope (pnext chain) */
+    /* inner scopes live in the owning task's frame — if the owner dies
+     * mid-block (trap/cancel) the scope is orphaned: the last child to
+     * settle runs the teardown join_scope would have, then releases
+     * the frame */
+    RtTask *owner;
+    volatile int orphan;
     /* arena: bump allocator freed on leave */
     char *arena_buf;
     int64_t arena_off, arena_cap;

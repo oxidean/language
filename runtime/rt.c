@@ -16,6 +16,7 @@
 /* ---------------- allocation & checks ---------------- */
 
 _Thread_local RtScope *tls_scope;
+static _Thread_local RtTask *tls_task;
 
 static ObjHdr *hdr_of(void *obj) { return ((ObjHdr *)obj) - 1; }
 
@@ -103,6 +104,7 @@ void rt_scope_enter(RtScope *s) {
     pthread_cond_init(&s->cv, NULL);
     s->arena_buf = malloc(ARENA_CAP);
     s->arena_cap = ARENA_CAP;
+    s->owner = tls_task;
     tls_scope = s;
 }
 
@@ -152,6 +154,11 @@ struct RtTask {
      * to self-enqueue when it actually leaves the C stack */
     volatile int wstate;
     struct RtDefer *defers;  /* fn-scope defer stack (LIFO) */
+    /* one hold per still-open inner scope + one self-hold taken while
+     * settling — the frame frees when the last hold drops, so children
+     * that outlive their parent's trap never scope_done into dead
+     * frame memory */
+    volatile int holds;
 };
 #define WK_RECV 1
 #define WK_SEND 2
@@ -212,23 +219,44 @@ static struct {
     int started;
 } pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0 };
 
+static void scope_heap_free(RtScope *s);
+
+/* teardown for a scope no joiner will consume: the arena bump buffer
+ * and the scope-tracked heap blocks. Sync objects die too — pending==0
+ * means no thread can still be holding or waiting on them. The scope
+ * struct itself is frame (or stack) memory — not freed here. */
+static void scope_teardown(RtScope *s) {
+    pthread_mutex_destroy(&s->mu);
+    pthread_cond_destroy(&s->cv);
+    scope_heap_free(s);
+    free(s->arena_buf);
+    s->arena_buf = NULL;
+}
+
+/* child-side teardown of an orphaned scope: frees the scope's memory
+ * and drops the owner's frame hold — the last dropper frees the frame */
+static void scope_orphan_free(RtScope *s) {
+    scope_teardown(s);
+    RtTask *o = s->owner;
+    if (o && __sync_sub_and_fetch(&o->holds, 1) == 0) free(o);
+}
+
 static void scope_done(RtScope *s) {
     if (!s) return;
     RtTask *wake = NULL;
+    int orphan_drain = 0;
     pthread_mutex_lock(&s->mu);
     s->pending--;
     if (s->pending <= 0) {
         if (s->join_task) wake = s->join_task;
+        else if (s->orphan) orphan_drain = 1;
         else pthread_cond_signal(&s->cv);
     }
     pthread_mutex_unlock(&s->mu);
     /* outside s->mu: avoids s->mu/pool.mu inversion */
+    if (orphan_drain) scope_orphan_free(s);
     if (wake && park_claim(wake)) { park_del(wake); rt_task_wake(wake); }
 }
-
-/* the currently-running task — rt_trap must settle its pending count
- * before unwinding, or the scope join waits forever */
-static _Thread_local RtTask *tls_task;
 
 /* defer stack — per task so entries survive suspends (a parked frame
  * must not leak its defers onto the next task sharing this thread);
@@ -281,9 +309,38 @@ static void task_unwind(void) {
     longjmp(tls_jb, 1);
 }
 
+/* settle a finished task's frame: inner scopes are fields of the
+ * frame, so a task that dies mid-block must not free() while children
+ * still point at them. rt_trap already orphan-marks the trap-time
+ * scope chain; the clean/RT_CANCEL exit path walks fr->cur_scope (the
+ * last-suspend innermost) and marks whatever was abandoned — live
+ * scopes keep a frame hold that their last child drops, dead ones are
+ * torn down inline. The self-hold makes the frees last-dropper-wins:
+ * whoever drops holds to 0 frees the frame. */
+static void task_release_frame(RtTask *t, int trapped) {
+    if (!trapped) {
+        __sync_add_and_fetch(&t->holds, 1);
+        if (t->is_frame) {
+            for (RtScope *x = t->frame->cur_scope;
+                 x && x != t->scope; x = x->parent) {
+                pthread_mutex_lock(&x->mu);
+                x->orphan = 1;
+                x->cancel = 1;
+                int live = x->pending > 0;
+                if (live) __sync_add_and_fetch(&t->holds, 1);
+                pthread_mutex_unlock(&x->mu);
+                if (live) scope_cancel_wake(x);
+                else scope_teardown(x);
+            }
+        }
+    }
+    if (__sync_sub_and_fetch(&t->holds, 1) == 0) free(t);
+}
+
 static void run_task(RtTask *t) {
     tls_scope = t->scope;
     tls_task = t;
+    int trapped = 0;
     if (t->is_frame) {
         t->wstate = WS_ONSTACK;
         if (setjmp(tls_jb) == 0) {
@@ -298,10 +355,13 @@ static void run_task(RtTask *t) {
                 }
                 return;
             }
+        } else {
+            trapped = 1;
         }
         /* READY / CANCEL / trapped(longjmp) all land here */
     } else {
         if (setjmp(tls_jb) == 0) t->fn(t->arg);
+        else trapped = 1;
         /* cancel-unwound (task_unwind) lands here */
     }
     /* defers of unwound fns still run — the task dies either way */
@@ -309,7 +369,7 @@ static void run_task(RtTask *t) {
     tls_task = NULL;
     if (t->sel) rt_select_arm(t); /* dropped select wait: reclaim it */
     scope_done(t->scope);
-    free(t);
+    task_release_frame(t, trapped);
 }
 
 static void *worker(void *_p) {
@@ -335,7 +395,10 @@ static void *worker(void *_p) {
             tls_task = NULL;
             if (t->sel) rt_select_arm(t);
             scope_done(t->scope);
-            free(t);
+            /* suspended before cancel: inner scopes may sit open in
+             * the frame — orphan them so their children settle and the
+             * frame frees at the last drain, same as the trap path */
+            task_release_frame(t, 0);
         }
     }
     return 0;
@@ -401,6 +464,7 @@ static void *task_wrap_frame(void *p) {
     t->wk = &wk;
     tls_scope = t->scope;
     tls_task = t;
+    int trapped = 0;
     if (setjmp(tls_jb) == 0) {
         while (1) {
             t->wstate = WS_ONSTACK;
@@ -412,6 +476,8 @@ static void *task_wrap_frame(void *p) {
             wk.ready = 0;
             pthread_mutex_unlock(&wk.mu);
         }
+    } else {
+        trapped = 1;
     }
     task_defers_drain(t);
     tls_task = NULL;
@@ -420,7 +486,7 @@ static void *task_wrap_frame(void *p) {
     t->wk = NULL;
     pthread_mutex_destroy(&wk.mu);
     pthread_cond_destroy(&wk.cv);
-    free(t);
+    task_release_frame(t, trapped);
     return 0;
 }
 
@@ -529,7 +595,7 @@ int rt_run_root(RtFrame *fr) {
     t->wk = NULL;
     pthread_mutex_destroy(&wk.mu);
     pthread_cond_destroy(&wk.cv);
-    free(t);
+    task_release_frame(t, trapped);
     return trapped;
 }
 
@@ -611,13 +677,26 @@ void rt_trap(int64_t code) {
     if (!s) { fprintf(stderr, "trap %lld outside scope\n", (long long)code); abort(); }
     RtTask *t = tls_task;
     if (t && t->is_frame) {
+        /* self-hold before any orphan can drain: the frame frees only
+         * when the last hold drops (settle in task_release_frame) */
+        __sync_add_and_fetch(&t->holds, 1);
         /* mark the whole chain from innermost to the task's spawn scope —
-         * inner scopes live inside this task's frame and never join */
+         * inner scopes live inside this task's frame and never join, so
+         * orphan each: live ones keep a frame hold their last child
+         * drops; already-drained ones tear down now, here on the live
+         * stack, since no joiner is coming */
         for (RtScope *x = s; x; x = x->parent) {
+            int dead = 0;
             pthread_mutex_lock(&x->mu);
             if (!x->trapped) { x->trapped = 1; x->err = code; }
             x->cancel = 1;
+            if (x != t->scope) {
+                x->orphan = 1;
+                if (x->pending > 0) __sync_add_and_fetch(&t->holds, 1);
+                else dead = 1;
+            }
             pthread_mutex_unlock(&x->mu);
+            if (dead) scope_teardown(x);
             if (x == t->scope) break;
         }
         /* wake parked tasks so they observe cancel at resume instead
