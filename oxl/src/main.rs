@@ -2,6 +2,7 @@ mod ast;
 mod check;
 mod codegen;
 mod diag;
+mod fmt;
 mod lexer;
 mod parser;
 
@@ -611,82 +612,47 @@ fn out_arg(args: &[String]) -> Option<PathBuf> {
 }
 
 // --- fmt: indentation + whitespace normalizer (comments preserved) ---
-fn fmt_source(src: &str) -> String {
-    let mut out = String::new();
-    let mut depth: i32 = 0;
-    let mut blank = 0;
-    for raw in src.lines() {
-        let line = raw.trim_end();
-        let t = line.trim_start();
-        if t.is_empty() {
-            blank += 1;
-            if blank <= 1 && !out.is_empty() {
-                out.push('\n');
-            }
-            continue;
-        }
-        blank = 0;
-        // closing-brace-led lines dedent first
-        let mut d = depth;
-        for c in t.chars() {
-            match c {
-                '}' | ')' | ']' => d -= 1,
-                '{' | '(' | '[' => break,
-                _ => break,
-            }
-            if c != '}' && c != ')' && c != ']' {
-                break;
-            }
-        }
-        let d = d.max(0);
-        for _ in 0..d {
-            out.push_str("    ");
-        }
-        out.push_str(t);
-        out.push('\n');
-        // count braces outside string literals
-        let mut in_str = false;
-        let mut esc = false;
-        for c in t.chars() {
-            if in_str {
-                if esc {
-                    esc = false;
-                } else if c == '\\' {
-                    esc = true;
-                } else if c == '"' {
-                    in_str = false;
-                }
+/// `oxl fmt [-w|--check] <file.oxl>...` — AST pretty-printer (E2):
+/// canonical layout from the parsed crate; comments re-attach as
+/// trivia. --check exits nonzero on any diff (CI); -w rewrites.
+fn cmd_fmt(args: &[String]) {
+    let write = args.iter().any(|a| a == "-w");
+    let check = args.iter().any(|a| a == "--check");
+    let files: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with('-')).collect();
+    if files.is_empty() {
+        eprintln!("usage: oxl fmt [-w|--check] <file.oxl>...");
+        exit(1);
+    }
+    let mut bad = false;
+    for file in files {
+        let src = match std::fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                bad = true;
                 continue;
             }
-            match c {
-                '"' => in_str = true,
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
+        };
+        match fmt::format_file(file, &src) {
+            Ok(out) => {
+                if check {
+                    if out != src {
+                        eprintln!("{file}: not formatted");
+                        bad = true;
+                    }
+                } else if write {
+                    if out != src {
+                        std::fs::write(file, out).unwrap();
+                    }
+                } else {
+                    print!("{out}");
+                }
             }
-        }
-        if depth < 0 {
-            depth = 0;
+            Err(()) => bad = true,
         }
     }
-    out
-}
-
-fn cmd_fmt(args: &[String]) {
-    let file = &args[2];
-    let write = args.iter().any(|a| a == "-w");
-    let src = match std::fs::read_to_string(file) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{file}: {e}");
-            exit(1);
-        }
-    };
-    let out = fmt_source(&src);
-    if write {
-        std::fs::write(file, out).unwrap();
-    } else {
-        print!("{out}");
+    if bad {
+        exit(1);
     }
 }
 

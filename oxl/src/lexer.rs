@@ -113,9 +113,13 @@ pub fn lex(src: &str, diags: &mut Diags) -> Vec<Token> {
                             s.push(e);
                             i += 2;
                         }
-                        x => {
-                            s.push(x as char);
-                            i += 1;
+                        _ => {
+                            // source is valid UTF-8 — take the full
+                            // char, not one byte (multi-byte literals
+                            // must survive the lex round-trip)
+                            let c = src[i..].chars().next().unwrap();
+                            s.push(c);
+                            i += c.len_utf8();
                         }
                     }
                 }
