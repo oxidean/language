@@ -38,6 +38,11 @@ if "$LANG" build /tmp/floatmix.lang -o /tmp/floatmix 2>/dev/null; then
     echo "FAIL: int+float compiled (should be a type error)"; exit 1
 fi
 
+echo "== defer (b5) =="
+out=$("$LANG" run tests/defer_test.lang)
+[ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }
+grep -q "^9$" <<<"$out" || { echo "FAIL defer error-return path: $out"; exit 1; }
+
 echo "== bootstrap lexer =="
 out=$("$LANG" run bootstrap/lexer.lang -- examples/hello.lang)
 grep -q "11 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }

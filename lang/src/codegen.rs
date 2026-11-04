@@ -51,6 +51,8 @@ struct Gen<'a> {
     globals: HashMap<String, Ty>,
     cur_ret_pair: bool,
     cur_fn: String,
+    /// fn-scope defer stack — calls run LIFO at each return / fn end
+    defers: Vec<Expr>,
     test_mode: bool,
 }
 
@@ -82,6 +84,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
         globals: HashMap::new(),
         cur_ret_pair: false,
         cur_fn: String::new(),
+        defers: Vec::new(),
         test_mode,
     };
     for it in &c.items {
@@ -362,6 +365,7 @@ impl<'a> Gen<'a> {
         let _ = writeln!(self.out, "{ret_c} l_f_{}({params}) {{", cname(&f.name));
         self.cur_fn = f.name.clone();
         self.cur_ret_pair = matches!(f.ret, RetTy::Pair(_));
+        self.defers.clear();
         self.env.push(HashMap::new());
         for p in &f.params {
             let t = self.ty_of_ref(&p.ty);
@@ -372,6 +376,7 @@ impl<'a> Gen<'a> {
                 self.stmt(s);
             }
         }
+        self.emit_defers();
         self.env.pop();
         let _ = writeln!(self.out, "}}\n");
         if f.name == "main" && !self.test_mode {
@@ -418,6 +423,7 @@ impl<'a> Gen<'a> {
                 self.stmt(s);
             }
         }
+        self.emit_defers();
         self.env.pop();
         let _ = writeln!(self.out, "}}\n");
         self.inst_out.push_str(&self.out);
@@ -568,6 +574,16 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// emit registered defers in LIFO order (fn exit paths)
+    fn emit_defers(&mut self) {
+        let defs = std::mem::take(&mut self.defers);
+        for d in defs.iter().rev() {
+            let v = self.expr(d);
+            let _ = writeln!(self.out, "    {v};");
+        }
+        self.defers = defs;
+    }
+
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let { name, init, .. } => {
@@ -619,7 +635,12 @@ impl<'a> Gen<'a> {
                 let v = self.expr(e);
                 let _ = writeln!(self.out, "    {v};");
             }
+            Stmt::Defer { call, .. } => {
+                // register: call runs at fn exit, LIFO (see emit_defers)
+                self.defers.push(call.clone());
+            }
             Stmt::Return { vals, .. } => {
+                self.emit_defers();
                 if vals.is_empty() {
                     let _ = writeln!(self.out, "    return;");
                 } else if self.cur_ret_pair && vals.len() == 2 {

@@ -1,0 +1,26 @@
+import "std/testing"
+
+fn dmark(x: int) {
+    println(itoa(x))
+}
+
+fn lifo() -> int {
+    defer dmark(1)
+    defer dmark(2)
+    defer dmark(3)
+    return 0
+}
+
+fn errpath() -> [int, err] {
+    defer dmark(9)
+    if true {
+        return 0, nil
+    }
+    return 0, nil
+}
+
+fn main() {
+    i := lifo()
+    [v, e] = errpath()
+    println("done")
+}

@@ -164,6 +164,7 @@ fn qualify_block(
                 qualify_block(body, renames, aliases)
             }
             ast::Stmt::Spawn { call, .. } => qualify_expr(call, renames, aliases),
+            ast::Stmt::Defer { call, .. } => qualify_expr(call, renames, aliases),
             ast::Stmt::Break { .. } | ast::Stmt::Continue { .. } => {}
         }
     }

@@ -4,7 +4,7 @@ use crate::diag::{Diag, Diags, Span};
 pub enum Kw {
     Fn, Struct, Extern, Return, If, Else, For, Let, Scope, Spawn, Go,
     Own, Ref, Mut, Unsafe, Nil, True, False, Import, Chan,
-    Break, Continue, Interface, SpawnB,
+    Break, Continue, Interface, SpawnB, Defer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,6 +152,7 @@ pub fn lex(src: &str, diags: &mut Diags) -> Vec<Token> {
                     "import" => Some(Kw::Import),
                     "chan" => Some(Kw::Chan),
                     "break" => Some(Kw::Break),
+                    "defer" => Some(Kw::Defer),
                     "continue" => Some(Kw::Continue),
                     "interface" => Some(Kw::Interface),
                     "spawnBlocking" => Some(Kw::SpawnB),

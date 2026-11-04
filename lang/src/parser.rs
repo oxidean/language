@@ -388,6 +388,11 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Some(Stmt::Continue { span: sp })
             }
+            Tok::Kw(Kw::Defer) => {
+                self.bump();
+                let call = self.expr(0, false)?;
+                Some(Stmt::Defer { call, span: sp })
+            }
             Tok::P(P::LBracket) => {
                 // [a, err] = f()
                 self.bump();

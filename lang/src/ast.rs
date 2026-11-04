@@ -123,18 +123,19 @@ pub enum Stmt {
     For { cond: Expr, body: Block, span: Span },
     Scope { body: Block, span: Span },
     Spawn { call: Expr, pinned: bool, blocking: bool, span: Span },
+    Defer { call: Expr, span: Span },
     Unsafe { body: Block, span: Span },
     Break { span: Span },
     Continue { span: Span },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ExprKind {
     Int(i64),
     Float(f64),

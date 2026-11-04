@@ -316,6 +316,9 @@ impl<'a> Checker<'a> {
                 }
                 self.expr(e, env);
             }
+            Stmt::Defer { call, .. } => {
+                self.expr(call, env);
+            }
             Stmt::Return { vals, span } => {
                 let cur_ret = self.cur_ret.clone();
                 match &cur_ret {
@@ -895,6 +898,7 @@ impl<'a> Checker<'a> {
         fn block_has(b: &Block) -> bool {
             b.stmts.iter().any(|s| match s {
                 Stmt::Spawn { .. } | Stmt::Scope { .. } => true,
+                Stmt::Defer { call, .. } => expr_susp(call),
                 Stmt::Expr(e) | Stmt::Assign { val: e, .. } | Stmt::Let { init: e, .. } => {
                     expr_susp(e)
                 }

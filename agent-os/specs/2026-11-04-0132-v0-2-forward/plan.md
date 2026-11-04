@@ -57,7 +57,7 @@ is the consumer.
 
 `items/b4-fn-values.md`. Visitor passes + stdlib sort/map. Parallel-safe.
 
-### Task B5: `defer` [not started]
+### Task B5: `defer` [done]
 
 `items/b5-defer.md`. Scoped cleanup. Parallel-safe, small.
 
