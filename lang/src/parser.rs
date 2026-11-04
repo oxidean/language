@@ -109,6 +109,22 @@ impl<'a> Parser<'a> {
         if self.eat_kw(Kw::Struct) {
             return self.parse_struct().map(Item::Struct);
         }
+        if self.eat_kw(Kw::Interface) {
+            // interface Name { eq, ordered, add }
+            let (name, sp) = self.ident()?;
+            self.expect_p(P::LBrace, "`{`");
+            let mut ops = Vec::new();
+            while !self.eat_p(P::RBrace) && !self.at_eof() {
+                if let Tok::Ident(op) = self.cur().tok.clone() {
+                    self.bump();
+                    ops.push(op);
+                } else {
+                    self.bump();
+                }
+                self.eat_p(P::Comma);
+            }
+            return Some(Item::Interface(Interface { name, ops, span: sp }));
+        }
         if self.eat_kw(Kw::Extern) {
             if !self.eat_kw(Kw::Fn) {
                 let sp = self.span();
@@ -158,6 +174,21 @@ impl<'a> Parser<'a> {
 
     fn parse_fn_tail(&mut self) -> Option<Fn> {
         let (name, sp) = self.ident()?;
+        let mut ty_params = Vec::new();
+        // generics: fn f[T any, U ordered](...)
+        if self.eat_p(P::LBracket) {
+            while !self.eat_p(P::RBracket) && !self.at_eof() {
+                let (t, _) = self.ident()?;
+                let c = if let Tok::Ident(c) = self.cur().tok.clone() {
+                    self.bump();
+                    c
+                } else {
+                    "any".to_string()
+                };
+                ty_params.push((t, c));
+                self.eat_p(P::Comma);
+            }
+        }
         self.expect_p(P::LParen, "`(`");
         let mut params = Vec::new();
         while !self.eat_p(P::RParen) && !self.at_eof() {
@@ -191,7 +222,7 @@ impl<'a> Parser<'a> {
         } else {
             RetTy::Void
         };
-        Some(Fn { name, params, ret, body: None, span: sp })
+        Some(Fn { name, ty_params, params, ret, body: None, span: sp })
     }
 
     fn ty(&mut self) -> Option<TyRef> {
@@ -285,12 +316,25 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Spawn) | Tok::Kw(Kw::Go) => {
                 self.bump();
                 let call = self.expr(0, true)?;
-                Some(Stmt::Spawn { call, pinned: false, span: sp })
+                Some(Stmt::Spawn { call, pinned: false, blocking: false, span: sp })
+            }
+            Tok::Kw(Kw::SpawnB) => {
+                self.bump();
+                let call = self.expr(0, true)?;
+                Some(Stmt::Spawn { call, pinned: false, blocking: true, span: sp })
             }
             Tok::Kw(Kw::Unsafe) => {
                 self.bump();
                 let body = self.block()?;
                 Some(Stmt::Unsafe { body, span: sp })
+            }
+            Tok::Kw(Kw::Break) => {
+                self.bump();
+                Some(Stmt::Break { span: sp })
+            }
+            Tok::Kw(Kw::Continue) => {
+                self.bump();
+                Some(Stmt::Continue { span: sp })
             }
             Tok::P(P::LBracket) => {
                 // [a, err] = f()

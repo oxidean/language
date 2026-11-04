@@ -15,6 +15,7 @@ pub enum Ty {
     Ref(Box<Ty>),
     Mut(Box<Ty>),
     Struct(String),
+    Var(String), // generic type parameter (instantiated at call sites)
     Unknown,
 }
 
@@ -32,6 +33,7 @@ impl Ty {
             Ty::Ref(t) => format!("ref {}", t.name()),
             Ty::Mut(t) => format!("mut {}", t.name()),
             Ty::Struct(n) => n.clone(),
+            Ty::Var(n) => n.clone(),
             Ty::Unknown => "?".into(),
         }
     }
@@ -52,6 +54,7 @@ struct FnSig {
     params: Vec<Ty>,
     ret: Ret,
     is_extern: bool,
+    ty_params: Vec<(String, String)>, // [(T, constraint)]
 }
 
 pub struct Checked {
@@ -83,10 +86,14 @@ pub struct Checker<'a> {
     diags: &'a mut Diags,
     fns: HashMap<String, FnSig>,
     structs: HashMap<String, Vec<(String, Ty)>>,
+    ifaces: HashMap<String, Vec<String>>,
     cur_ret: Ret,
     calls: HashMap<String, HashSet<String>>, // caller -> callee fn names
     cur_fn: String,
     in_let2: bool,
+    ty_scope: HashSet<String>, // type params in scope (current generic fn)
+    cur_ty_params: Vec<(String, String)>,
+    loop_depth: i32,
 }
 
 const BUILTINS: &[&str] = &[
@@ -94,6 +101,7 @@ const BUILTINS: &[&str] = &[
     "assert", "itoa", "argc", "argv", "len", "byteat", "substr", "find", "atoi",
     "mkbuf", "bufstr", "poke8", "poke16", "poke32", "htons", "htonl",
     "cstr", "sqlite_open", "sqlite_exec", "sqlite_query", "sqlite_close",
+    "readfile", "writefile", "exit", "mkshared", "sget", "sset",
 ];
 
 pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
@@ -101,10 +109,14 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
         diags,
         fns: HashMap::new(),
         structs: HashMap::new(),
+        ifaces: HashMap::new(),
         cur_ret: Ret::Void,
         calls: HashMap::new(),
         cur_fn: String::new(),
         in_let2: false,
+        ty_scope: HashSet::new(),
+        cur_ty_params: Vec::new(),
+        loop_depth: 0,
     };
     ck.register(c);
     ck.check_items(c);
@@ -113,8 +125,15 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
 
 impl<'a> Checker<'a> {
     fn register(&mut self, c: &Crate) {
-        // structs first so extern/fn signatures can name them regardless
-        // of source order
+        // pass 0: struct names so self-references and forward use resolve
+        for it in &c.items {
+            if let Item::Struct(s) = it {
+                self.structs.insert(s.name.clone(), Vec::new());
+            }
+            if let Item::Interface(i) = it {
+                self.ifaces.insert(i.name.clone(), i.ops.clone());
+            }
+        }
         for it in &c.items {
             if let Item::Struct(s) = it {
                     let mut fields = Vec::new();
@@ -134,8 +153,10 @@ impl<'a> Checker<'a> {
         for it in &c.items {
             match it {
                 Item::Fn(f) | Item::Extern(f) => {
+                    self.ty_scope = f.ty_params.iter().map(|(t, _)| t.clone()).collect();
                     let params: Vec<Ty> = f.params.iter().map(|p| self.resolve(&p.ty)).collect();
                     let ret = self.resolve_ret(&f.ret);
+                    self.ty_scope.clear();
                     if matches!(ret, Ret::One(Ty::Ref(_) | Ty::Mut(_))) {
                         self.diags.push(Diag::err(
                             f.span, "own",
@@ -147,15 +168,18 @@ impl<'a> Checker<'a> {
                     if BUILTINS.contains(&f.name.as_str()) && !matches!(it, Item::Extern(_)) {
                         self.diags.push(Diag::err(f.span, "check", format!("`{}` is a builtin and cannot be redefined", f.name)));
                     }
+                    for (t, c) in &f.ty_params {
+                        if !c.is_empty() && c != "any" && c != "ordered" && c != "eq" && c != "add" && !self.ifaces.contains_key(c) {
+                            self.diags.push(Diag::err(f.span, "check", format!("unknown constraint `{c}` for `{t}`")));
+                        }
+                    }
                     self.fns.insert(
                         f.name.clone(),
-                        FnSig { params, ret, is_extern: matches!(it, Item::Extern(_)) },
+                        FnSig { params, ret, is_extern: matches!(it, Item::Extern(_)), ty_params: f.ty_params.clone() },
                     );
                 }
-                Item::Import(_, sp) => {
-                    self.diags.push(Diag::err(*sp, "check", "imports are not supported yet (v0)"));
-                }
-                Item::Struct(_) => {}
+                Item::Import(_, _sp) => {} // resolved by the driver before checking
+                Item::Struct(_) | Item::Interface(_) => {}
             }
         }
     }
@@ -178,7 +202,9 @@ impl<'a> Checker<'a> {
                 "void" => Ty::Void,
                 "err" => Ty::Err,
                 s => {
-                    if self.structs.contains_key(s) {
+                    if self.ty_scope.contains(s) {
+                        Ty::Var(s.to_string())
+                    } else if self.structs.contains_key(s) {
                         Ty::Struct(s.to_string())
                     } else {
                         self.diags.push(Diag::err(t.span, "check", format!("unknown type `{s}`")));
@@ -199,6 +225,9 @@ impl<'a> Checker<'a> {
                 self.cur_fn = f.name.clone();
                 let sig = self.fns[&f.name].clone();
                 self.cur_ret = sig.ret.clone();
+                self.ty_scope = f.ty_params.iter().map(|(t, _)| t.clone()).collect();
+                self.cur_ty_params = f.ty_params.clone();
+                self.loop_depth = 0;
                 let mut env = Env::new();
                 for (p, t) in f.params.iter().zip(sig.params.iter()) {
                     env.set(p.name.clone(), t.clone());
@@ -319,7 +348,14 @@ impl<'a> Checker<'a> {
             Stmt::For { cond, body, .. } => {
                 let t = self.expr(cond, env);
                 self.assignable(&Ty::Bool, &t, cond.span);
+                self.loop_depth += 1;
                 self.block(body, env);
+                self.loop_depth -= 1;
+            }
+            Stmt::Break { span } | Stmt::Continue { span } => {
+                if self.loop_depth == 0 {
+                    self.diags.push(Diag::err(*span, "check", "break/continue outside loop"));
+                }
             }
             Stmt::Scope { body, .. } => self.block(body, env),
             Stmt::Spawn { call, .. } => {
@@ -338,6 +374,27 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// generic bodies may only use operators the constraint permits
+    fn req_op(&mut self, var: &str, op: &str, binop: BinOp, sp: Span) {
+        let c = self
+            .cur_ty_params
+            .iter()
+            .find(|(t, _)| t == var)
+            .map(|(_, c)| c.clone())
+            .unwrap_or_default();
+        let has = match c.as_str() {
+            "" | "any" => false,
+            "eq" => op == "eq",
+            "ordered" => op == "ordered" || op == "eq",
+            "add" => op == "add",
+            name => self.ifaces.get(name).map(|ops| ops.iter().any(|o| o == op)).unwrap_or(false),
+        };
+        if !has {
+            self.diags.push(Diag::err(sp, "type",
+                format!("`{binop:?}` on `{var}` requires constraint `{op}` (has `{c}`)")));
+        }
+    }
+
     /// If `e` is a call to a declared fn, return its return type.
     fn call_ret(&mut self, e: &Expr) -> Option<Ret> {
         if let ExprKind::Call { f, .. } = &e.kind {
@@ -346,6 +403,41 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    /// record Ty::Var bindings by matching an expected param type against the
+    /// argument's type (own T binds T=own-inner? no — own T binds T fully)
+    fn bind_vars(&self, want: &Ty, got: &Ty, bind: &mut HashMap<String, Ty>) {
+        match (want, got) {
+            (Ty::Var(v), g) => {
+                bind.entry(v.clone()).or_insert_with(|| g.clone());
+            }
+            (Ty::Own(w), Ty::Own(g)) | (Ty::Ref(w), Ty::Ref(g)) | (Ty::Mut(w), Ty::Mut(g)) => {
+                self.bind_vars(w, g, bind)
+            }
+            // own argument into ref/mut param still binds the inner var
+            (Ty::Ref(w) | Ty::Mut(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) => self.bind_vars(w, g, bind),
+            _ => {}
+        }
+    }
+
+    /// does `t` satisfy constraint `c` (builtin word or interface name)?
+    fn satisfies(&self, t: &Ty, c: &str) -> bool {
+        let op_ok = |op: &str| match op {
+            "eq" => matches!(t, Ty::Int | Ty::Bool | Ty::Str | Ty::Chan | Ty::Var(_)),
+            "ordered" => matches!(t, Ty::Int | Ty::Var(_)),
+            "add" => matches!(t, Ty::Int | Ty::Str | Ty::Var(_)),
+            _ => false,
+        };
+        match c {
+            "" | "any" => true,
+            "eq" | "ordered" | "add" => op_ok(c),
+            name => self
+                .ifaces
+                .get(name)
+                .map(|ops| ops.iter().all(|o| op_ok(o)))
+                .unwrap_or(false),
+        }
     }
 
     fn assignable(&mut self, want: &Ty, got: &Ty, sp: Span) {
@@ -357,6 +449,8 @@ impl<'a> Checker<'a> {
             || (*want == Ty::CStr && *got == Ty::Str)
             || (*want == Ty::Err && *got == Ty::Int)
             || (*want == Ty::Int && *got == Ty::Err)
+            // nil (Ty::Err) is the null pointer for owned/borrowed refs
+            || (*got == Ty::Err && matches!(want, Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan))
             || matches!((want, got), (Ty::Ref(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) | (Ty::Mut(w), Ty::Own(g) | Ty::Mut(g)) if **w == **g);
         if !ok {
             self.diags.push(Diag::err(
@@ -458,12 +552,19 @@ impl<'a> Checker<'a> {
                         Ty::Bool
                     }
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                        self.assignable(&Ty::Int, &lt, l.span);
-                        self.assignable(&Ty::Int, &rt, r.span);
+                        if let Ty::Var(v) = &lt {
+                            self.req_op(v, "ordered", *op, e.span);
+                        } else {
+                            self.assignable(&Ty::Int, &lt, l.span);
+                            self.assignable(&Ty::Int, &rt, r.span);
+                        }
                         Ty::Bool
                     }
                     BinOp::Add => {
-                        if lt == Ty::Str && rt == Ty::Str {
+                        if let Ty::Var(v) = &lt {
+                            self.req_op(v, "add", *op, e.span);
+                            Ty::Var(v.clone())
+                        } else if lt == Ty::Str && rt == Ty::Str {
                             Ty::Str
                         } else {
                             self.assignable(&Ty::Int, &lt, l.span);
@@ -630,11 +731,29 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::Str;
                 }
-                "sqlite_close" => {
+                "sqlite_close" | "exit" | "sset" | "writefile" => {
                     for a in args {
                         self.expr(a, env);
                     }
-                    return Ty::Void;
+                    return if name == &"writefile" { Ty::Int } else { Ty::Void };
+                }
+                "readfile" => {
+                    for a in args {
+                        self.expr(a, env);
+                    }
+                    return Ty::Str;
+                }
+                "sget" => {
+                    for a in args {
+                        self.expr(a, env);
+                    }
+                    return Ty::Int;
+                }
+                "mkshared" => {
+                    for a in args {
+                        self.expr(a, env);
+                    }
+                    return Ty::Own(Box::new(Ty::Unknown));
                 }
                 _ => {}
             }
@@ -658,15 +777,34 @@ impl<'a> Checker<'a> {
                 self.diags.push(Diag::err(sp, "check",
                     format!("`{name}` takes {} args, got {}", sig.params.len(), args.len())));
             }
+            // generic: bind type params from argument types, check constraints
+            let mut bind: HashMap<String, Ty> = HashMap::new();
+            if !sig.ty_params.is_empty() {
+                for (a, want) in args.iter().zip(sig.params.iter()) {
+                    let got = self.expr(a, env);
+                    self.bind_vars(want, &got, &mut bind);
+                }
+                for (tv, c) in &sig.ty_params {
+                    match bind.get(tv) {
+                        Some(t) => {
+                            let t = t.clone();
+                            if !self.satisfies(&t, c) {
+                                self.diags.push(Diag::err(sp, "type",
+                                    format!("`{}` does not satisfy constraint `{}`", t.name(), c)));
+                            }
+                        }
+                        None => self.diags.push(Diag::err(sp, "type",
+                            format!("cannot infer type parameter `{tv}`"))),
+                    }
+                }
+            }
             for (a, want) in args.iter().zip(sig.params.iter()) {
                 let got = self.expr(a, env);
                 // extern fns get the raw C type; ref/mut params emit borrow checks
-                self.assignable(want, &got, a.span);
-                if sig.is_extern && matches!(want, Ty::Ref(_) | Ty::Mut(_)) {
-                    // handled in codegen
-                }
+                self.assignable(&subst_ty(want, &bind), &got, a.span);
             }
-            return match sig.ret {
+            let ret = subst_ret(&sig.ret, &bind);
+            return match ret {
                 Ret::Void => Ty::Void,
                 Ret::One(t) => t,
                 Ret::Pair(t) => {
@@ -698,6 +836,7 @@ impl<'a> Checker<'a> {
                 }
                 Stmt::For { cond, body, .. } => expr_susp(cond) || block_has(body),
                 Stmt::Unsafe { body, .. } => block_has(body),
+                Stmt::Break { .. } | Stmt::Continue { .. } => false,
             })
         }
         fn expr_susp(e: &Expr) -> bool {
@@ -740,5 +879,23 @@ impl<'a> Checker<'a> {
             }
         }
         susp
+    }
+}
+
+pub fn subst_ty(t: &Ty, bind: &HashMap<String, Ty>) -> Ty {
+    match t {
+        Ty::Var(v) => bind.get(v).cloned().unwrap_or_else(|| t.clone()),
+        Ty::Own(b) => Ty::Own(Box::new(subst_ty(b, bind))),
+        Ty::Ref(b) => Ty::Ref(Box::new(subst_ty(b, bind))),
+        Ty::Mut(b) => Ty::Mut(Box::new(subst_ty(b, bind))),
+        _ => t.clone(),
+    }
+}
+
+fn subst_ret(r: &Ret, bind: &HashMap<String, Ty>) -> Ret {
+    match r {
+        Ret::One(t) => Ret::One(subst_ty(t, bind)),
+        Ret::Pair(t) => Ret::Pair(subst_ty(t, bind)),
+        Ret::Void => Ret::Void,
     }
 }

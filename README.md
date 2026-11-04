@@ -37,7 +37,9 @@ cd lang && cargo build --release
 lang build file.lang [-o out]   # compile to a native binary
 lang run file.lang [args...]    # compile + run
 lang test file.lang             # run all fn test_*() in a scope each
-lang fmt / doc / lsp            # scaffolded (phase 2)
+lang fmt file.lang [-w]         # normalize indentation/whitespace
+lang doc file.lang              # /// comments → markdown
+lang lsp                        # stdio LSP: live diagnostics in editors
 ```
 
 ## Language surface (v0)
@@ -66,10 +68,13 @@ fn main() {
 Types `int bool str cstr err chan` + user structs; `own T` / `ref T` /
 `mut T` handles with runtime borrow checks; `[v, err]` returns with
 dropped-error-as-compile-error; `extern fn` C FFI; `scope`/`spawn`/`go`
-structured concurrency (interim pool threads — the state-machine
-transform lands behind the same semantics, see
-`docs/semantics/concurrency.md`); builtin stdlib wave-1 (`print`, `itoa`,
-string ops, `mkbuf`/`poke*`, `argc`/`argv`, sqlite3 shims, `assert`).
++ `spawnBlocking` structured concurrency on a worker pool + blocking
+pool (the state-machine transform lands behind the same semantics, see
+`docs/semantics/concurrency.md`); `break`/`continue`; `interface` op
+constraints; generics `fn f[T ordered](a: T, b: T)` monomorphized per
+call site; `import "std/strings"` modules; builtin surface: `print`,
+`itoa`, string ops, `mkbuf`/`poke*`, `argc`/`argv`, `readfile`/
+`writefile`, `exit`, `mkshared`/`sget`/`sset`, sqlite3 shims, `assert`.
 
 ## Examples
 
@@ -80,6 +85,8 @@ string ops, `mkbuf`/`poke*`, `argc`/`argv`, sqlite3 shims, `assert`).
 | `examples/cli/main.lang` | CLI pilot: argv, string ops, error paths |
 | `examples/http-crud-sqlite/main.lang` | the flagship pilot: HTTP server + SQLite + per-connection tasks |
 | `examples/smoke_test.lang` | `lang test` scoped test harness |
+| `tests/stdlib_test.lang` | stdlib + break/continue coverage |
+| `bootstrap/lexer.lang` | **self-host component**: the language's lexer written in the language |
 
 Try it:
 
@@ -95,7 +102,10 @@ curl localhost:8080/items        # → 1|widget
 lang/          the compiler (Rust): lexer → parser → check → codegen → C → cc
 runtime/       rt.c/rt.h — arenas, ObjHdr checks, scopes/traps, executor, channels
 docs/          design doc, semantics annex, prototype report
+stdlib/        the standard library, written in the language (strings, testing, http)
+bootstrap/     self-host components — lexer done, parser next (docs/self-hosting.md)
 examples/      pilot programs (see above)
+tests/         tests/run.sh end-to-end suite (runs in CI)
 prototype/     de-risking benchmarks
 agent-os/      product docs, standards, and the milestone plan
 .agents/skills project skills (agentcanon layout — see AGENTS.md)

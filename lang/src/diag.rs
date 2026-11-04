@@ -60,7 +60,7 @@ impl Diags {
             eprintln!("{}:{}:{}: {} [{}] {}", self.file, line, col, sev, d.code, d.msg);
         }
     }
-    fn line_col(&self, off: u32) -> (usize, usize) {
+    pub fn line_col(&self, off: u32) -> (usize, usize) {
         let mut line = 1usize;
         let mut col = 1usize;
         for (i, c) in self.src.char_indices() {

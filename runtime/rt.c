@@ -67,50 +67,136 @@ void rt_unborrow(void *obj) {
 void rt_scope_enter(RtScope *s) {
     memset(s, 0, sizeof *s);
     s->parent = tls_scope;
+    pthread_mutex_init(&s->mu, NULL);
+    pthread_cond_init(&s->cv, NULL);
     s->arena_buf = malloc(ARENA_CAP);
     s->arena_cap = ARENA_CAP;
     tls_scope = s;
 }
 
+/* ---- interim executor: work pool + blocking pool ----
+ * Work pool: N=nproc workers on a shared queue. Blocking pool: a
+ * thread per task (FFI calls may block indefinitely). Both decrement
+ * scope pending; the state-machine executor keeps the same
+ * pending-count join protocol. */
+
+typedef struct Task {
+    void *(*fn)(void *);
+    void *arg;
+    RtScope *scope;
+    struct Task *next;
+} Task;
+
+static struct {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    Task *head, *tail;
+    int started;
+} pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0 };
+
+static void scope_done(RtScope *s) {
+    if (!s) return;
+    pthread_mutex_lock(&s->mu);
+    s->pending--;
+    if (s->pending <= 0) pthread_cond_signal(&s->cv);
+    pthread_mutex_unlock(&s->mu);
+}
+
+static void run_task(Task *t) {
+    tls_scope = t->scope;
+    t->fn(t->arg);
+    scope_done(t->scope);
+    free(t);
+}
+
+static void *worker(void *_p) {
+    (void)_p;
+    for (;;) {
+        pthread_mutex_lock(&pool.mu);
+        while (!pool.head) pthread_cond_wait(&pool.cv, &pool.mu);
+        Task *t = pool.head;
+        pool.head = t->next;
+        if (!pool.head) pool.tail = NULL;
+        pthread_mutex_unlock(&pool.mu);
+        if (!t->scope || !t->scope->cancel) run_task(t);
+        else { scope_done(t->scope); free(t); }
+    }
+    return 0;
+}
+
+static void pool_start(void) {
+    pthread_mutex_lock(&pool.mu);
+    if (!pool.started) {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        if (n < 2) n = 2;
+        if (n > 32) n = 32;
+        for (long i = 0; i < n; i++) {
+            pthread_t t;
+            if (pthread_create(&t, NULL, worker, NULL) == 0) pthread_detach(t);
+        }
+        pool.started = 1;
+    }
+    pthread_mutex_unlock(&pool.mu);
+}
+
 static void *task_wrap(void *p) {
-    void *(*fn)(void *) = ((void **)p)[0];
-    void *arg = ((void **)p)[1];
-    RtScope *s = ((void **)p)[2];
-    free(p);
-    tls_scope = s;
-    fn(arg);
+    Task *t = p;
+    run_task(t);
     return 0;
 }
 
 void rt_spawn(void *(*fn)(void *), void *arg) {
     RtScope *s = tls_scope;
-    if (!s) { /* spawn outside scope: detached */
-        pthread_t t;
-        void **box = malloc(3 * sizeof(void *));
-        box[0] = fn; box[1] = arg; box[2] = NULL;
-        if (pthread_create(&t, NULL, task_wrap, box) == 0)
-            pthread_detach(t);
+    if (s) {
+        pthread_mutex_lock(&s->mu);
+        s->pending++;
+        pthread_mutex_unlock(&s->mu);
+    }
+    if (!s) { /* outside scope: dedicated thread, nothing to join */
+        Task *t = malloc(sizeof *t);
+        *t = (Task){ fn, arg, NULL, NULL };
+        pthread_t th;
+        if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
         return;
     }
-    if (s->n == s->cap) {
-        s->cap = s->cap ? s->cap * 2 : 8;
-        s->threads = realloc(s->threads, s->cap * sizeof(pthread_t));
-    }
-    void **box = malloc(3 * sizeof(void *));
-    box[0] = fn; box[1] = arg; box[2] = s;
-    if (pthread_create(&s->threads[s->n], NULL, task_wrap, box) == 0)
-        s->n++;
+    pool_start();
+    Task *t = malloc(sizeof *t);
+    *t = (Task){ fn, arg, s, NULL };
+    pthread_mutex_lock(&pool.mu);
+    if (pool.tail) pool.tail->next = t; else pool.head = t;
+    pool.tail = t;
+    pthread_cond_signal(&pool.cv);
+    pthread_mutex_unlock(&pool.mu);
 }
 
-/* cooperative cancel check — tasks observe at suspend points */
+/* blocking pool: tasks that may block in FFI run on dedicated threads --
+ * a blocked worker can never starve the work pool */
+void rt_spawnb(void *(*fn)(void *), void *arg) {
+    RtScope *s = tls_scope;
+    if (s) {
+        pthread_mutex_lock(&s->mu);
+        s->pending++;
+        pthread_mutex_unlock(&s->mu);
+    }
+    Task *t = malloc(sizeof *t);
+    *t = (Task){ fn, arg, s, NULL };
+    pthread_t th;
+    if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
+}
+
+/* cooperative cancel check -- tasks observe at suspend points */
 static int cancelled(void) { return tls_scope && tls_scope->cancel; }
 
 static int join_scope(RtScope *s) {
-    for (int i = 0; i < s->n; i++) pthread_join(s->threads[i], NULL);
-    free(s->threads);
+    pthread_mutex_lock(&s->mu);
+    while (s->pending > 0) pthread_cond_wait(&s->cv, &s->mu);
+    int err = s->trapped ? (int)s->err : 0;
+    pthread_mutex_unlock(&s->mu);
+    pthread_mutex_destroy(&s->mu);
+    pthread_cond_destroy(&s->cv);
     free(s->arena_buf); /* bulk-free: the arena story */
     tls_scope = s->parent;
-    return s->trapped ? (int)s->err : 0;
+    return err;
 }
 
 void rt_scope_leave(RtScope *s) {
@@ -126,10 +212,32 @@ int rt_scope_try(RtScope *s) { return join_scope(s); }
 void rt_trap(int64_t code) {
     RtScope *s = tls_scope;
     if (!s) { fprintf(stderr, "trap %lld outside scope\n", (long long)code); abort(); }
-    s->trapped = 1;
+    pthread_mutex_lock(&s->mu);
+    if (!s->trapped) { /* first trap wins */
+        s->trapped = 1;
+        s->err = code;
+    }
     s->cancel = 1; /* siblings observe + unwind */
-    s->err = code;
+    pthread_mutex_unlock(&s->mu);
     pthread_exit(0);
+}
+
+/* ---------------- Shared<T>: atomic word cell ---------------- */
+
+RtShared *rt_mkshared(int64_t v) {
+    RtShared *s = malloc(sizeof *s);
+    s->val = v;
+    s->writer = 0;
+    return s;
+}
+
+int64_t rt_sget(RtShared *s) {
+    return __sync_fetch_and_add(&s->val, 0); /* atomic read */
+}
+
+void rt_sset(RtShared *s, int64_t v) {
+    __sync_lock_test_and_set(&s->val, v);
+    __sync_synchronize();
 }
 
 /* ---------------- channels (unbuffered, word payload) ---------------- */
@@ -156,7 +264,7 @@ void rt_send(RtChan *ch, int64_t v) {
     if (!ch->closed) {
         ch->val = v;
         ch->has = 1;
-        pthread_cond_signal(&ch->cv_recv);
+        pthread_cond_broadcast(&ch->cv_recv);
         while (ch->has && !ch->closed) pthread_cond_wait(&ch->cv_send, &ch->mu);
     }
     pthread_mutex_unlock(&ch->mu);
@@ -168,7 +276,9 @@ int64_t rt_recv(RtChan *ch) {
     while (!ch->has && !ch->closed) pthread_cond_wait(&ch->cv_recv, &ch->mu);
     int64_t v = ch->val;
     ch->has = 0;
-    pthread_cond_signal(&ch->cv_send);
+    /* broadcast, not signal: with racing senders a lone wakeup can land
+     * on the *completing* send instead of the queued one and strand it */
+    pthread_cond_broadcast(&ch->cv_send);
     pthread_mutex_unlock(&ch->mu);
     return v;
 }
@@ -194,6 +304,10 @@ LangStr rt_strcat(LangStr a, LangStr b) {
     return (LangStr){ p, a.n + b.n };
 }
 
+int rt_streq(LangStr a, LangStr b) {
+    return a.n == b.n && memcmp(a.p, b.p, (size_t)a.n) == 0;
+}
+
 LangStr rt_itoa(int64_t v) {
     char *p = rt_alloc(24);
     snprintf(p, 24, "%lld", (long long)v);
@@ -209,9 +323,9 @@ const char *rt_cstr(LangStr s) {
 
 static void wr(LangStr s) { fwrite(s.p, 1, (size_t)s.n, stdout); }
 void rt_print_str(LangStr s) { wr(s); }
-void rt_println_str(LangStr s) { wr(s); wr(rt_str("\n")); }
+void rt_println_str(LangStr s) { wr(s); wr(rt_str("\n")); fflush(stdout); }
 void rt_print_i64(int64_t v) { printf("%lld", (long long)v); }
-void rt_println_i64(int64_t v) { printf("%lld\n", (long long)v); }
+void rt_println_i64(int64_t v) { printf("%lld\n", (long long)v); fflush(stdout); }
 
 void rt_sleep(int64_t secs) {
     if (cancelled()) pthread_exit(0);
@@ -263,6 +377,37 @@ void rt_poke32(void *buf, int64_t off, int64_t v) { ((uint32_t *)buf)[off / 4] =
 int64_t rt_htons(int64_t v) { return htons((uint16_t)v); }
 int64_t rt_htonl(int64_t v) { return htonl((uint32_t)v); }
 
+/* ---------------- file io + process ---------------- */
+
+LangStr rt_readfile(LangStr path) {
+    char *cp = rt_alloc(path.n + 1);
+    memcpy(cp, path.p, (size_t)path.n);
+    cp[path.n] = 0;
+    FILE *f = fopen(cp, "rb");
+    if (!f) return rt_str("");
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = rt_alloc(n + 1);
+    fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[n] = 0;
+    return (LangStr){ buf, n };
+}
+
+int64_t rt_writefile(LangStr path, LangStr data) {
+    char *cp = rt_alloc(path.n + 1);
+    memcpy(cp, path.p, (size_t)path.n);
+    cp[path.n] = 0;
+    FILE *f = fopen(cp, "wb");
+    if (!f) return -1;
+    fwrite(data.p, 1, (size_t)data.n, f);
+    fclose(f);
+    return 0;
+}
+
+void rt_exit(int64_t code) { exit((int)code); }
+
 /* ---------------- sqlite3 shims ---------------- */
 /* v0 FFI can't express T** out-params; these wrap the three calls the
  * pilots need. sqlite3* itself crosses as a plain owned pointer. */
@@ -272,10 +417,21 @@ int64_t rt_htonl(int64_t v) { return htonl((uint32_t)v); }
 void *rt_sqlite_open(const char *path) {
     sqlite3 *db = NULL;
     if (sqlite3_open(path, &db) != SQLITE_OK) return NULL;
+    sqlite3_busy_timeout(db, 5000); /* serialize concurrent writers */
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
     return db;
 }
 int64_t rt_sqlite_exec(void *db, const char *sql) {
-    return sqlite3_exec((sqlite3 *)db, sql, NULL, NULL, NULL);
+    /* busy_timeout doesn't retry SQLITE_BUSY_SNAPSHOT; a bounded retry
+     * loop covers both busy flavors under concurrent writers */
+    for (int i = 0; i < 500; i++) {
+        int rc = sqlite3_exec((sqlite3 *)db, sql, NULL, NULL, NULL);
+        if (rc != SQLITE_BUSY && rc != SQLITE_LOCKED) {
+            return rc;
+        }
+        usleep(10000);
+    }
+    return SQLITE_BUSY;
 }
 LangStr rt_sqlite_query(void *db, const char *sql) {
     sqlite3_stmt *st = NULL;

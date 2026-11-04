@@ -10,12 +10,23 @@ pub enum Item {
     Fn(Fn),
     Struct(Struct),
     Extern(Fn),
+    Interface(Interface),
     Import(String, Span),
+}
+
+#[derive(Debug)]
+pub struct Interface {
+    pub name: String,
+    /// constraint surface: ops the type must support. v0: fixed vocab —
+    /// "eq" (==), "ordered" (< >), "add" (+)
+    pub ops: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Debug)]
 pub struct Fn {
     pub name: String,
+    pub ty_params: Vec<(String, String)>, // [(T, constraint)] — "" = any
     pub params: Vec<Param>,
     pub ret: RetTy,
     pub body: Option<Block>,
@@ -80,8 +91,10 @@ pub enum Stmt {
     If { cond: Expr, then: Block, els: Option<Block>, span: Span },
     For { cond: Expr, body: Block, span: Span },
     Scope { body: Block, span: Span },
-    Spawn { call: Expr, pinned: bool, span: Span },
+    Spawn { call: Expr, pinned: bool, blocking: bool, span: Span },
     Unsafe { body: Block, span: Span },
+    Break { span: Span },
+    Continue { span: Span },
 }
 
 #[derive(Debug)]

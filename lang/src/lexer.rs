@@ -4,6 +4,7 @@ use crate::diag::{Diag, Diags, Span};
 pub enum Kw {
     Fn, Struct, Extern, Return, If, Else, For, Let, Scope, Spawn, Go,
     Own, Ref, Mut, Unsafe, Nil, True, False, Import, Chan,
+    Break, Continue, Interface, SpawnB,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -131,6 +132,10 @@ pub fn lex(src: &str, diags: &mut Diags) -> Vec<Token> {
                     "false" => Some(Kw::False),
                     "import" => Some(Kw::Import),
                     "chan" => Some(Kw::Chan),
+                    "break" => Some(Kw::Break),
+                    "continue" => Some(Kw::Continue),
+                    "interface" => Some(Kw::Interface),
+                    "spawnBlocking" => Some(Kw::SpawnB),
                     _ => None,
                 };
                 // `_` alone is the blank punct, not an identifier

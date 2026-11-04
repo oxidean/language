@@ -1,5 +1,7 @@
 target/
 a.out
 out.c
-pilot.db
+pilot.db*
 *.o
+srv.pid
+srv.log

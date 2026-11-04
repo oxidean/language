@@ -1,0 +1,108 @@
+// std/strings — string helpers written in the language itself.
+// Exercises: imports, self-referential owned structs (split lists),
+// byte-level iteration. Import with `import "std/strings"`.
+
+/// StrList is the split()-style result list: own-linked nodes.
+struct StrList {
+    v: str
+    next: own StrList
+}
+
+/// does s start with pre?
+fn startswith(s: str, pre: str) -> bool {
+    if len(pre) > len(s) {
+        return false
+    }
+    return substr(s, 0, len(pre)) == pre
+}
+
+/// does s end with suf?
+fn endswith(s: str, suf: str) -> bool {
+    if len(suf) > len(s) {
+        return false
+    }
+    return substr(s, len(s) - len(suf), len(s)) == suf
+}
+
+/// does s contain sub anywhere?
+fn contains(s: str, sub: str) -> bool {
+    return find(s, sub) >= 0
+}
+
+/// trim ASCII whitespace from both ends
+fn trim(s: str) -> str {
+    a := 0
+    b := len(s)
+    for a < b {
+        c := byteat(s, a)
+        if c != 32 && c != 9 && c != 10 && c != 13 {
+            break
+        }
+        a = a + 1
+    }
+    for b > a {
+        c := byteat(s, b - 1)
+        if c != 32 && c != 9 && c != 10 && c != 13 {
+            break
+        }
+        b = b - 1
+    }
+    return substr(s, a, b)
+}
+
+/// split s on sep; returns an own-linked StrList (nil-terminated)
+fn split(s: str, sep: str) -> own StrList {
+    head := new(StrList)
+    head.v = ""
+    head.next = nil
+    tail := head
+    pos := 0
+    for pos <= len(s) {
+        i := find(substr(s, pos, len(s)), sep)
+        if i < 0 {
+            tail.next = new(StrList)
+            tail = tail.next
+            tail.v = substr(s, pos, len(s))
+            tail.next = nil
+            break
+        }
+        tail.next = new(StrList)
+        tail = tail.next
+        tail.v = substr(s, pos, pos + i)
+        tail.next = nil
+        pos = pos + i + len(sep)
+    }
+    return head.next
+}
+
+/// join a split() list back with sep
+fn join(parts: own StrList, sep: str) -> str {
+    out := ""
+    first := true
+    cur := parts
+    for cur != nil {
+        if !first {
+            out = out + sep
+        }
+        out = out + cur.v
+        first = false
+        cur = cur.next
+    }
+    return out
+}
+
+/// ASCII uppercase
+fn upper(s: str) -> str {
+    buf := mkbuf(len(s) + 1)
+    i := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if c >= 97 && c <= 122 {
+            poke8(buf, i, c - 32)
+        } else {
+            poke8(buf, i, c)
+        }
+        i = i + 1
+    }
+    return bufstr(buf, len(s))
+}

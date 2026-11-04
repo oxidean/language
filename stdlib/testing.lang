@@ -1,0 +1,24 @@
+// std/testing — tiny assertion helpers for `lang test`.
+// Import with `import "std/testing"`.
+
+/// trap the test if cond is false
+fn expect(cond: bool, msg: str) {
+    if !cond {
+        println("FAILED: " + msg)
+        assert(false)
+    }
+}
+
+fn expect_eq(got: int, want: int, msg: str) {
+    if got != want {
+        println("FAILED: " + msg + " got=" + itoa(got) + " want=" + itoa(want))
+        assert(false)
+    }
+}
+
+fn expect_streq(got: str, want: str, msg: str) {
+    if got != want {
+        println("FAILED: " + msg + " got=" + got + " want=" + want)
+        assert(false)
+    }
+}

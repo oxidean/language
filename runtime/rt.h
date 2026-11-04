@@ -20,14 +20,18 @@ typedef struct {
     uint8_t _pad;
 } ObjHdr;
 
-/* --- scopes & tasks (concurrency.md, interim pool impl) --- */
+/* --- scopes & tasks (concurrency.md) ---
+ * Interim executor: fixed worker pool with a shared MPMC task queue.
+ * Scopes join by pending-task count, not thread handles — the same
+ * accounting the eventual state-machine tasks will use. */
 typedef struct RtScope {
-    pthread_t *threads;
-    int n, cap;
+    volatile int pending;
     volatile int trapped;
     volatile int cancel;
     int64_t err;
     struct RtScope *parent;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
     /* arena: bump allocator freed on leave */
     char *arena_buf;
     int64_t arena_off, arena_cap;
@@ -36,8 +40,18 @@ typedef struct RtScope {
 void rt_scope_enter(RtScope *s);
 void rt_scope_leave(RtScope *s);
 int rt_scope_try(RtScope *s); /* join; return trap code without propagating */
-void rt_spawn(void *(*fn)(void *), void *arg);
+void rt_spawn(void *(*fn)(void *), void *arg);   /* work pool */
+void rt_spawnb(void *(*fn)(void *), void *arg);  /* blocking pool (FFI) */
 void rt_trap(int64_t code);
+
+/* --- Shared<T>: atomic word cell for cross-scope sharing --- */
+typedef struct {
+    volatile int64_t val;
+    volatile int32_t writer; /* 1 while a writer holds it */
+} RtShared;
+RtShared *rt_mkshared(int64_t v);
+int64_t rt_sget(RtShared *s);
+void rt_sset(RtShared *s, int64_t v);
 
 /* --- allocation & ownership checks (ownership.md) --- */
 void *rt_alloc(int64_t size);       /* scope arena if inside scope, else heap */
@@ -58,6 +72,7 @@ void rt_close(RtChan *ch);
 void rt_sleep(int64_t secs);
 LangStr rt_str_lit(const char *s);
 LangStr rt_strcat(LangStr a, LangStr b);
+int rt_streq(LangStr a, LangStr b);
 LangStr rt_itoa(int64_t v);
 LangStr rt_str(const char *s);
 void rt_print_str(LangStr s);
@@ -82,6 +97,9 @@ void rt_poke16(void *buf, int64_t off, int64_t v);
 void rt_poke32(void *buf, int64_t off, int64_t v);
 int64_t rt_htons(int64_t v);
 int64_t rt_htonl(int64_t v);
+LangStr rt_readfile(LangStr path);
+int64_t rt_writefile(LangStr path, LangStr data);
+void rt_exit(int64_t code);
 
 /* sqlite3 shims — out-param (T**) FFI needs these until the type
  * system gains address-of; direct calls (strlen etc.) use `extern` */

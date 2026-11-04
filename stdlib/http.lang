@@ -1,0 +1,79 @@
+// std/http — minimal HTTP/1.1 server written in the language over libc
+// sockets. Import with `import "std/http"` and define:
+//
+//   fn route(method: str, path: str, body: str) -> str
+//   fn main() { serve(8080) }
+//
+// `route` is called per request on the blocking pool; whatever it
+// returns is sent as a text/plain 200 response.
+
+extern fn socket(domain: int, ty: int, proto: int) -> int
+extern fn bind(fd: int, addr: own sockaddr, len: int) -> int
+extern fn listen(fd: int, backlog: int) -> int
+extern fn accept(fd: int, addr: own sockaddr, len: own intp) -> int
+extern fn read(fd: int, buf: own void, n: int) -> int
+extern fn write(fd: int, buf: cstr, n: int) -> int
+extern fn close(fd: int) -> int
+extern fn setsockopt(fd: int, lvl: int, opt: int, v: own intp, n: int) -> int
+
+struct sockaddr { a: int, b: int }   // 16 bytes: sockaddr_in fits
+struct intp { v: int }
+
+fn http_ok(body: str) -> str {
+    return "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: "
+        + itoa(len(body)) + "\r\n\r\n" + body
+}
+
+fn handle_conn(fd: int) {
+    buf := mkbuf(4096)
+    n := read(fd, buf, 4095)
+    if n <= 0 {
+        close(fd)
+        return
+    }
+    req := bufstr(buf, n)
+
+    // "METHOD PATH HTTP/1.x" — split on the first two spaces
+    sp1 := find(req, " ")
+    rest := substr(req, sp1 + 1, len(req))
+    sp2 := find(rest, " ")
+    path := substr(rest, 0, sp2)
+    method := substr(req, 0, sp1)
+    hdr_end := find(req, "\r\n\r\n")
+    body := ""
+    if hdr_end >= 0 {
+        body = substr(req, hdr_end + 4, len(req))
+    }
+
+    resp_body := route(method, path, body)
+    resp := http_ok(resp_body)
+    write(fd, cstr(resp), len(resp))
+    close(fd)
+}
+
+/// listen+serve on port; calls the user-defined route() per request
+fn serve(port: int) {
+    srv := socket(2, 1, 0)            // AF_INET, SOCK_STREAM
+    one := new(intp)
+    one.v = 1
+    setsockopt(srv, 1, 2, one, 4)     // SOL_SOCKET, SO_REUSEADDR
+
+    addr := new(sockaddr)
+    // sockaddr_in: family (host order) | port (network order) | addr | zero
+    poke8(addr, 0, 2)                 // sin_family = AF_INET (LE pair 02 00)
+    poke8(addr, 1, 0)
+    poke16(addr, 2, port)             // sin_port = htons(port)
+    poke32(addr, 4, 0)                // sin_addr = INADDR_ANY
+    bind(srv, addr, 16)
+    listen(srv, 64)
+    println("listening on :" + itoa(port))
+
+    scope {
+        for true {
+            cfd := accept(srv, addr, one)
+            if cfd >= 0 {
+                spawnBlocking handle_conn(cfd)
+            }
+        }
+    }
+}

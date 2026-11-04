@@ -27,14 +27,21 @@ fn c_escape(s: &str) -> String {
     out
 }
 
-struct Gen {
+struct Gen<'a> {
     out: String,
     trampolines: String,
+    inst_out: String,
     tmp: usize,
     scope_id: usize,
     env: Vec<HashMap<String, Ty>>,
     structs: HashMap<String, Vec<(String, Ty)>>,
     fns: HashMap<String, (Vec<Ty>, crate::check::Ret)>,
+    ty_params: HashMap<String, Vec<(String, String)>>,
+    ast_fns: HashMap<String, &'a Fn>,
+    insts: Vec<(String, Vec<(String, Ty)>)>,
+    inst_done: std::collections::HashSet<String>,
+    subst: HashMap<String, Ty>,
+    cur_tyvars: std::collections::HashSet<String>,
     externs: std::collections::HashSet<String>,
     cur_ret_pair: bool,
     cur_fn: String,
@@ -45,15 +52,26 @@ pub fn generate(c: &Crate) -> String {
     generate_mode(c, false)
 }
 
+fn mangle_ty(t: &Ty) -> String {
+    t.name().chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect()
+}
+
 pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
     let mut g = Gen {
         out: String::new(),
         trampolines: String::new(),
+        inst_out: String::new(),
         tmp: 0,
         scope_id: 0,
         env: vec![HashMap::new()],
         structs: HashMap::new(),
         fns: HashMap::new(),
+        ty_params: HashMap::new(),
+        ast_fns: HashMap::new(),
+        insts: Vec::new(),
+        inst_done: std::collections::HashSet::new(),
+        subst: HashMap::new(),
+        cur_tyvars: std::collections::HashSet::new(),
         externs: std::collections::HashSet::new(),
         cur_ret_pair: false,
         cur_fn: String::new(),
@@ -68,14 +86,21 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
                 );
             }
             Item::Fn(f) | Item::Extern(f) => {
+                g.cur_tyvars = f.ty_params.iter().map(|(t, _)| t.clone()).collect();
                 let params = f.params.iter().map(|p| g.ty_of_ref(&p.ty)).collect();
                 let ret = match &f.ret {
                     RetTy::Void => crate::check::Ret::Void,
                     RetTy::One(t) => crate::check::Ret::One(g.ty_of_ref(t)),
                     RetTy::Pair(t) => crate::check::Ret::Pair(g.ty_of_ref(t)),
                 };
+                g.cur_tyvars.clear();
                 if matches!(it, Item::Extern(_)) {
                     g.externs.insert(f.name.clone());
+                } else {
+                    g.ast_fns.insert(f.name.clone(), f);
+                }
+                if !f.ty_params.is_empty() {
+                    g.ty_params.insert(f.name.clone(), f.ty_params.clone());
                 }
                 g.fns.insert(f.name.clone(), (params, ret));
             }
@@ -99,19 +124,26 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
     // [T, err] result structs must precede fn prototypes
     for it in &c.items {
         if let Item::Fn(f) = it {
-            if let RetTy::Pair(t) = &f.ret {
-                let _ = writeln!(
-                    out, "struct l_ret_{} {{ {} val; int64_t err; }};",
-                    f.name, g.cty(&g.ty_of_ref(t))
-                );
+            if f.ty_params.is_empty() {
+                if let RetTy::Pair(t) = &f.ret {
+                    let _ = writeln!(
+                        out, "struct l_ret_{} {{ {} val; int64_t err; }};",
+                        f.name, g.cty(&g.ty_of_ref(t))
+                    );
+                }
             }
         }
     }
 
-    // fn prototypes + extern passthroughs
+    // fn prototypes + extern passthroughs (generic fns get none — they
+    // only exist as instantiations)
     for it in &c.items {
         match it {
-            Item::Fn(f) => g.proto(&mut out, f, false),
+            Item::Fn(f) => {
+                if f.ty_params.is_empty() {
+                    g.proto(&mut out, f, false);
+                }
+            }
             Item::Extern(f) => g.proto(&mut out, f, true),
             _ => {}
         }
@@ -121,7 +153,20 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
     let body_start = g.out.len();
     for it in &c.items {
         if let Item::Fn(f) = it {
-            g.func(f);
+            if f.ty_params.is_empty() {
+                g.func(f);
+            }
+        }
+    }
+    // monomorphized instantiations (drain until stable — instantiations
+    // can themselves call generics)
+    while let Some((fname, bind)) = g.insts.pop() {
+        let mangled = inst_name(&fname, &bind);
+        if !g.inst_done.insert(mangled.clone()) {
+            continue;
+        }
+        if let Some(f) = g.ast_fns.get(&fname).cloned() {
+            g.func_inst(f, &mangled, &bind);
         }
     }
     if test_mode {
@@ -143,11 +188,49 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
     // trampolines must precede the fn bodies that reference them
     let mut final_out = g.out[..body_start].to_string();
     final_out.push_str(&g.trampolines);
+    final_out.push_str(&g.inst_out);
     final_out.push_str(&g.out[body_start..]);
     final_out
 }
 
-impl Gen {
+fn inst_name(fname: &str, bind: &[(String, Ty)]) -> String {
+    let mut n = fname.to_string();
+    for (_, t) in bind {
+        n.push_str("__");
+        n.push_str(&mangle_ty(t));
+    }
+    n
+}
+
+/// bind generic param type `want` against concrete `got`
+fn bind_generic(want: &Ty, got: &Ty, bind: &mut HashMap<String, Ty>) {
+    match (want, got) {
+        (Ty::Var(v), g) => {
+            bind.entry(v.clone()).or_insert_with(|| g.clone());
+        }
+        (Ty::Own(w), Ty::Own(g)) | (Ty::Ref(w), Ty::Ref(g)) | (Ty::Mut(w), Ty::Mut(g)) => {
+            bind_generic(w, g, bind)
+        }
+        (Ty::Ref(w) | Ty::Mut(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) => {
+            bind_generic(w, g, bind)
+        }
+        _ => {}
+    }
+}
+
+/// ordered bindings for a call to `name` with arg exprs `args`
+fn call_bindings(g: &Gen, name: &str, args: &[Expr]) -> Option<Vec<(String, Ty)>> {
+    let tp = g.ty_params.get(name)?;
+    let (params, _) = g.fns.get(name)?;
+    let mut bind = HashMap::new();
+    for (a, want) in args.iter().zip(params.iter()) {
+        let got = g.expr_ty(a);
+        bind_generic(want, &got, &mut bind);
+    }
+    Some(tp.iter().map(|(t, _)| (t.clone(), bind.get(t).cloned().unwrap_or(Ty::Int))).collect())
+}
+
+impl<'a> Gen<'a> {
     fn ty_of_ref(&self, t: &TyRef) -> Ty {
         match &t.kind {
             TyKind::Named(n) => match n.as_str() {
@@ -157,7 +240,15 @@ impl Gen {
                 "cstr" => Ty::CStr,
                 "err" => Ty::Err,
                 "void" => Ty::Void,
-                s => Ty::Struct(s.to_string()),
+                s => {
+                    if let Some(b) = self.subst.get(s) {
+                        b.clone()
+                    } else if self.cur_tyvars.contains(s) {
+                        Ty::Var(s.to_string())
+                    } else {
+                        Ty::Struct(s.to_string())
+                    }
+                }
             },
             TyKind::Own(t) => Ty::Own(Box::new(self.ty_of_ref(t))),
             TyKind::Ref(t) => Ty::Ref(Box::new(self.ty_of_ref(t))),
@@ -175,8 +266,17 @@ impl Gen {
             Ty::Void => "void".into(),
             Ty::Chan => "RtChan*".into(),
             Ty::Struct(n) => format!("struct l_s_{n}"),
+            Ty::Var(v) => self
+                .subst
+                .get(v)
+                .map(|t| self.cty(t))
+                .unwrap_or_else(|| "int64_t".into()),
             Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
                 Ty::Struct(n) => format!("struct l_s_{n}*"),
+                Ty::Var(v) => match self.subst.get(v) {
+                    Some(Ty::Struct(n)) => format!("struct l_s_{n}*"),
+                    _ => "void*".into(),
+                },
                 _ => "void*".into(),
             },
             Ty::Unknown => "int64_t".into(),
@@ -244,6 +344,71 @@ impl Gen {
         }
     }
 
+    /// emit a monomorphized copy of generic fn `f` as `l_f_{mangled}`
+    fn func_inst(&mut self, f: &Fn, mangled: &str, bind: &[(String, Ty)]) {
+        let saved_subst = std::mem::replace(
+            &mut self.subst,
+            bind.iter().cloned().collect::<HashMap<_, _>>(),
+        );
+        let saved_out = std::mem::take(&mut self.out);
+        // ret struct (if [T, err]) + prototype into inst_out
+        if let RetTy::Pair(t) = &f.ret {
+            let _ = writeln!(
+                self.inst_out,
+                "struct l_ret_{mangled} {{ {} val; int64_t err; }};",
+                self.cty(&self.ty_of_ref(t))
+            );
+        }
+        let mut proto = String::new();
+        self.proto_named(&mut proto, f, mangled);
+        self.inst_out.push_str(&proto);
+        // body — emitted into the swapped-out self.out (stmt() writes there)
+        let ret_c = self.ret_decl_named(f, mangled);
+        let params: Vec<String> = f
+            .params
+            .iter()
+            .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
+            .collect();
+        let params = if params.is_empty() { "void".into() } else { params.join(", ") };
+        let _ = writeln!(self.out, "{ret_c} l_f_{mangled}({params}) {{");
+        self.cur_fn = mangled.to_string();
+        self.cur_ret_pair = matches!(f.ret, RetTy::Pair(_));
+        self.env.push(HashMap::new());
+        for p in &f.params {
+            let t = self.ty_of_ref(&p.ty);
+            self.env.last_mut().unwrap().insert(p.name.clone(), t);
+        }
+        if let Some(b) = &f.body {
+            for s in &b.stmts {
+                self.stmt(s);
+            }
+        }
+        self.env.pop();
+        let _ = writeln!(self.out, "}}\n");
+        self.inst_out.push_str(&self.out);
+        self.out = saved_out;
+        self.subst = saved_subst;
+    }
+
+    fn proto_named(&self, out: &mut String, f: &Fn, name: &str) {
+        let ret_c = self.ret_decl_named(f, name);
+        let params: Vec<String> = f
+            .params
+            .iter()
+            .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
+            .collect();
+        let params = if params.is_empty() { "void".into() } else { params.join(", ") };
+        let _ = writeln!(out, "{ret_c} l_f_{name}({params});");
+    }
+
+    fn ret_decl_named(&self, f: &Fn, name: &str) -> String {
+        match &f.ret {
+            RetTy::Void => "void".into(),
+            RetTy::One(t) => self.pty(&self.ty_of_ref(t)),
+            RetTy::Pair(_) => format!("struct l_ret_{name}"),
+        }
+    }
+
     fn tmp(&mut self) -> usize {
         self.tmp += 1;
         self.tmp
@@ -253,6 +418,14 @@ impl Gen {
         self.env.iter().rev().find_map(|s| s.get(n).cloned()).unwrap_or(Ty::Unknown)
     }
 
+    /// resolve a Ty::Var through the active instantiation bindings
+    fn dt(&self, t: &Ty) -> Ty {
+        match t {
+            Ty::Var(v) => self.subst.get(v).map(|t| self.dt(t)).unwrap_or_else(|| t.clone()),
+            _ => t.clone(),
+        }
+    }
+
     fn expr_ty(&self, e: &Expr) -> Ty {
         match &e.kind {
             ExprKind::Int(_) => Ty::Int,
@@ -260,23 +433,40 @@ impl Gen {
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Nil => Ty::Err,
             ExprKind::Ident(n) => self.lookup(n),
-            ExprKind::Call { f, .. } => {
+            ExprKind::Call { f, args } => {
                 if let ExprKind::Ident(n) = &f.kind {
                     if let Some((_, r)) = self.fns.get(n) {
                         return match r {
-                            crate::check::Ret::One(t) => t.clone(),
+                            crate::check::Ret::One(t) => {
+                                if let Some(bind) = call_bindings(self, n, args) {
+                                    let m: HashMap<String, Ty> = bind.into_iter().collect();
+                                    crate::check::subst_ty(t, &m)
+                                } else {
+                                    self.dt(t)
+                                }
+                            }
+                            crate::check::Ret::Pair(t) => {
+                                if let Some(bind) = call_bindings(self, n, args) {
+                                    let m: HashMap<String, Ty> = bind.into_iter().collect();
+                                    crate::check::subst_ty(t, &m)
+                                } else {
+                                    self.dt(t)
+                                }
+                            }
                             _ => Ty::Void,
                         };
                     }
                     match n.as_str() {
                         "mkchan" => return Ty::Chan,
                         "recv" | "argc" | "len" | "byteat" | "find" | "atoi"
-                        | "htons" | "htonl" | "sqlite_exec" => return Ty::Int,
-                        "argv" | "itoa" | "substr" | "bufstr" | "sqlite_query" => {
+                        | "htons" | "htonl" | "sqlite_exec" | "writefile" | "sget" => {
+                            return Ty::Int
+                        }
+                        "argv" | "itoa" | "substr" | "bufstr" | "sqlite_query" | "readfile" => {
                             return Ty::Str
                         }
                         "cstr" => return Ty::CStr,
-                        "mkbuf" | "sqlite_open" => return Ty::Own(Box::new(Ty::Unknown)),
+                        "mkbuf" | "sqlite_open" | "mkshared" => return Ty::Own(Box::new(Ty::Unknown)),
                         "new" => {
                             if let ExprKind::Call { args, .. } = &e.kind {
                                 if let Some(Expr { kind: ExprKind::Ident(sn), .. }) = args.first() {
@@ -292,7 +482,15 @@ impl Gen {
             }
             ExprKind::Field { obj, name } => {
                 let ot = self.expr_ty(obj);
-                if let Ty::Struct(sn) = ot {
+                let sn = match &ot {
+                    Ty::Struct(n) => Some(n.clone()),
+                    Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
+                        Ty::Struct(n) => Some(n.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(sn) = sn {
                     if let Some(fs) = self.structs.get(&sn) {
                         if let Some((_, t)) = fs.iter().find(|(n, _)| n == name) {
                             return t.clone();
@@ -306,7 +504,9 @@ impl Gen {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
                 | BinOp::And | BinOp::Or => Ty::Bool,
                 BinOp::Add => {
-                    if self.expr_ty(l) == Ty::Str && self.expr_ty(r) == Ty::Str {
+                    if self.dt(&self.expr_ty(l)) == Ty::Str
+                        && self.dt(&self.expr_ty(r)) == Ty::Str
+                    {
                         Ty::Str
                     } else {
                         Ty::Int
@@ -331,13 +531,24 @@ impl Gen {
                 self.env.last_mut().unwrap().insert(name.clone(), t);
             }
             Stmt::Let2 { a, b, call, .. } => {
-                if let ExprKind::Call { f, .. } = &call.kind {
+                if let ExprKind::Call { f, args } = &call.kind {
                     if let ExprKind::Ident(fn_name) = &f.kind {
                         let n = self.tmp();
                         let c = self.expr(call);
-                        let _ = writeln!(self.out, "    struct l_ret_{fn_name} _r{n} = {c};");
+                        let (ret_name, bind) = match call_bindings(self, fn_name, args) {
+                            Some(bind) => (inst_name(fn_name, &bind), Some(bind)),
+                            None => (fn_name.clone(), None),
+                        };
+                        let _ = writeln!(self.out, "    struct l_ret_{ret_name} _r{n} = {c};");
                         let vt = match self.fns.get(fn_name).map(|x| x.1.clone()) {
-                            Some(crate::check::Ret::Pair(t)) => t,
+                            Some(crate::check::Ret::Pair(t)) => match &bind {
+                                Some(bind) => {
+                                    let m: HashMap<String, Ty> =
+                                        bind.iter().cloned().collect();
+                                    crate::check::subst_ty(&t, &m)
+                                }
+                                None => self.dt(&t),
+                            },
                             _ => Ty::Unknown,
                         };
                         if let Bind::Name(na) = a {
@@ -405,6 +616,12 @@ impl Gen {
                 self.env.pop();
                 let _ = writeln!(self.out, "    }}");
             }
+            Stmt::Break { .. } => {
+                let _ = writeln!(self.out, "    break;");
+            }
+            Stmt::Continue { .. } => {
+                let _ = writeln!(self.out, "    continue;");
+            }
             Stmt::Scope { body, .. } => {
                 let id = self.scope_id;
                 self.scope_id += 1;
@@ -416,7 +633,7 @@ impl Gen {
                 self.env.pop();
                 let _ = writeln!(self.out, "      rt_scope_leave(&_sc{id}); }}");
             }
-            Stmt::Spawn { call, .. } => self.spawn(call),
+            Stmt::Spawn { call, blocking, .. } => self.spawn(call, *blocking),
             Stmt::Unsafe { body, .. } => {
                 self.env.push(HashMap::new());
                 for s in &body.stmts {
@@ -427,7 +644,7 @@ impl Gen {
         }
     }
 
-    fn spawn(&mut self, call: &Expr) {
+    fn spawn(&mut self, call: &Expr, blocking: bool) {
         if let ExprKind::Call { f, args } = &call.kind {
             if let ExprKind::Ident(fn_name) = &f.kind {
                 let id = self.tmp();
@@ -465,7 +682,8 @@ impl Gen {
                     let v = self.expr(arg);
                     let _ = writeln!(self.out, "      a->a{i} = {v};");
                 }
-                let _ = writeln!(self.out, "      rt_spawn(l_tr_{id}, a); }}");
+                let spawn_fn = if blocking { "rt_spawnb" } else { "rt_spawn" };
+                let _ = writeln!(self.out, "      {spawn_fn}(l_tr_{id}, a); }}");
             }
         }
     }
@@ -505,8 +723,11 @@ impl Gen {
                     BinOp::Gt => ">", BinOp::Ge => ">=",
                     BinOp::And => "&&", BinOp::Or => "||",
                 };
-                if *op == BinOp::Add && lt == Ty::Str {
+                if *op == BinOp::Add && self.dt(&lt) == Ty::Str {
                     format!("rt_strcat({lv}, {rv})")
+                } else if matches!(op, BinOp::Eq | BinOp::Ne) && self.dt(&lt) == Ty::Str {
+                    let neg = if *op == BinOp::Ne { "!" } else { "" };
+                    format!("({neg}rt_streq({lv}, {rv}))")
                 } else {
                     format!("({lv} {cop} {rv})")
                 }
@@ -539,7 +760,8 @@ impl Gen {
             "len" => format!("rt_len({})", a0),
             "byteat" | "substr" | "find" | "bufstr" | "poke8" | "poke16" | "poke32"
             | "sqlite_exec" | "sqlite_query" => format!("rt_{name}({})", j(argvs)),
-            "atoi" | "mkbuf" | "htons" | "htonl" | "cstr" | "sqlite_open" | "sqlite_close" => {
+            "atoi" | "mkbuf" | "htons" | "htonl" | "cstr" | "sqlite_open" | "sqlite_close"
+            | "readfile" | "writefile" | "exit" | "mkshared" | "sget" | "sset" => {
                 format!("rt_{name}({})", j(argvs))
             }
             _ => return None,
@@ -576,17 +798,37 @@ impl Gen {
                         return b;
                     }
                     let lang = self.fns.contains_key(name) && !self.externs.contains(name);
-                    let callee = if lang { format!("l_f_{name}") } else { name.clone() };
+                    let callee = if lang {
+                        if let Some(bind) = call_bindings(self, name, args) {
+                            let m = inst_name(name, &bind);
+                            if !self.inst_done.contains(&m) {
+                                self.insts.push((name.clone(), bind));
+                            }
+                            format!("l_f_{m}")
+                        } else {
+                            format!("l_f_{name}")
+                        }
+                    } else {
+                        name.clone()
+                    };
                     // str -> cstr coercion + borrow checks for ref/mut params
                     if let Some((params, _)) = self.fns.get(name).cloned() {
+                        let smap: HashMap<String, Ty> = call_bindings(self, name, args)
+                            .map(|b| b.into_iter().collect())
+                            .unwrap_or_default();
                         let mut pre = String::new();
                         let mut coerced: Vec<String> = Vec::new();
                         for (a, pt) in args.iter().zip(params.iter()) {
+                            let pt = if smap.is_empty() {
+                                self.dt(pt)
+                            } else {
+                                crate::check::subst_ty(pt, &smap)
+                            };
                             let mut v = self.expr(a);
-                            if *pt == Ty::CStr && self.expr_ty(a) == Ty::Str {
+                            if pt == Ty::CStr && self.dt(&self.expr_ty(a)) == Ty::Str {
                                 v = format!("rt_cstr({v})");
                             }
-                            match pt {
+                            match &pt {
                                 Ty::Mut(_) => pre.push_str(&format!("rt_borrow_mut({v}); ")),
                                 Ty::Ref(_) => pre.push_str(&format!("rt_borrow_read({v}); ")),
                                 _ => {}

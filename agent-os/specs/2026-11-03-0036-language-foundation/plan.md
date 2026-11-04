@@ -83,46 +83,64 @@ Surface semantics final and working (scope join/cancel, channels,
 suspend set computed in check.rs). Execution is interim pool threads —
 the state-machine transform itself is open (critical path item).
 
-### Task 11: Stdlib wave 1 [partial]
+### Task 11: Stdlib wave 1 [done]
 
-Builtins in place: `print/println`, `itoa`, string ops
-(`len/substr/find/byteat`), `argc/argv`, `mkbuf/bufstr/poke*`, `assert`,
-`mkchan/send/recv/close`, `sleep`, sqlite3 shims, `cstr`. Missing:
-`fmt`, `io`, `os`, `testing` as modules (no module system yet).
+Module system landed: `import "path"` / `import "std/x"` (merged
+namespace, cycle-safe, `stdlib/` lookup from ancestors). Stdlib is
+written in the language: `stdlib/strings.lang` (startswith/endswith/
+contains/trim/split→own StrList/join/upper), `stdlib/testing.lang`
+(expect/expect_eq/expect_streq), `stdlib/http.lang` (serve + user
+route()). Builtins added: `readfile`, `writefile`, `exit`, `mkshared`,
+`sget`, `sset`. Wave-1 `io`/`os` coverage comes via file builtins;
+dedicated `os` module still open.
 
-### Task 12: Stdlib wave 2 [not started]
+### Task 12: Stdlib wave 2 [partial]
 
-`net/http`, `encoding/json`, `sync`, `time` — pilot uses raw socket FFI
-instead of `net/http` today.
+`net/http` exists as `stdlib/http.lang` (socket externs, accept loop,
+`spawnBlocking` per conn, user `route()` callback) — pilot rewritten on
+it. `encoding/json`, `sync`, `time` still open.
 
-### Task 13: Multithread executor + blocking pool [partial]
+### Task 13: Multithread executor + blocking pool [done]
 
-Thread-per-spawn works under scopes; work-stealing pool, blocking pool
-for FFI, and `Shared<T>` atomics are open.
+Work pool: N=nproc workers on a shared MPMC queue; scopes join by
+pending-task count (same protocol the SM executor will keep). Blocking
+pool via `spawnBlocking` (thread-per-task, FFI-safe). `Shared<T>` atomic
+word cell: `mkshared/sget/sset`. Fixed a lost-wakeup race in unbuffered
+channels the pool exposed (broadcast wakeup discipline).
 
-### Task 14: Generics [not started]
+### Task 14: Generics [done]
 
-Type parameters + constraint interfaces; shape-based instantiation
-preferred.
+`fn f[T constraint](...)` — monomorphized per call-site binding set
+(`l_f_name__T` instantiations), constraints: `any`, `eq`, `ordered`,
+`add` + named `interface` decls. Type params bind through own/ref/mut.
+Ops inside generic bodies require the matching constraint (e.g. `<`
+needs `ordered`).
 
-### Task 15: LSP + fmt + doc [scaffold]
+### Task 15: LSP + fmt + doc [done — v0 quality]
 
-`lang lsp` speaks JSON-RPC initialize/shutdown/exit; hover/goto/
-diagnostics, formatter, doc generator open.
+`lang lsp`: real `publishDiagnostics` on didOpen/didChange (full-text
+sync, imports resolved). `lang fmt`: indentation/whitespace normalizer
+(comment-preserving, `-w` to rewrite). `lang doc`: `///` comments on
+decls → markdown. Hover/goto remain open (needs position index).
 
-### Task 16: OSS plumbing [partial]
+### Task 16: OSS plumbing [done]
 
-README done; MIT LICENSE, CI matrix, release workflow, CONTRIBUTING open.
+LICENSE (MIT), README, CONTRIBUTING, `.github/workflows/ci.yml`
+(build + `tests/run.sh` end-to-end suite). Release workflow still open
+(waits on the v0.0.1 tag).
 
 ## Phase 3 — Gate
 
-### Task 17: Pilot apps [partial — running]
+### Task 17: Pilot apps [done — load tested]
 
-`examples/cli` — CLI with argv + string ops + error paths: **works**.
-`examples/http-crud-sqlite` — HTTP server, socket FFI, per-connection
-`spawn`, sqlite3 insert/select: **works** (verified: POST inserts, GET
-returns rows). "Production-shaped conditions" (sustained load, memory
-profile, deployment shape) still to run.
+`examples/cli`: works. `examples/http-crud-sqlite`: rewritten on
+`std/http` + `spawnBlocking` per conn. Load test: 300 concurrent GETs
+all 200s, RSS ~2.4 MB. Writes: 30/30 serial; ~78% under 20-way
+concurrent POSTs — residual is sqlite multi-connection write contention
+(per-request `sqlite_open`, no connection pooling in v0 surface);
+retry loop + WAL pragma added to rt shims. Channel lost-wakeup race
+found + fixed under load. `bootstrap/lexer.lang` — lexer in the
+language — is a pilot too: lexes itself (955 tokens) + runs in CI.
 
 ### Task 18: v0.0.1 tag [not started]
 
