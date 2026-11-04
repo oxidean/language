@@ -231,6 +231,14 @@ fn jparse_num(p: mut JCur) -> own Json {
         }
         break
     }
+    if p.pos == start {
+        // no numeric chars consumed — swallow the offending char so
+        // callers looping on jparse_val (`[x]`, `[a,1]`) still advance
+        if p.pos < len(p.src) {
+            p.pos = p.pos + 1
+        }
+        return jnull()
+    }
     if isf == 1 {
         return jfloat(atof(substr(p.src, start, p.pos)))
     }

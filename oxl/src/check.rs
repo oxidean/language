@@ -184,14 +184,41 @@ impl Env {
             self.moved[i].remove(n);
         }
     }
-    /// branch merge: keep bindings marked moved in BOTH states —
-    /// moved in only one branch leaves the value live after the join
-    fn moved_intersect(&mut self, other: &[HashMap<String, bool>]) {
+    /// does control reach the end of this block? A trailing `return`,
+    /// `break`/`continue`, or a trailing `if`/`scope` whose every path
+    /// exits means the join below is unreachable via this block —
+    /// moves on such paths must not merge into the joined state.
+    fn block_falls_through(b: &Block) -> bool {
+        b.stmts.last().map_or(true, Self::stmt_falls_through)
+    }
+
+    fn stmt_falls_through(s: &Stmt) -> bool {
+        match s {
+            Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => false,
+            // an `if` falls through when either branch can reach its end —
+            // `if` without `else` always can (the not-taken path)
+            Stmt::If { then, els, .. } => match els {
+                Some(e) => Self::block_falls_through(then) || Self::block_falls_through(e),
+                None => true,
+            },
+            Stmt::Scope { body, .. } => Self::block_falls_through(body),
+            // `for`/`select`/`match`/`unsafe` bodies may run zero times or
+            // exit via a path that still continues — treat as reachable
+            _ => true,
+        }
+    }
+
+    /// branch merge: keep a binding marked if it moved on ANY path —
+    /// the join can't prove which branch ran, so a move in only one
+    /// branch still forbids later reads. A branch that re-initializes
+    /// the binding clears its mark on that path.
+    fn moved_union(&mut self, other: &[HashMap<String, bool>]) {
         for (i, m) in self.moved.iter_mut().enumerate() {
-            let o = other.get(i);
-            m.retain(|k, v| {
-                *v && o.map(|o| o.get(k).copied().unwrap_or(false)).unwrap_or(false)
-            });
+            if let Some(o) = other.get(i) {
+                for (k, v) in o.iter() {
+                    if *v { m.insert(k.clone(), true); }
+                }
+            }
         }
     }
 }
@@ -235,7 +262,8 @@ const BUILTINS: &[&str] = &[
     "mkslice", "push",
     "assert", "itoa", "argc", "argv", "len", "byteat", "substr", "find", "atoi",
     "mkbuf", "bufstr", "poke8", "poke16", "poke32", "htons", "htonl",
-    "cstr", "str", "sqlite_open", "sqlite_exec", "sqlite_query", "sqlite_close",
+    "cstr", "str", "sqlite_open", "sqlite_exec", "sqlite_exec_bind",
+    "sqlite_query", "sqlite_close", "set_rcvtimo",
     "readfile", "writefile", "exit", "mkshared", "sget", "sset", "scas", "sadd",
     "now", "now_ms", "usleep", "ftoi", "itof", "atof", "ftoa",
 ];
@@ -752,15 +780,26 @@ impl<'a> Checker<'a> {
             Stmt::If { cond, then, els, .. } => {
                 let t = self.expr(cond, env);
                 self.assignable(&Ty::Bool, &t, cond.span);
-                // moved-in-one-branch reads as live after the join — only
-                // definitely-moved bindings error, so intersect the exits
+                // a move on either branch is possible after the join —
+                // union the exits so only all-path re-init clears a mark.
+                // Only exits that can REACH the join contribute: a branch
+                // ending in return/break/continue can't have its moves
+                // observed by later code
                 let pre_moved = env.moved.clone();
                 self.block(then, env);
                 let then_moved = std::mem::replace(&mut env.moved, pre_moved);
+                let then_ft = Env::block_falls_through(then);
+                let els_ft = els.as_ref().map_or(true, Env::block_falls_through);
                 if let Some(e) = els {
                     self.block(e, env);
                 }
-                env.moved_intersect(&then_moved);
+                if els.is_some() && !els_ft && then_ft {
+                    env.moved = then_moved; // only the then path arrives
+                } else if then_ft && (els.is_none() || els_ft) {
+                    env.moved_union(&then_moved);
+                }
+                // else: only the else path (or nothing) arrives — the
+                // else exit state is already in env.moved
             }
             Stmt::For { cond, body, span } => {
                 // a move inside a loop leaves the next iteration reading a
@@ -834,12 +873,16 @@ impl<'a> Checker<'a> {
                         self.stmt(s, env);
                     }
                     env.pop();
-                    arm_moved.push(env.moved.clone());
+                    arm_moved.push((env.moved.clone(), Env::block_falls_through(&arm.body)));
                 }
-                if let Some(first) = arm_moved.first() {
-                    env.moved = first.clone();
-                    for st in &arm_moved[1..] {
-                        env.moved_intersect(st);
+                // only arms that can reach the join contribute marks
+                env.moved = pre_moved;
+                for m in env.moved.iter_mut() {
+                    m.clear();
+                }
+                for (st, ft) in &arm_moved {
+                    if *ft {
+                        env.moved_union(st);
                     }
                 }
                 if has_else && tmo_count > 0 {
@@ -1639,12 +1682,20 @@ impl<'a> Checker<'a> {
                         }
                     }
                     env.pop();
-                    arm_moved.push(env.moved.clone());
+                    let ft = match &arm.body {
+                        MatchBody::Expr(_) => true,
+                        MatchBody::Block(b) => Env::block_falls_through(b),
+                    };
+                    arm_moved.push((env.moved.clone(), ft));
                 }
-                if let Some(first) = arm_moved.first() {
-                    env.moved = first.clone();
-                    for st in &arm_moved[1..] {
-                        env.moved_intersect(st);
+                // only arms that can reach the join contribute marks
+                env.moved = pre_moved;
+                for m in env.moved.iter_mut() {
+                    m.clear();
+                }
+                for (st, ft) in &arm_moved {
+                    if *ft {
+                        env.moved_union(st);
                     }
                 }
                 if n_expr > 0 && n_block > 0 {
@@ -2071,7 +2122,7 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::Own(Box::new(Ty::Unknown));
                 }
-                "sqlite_exec" => {
+                "sqlite_exec" | "sqlite_exec_bind" | "set_rcvtimo" => {
                     for a in args {
                         self.expr(a, env);
                     }

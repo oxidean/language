@@ -55,6 +55,18 @@ fn resolve_import(from_file: &Path, imp: &str) -> Option<PathBuf> {
         }
         dir = d.parent().map(Path::to_path_buf);
     }
+    // last resort: walk up from the executable — a source outside the
+    // repo tree (e.g. /tmp/x.oxl) still finds the toolchain's stdlib
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent().map(Path::to_path_buf);
+        while let Some(d) = dir {
+            let p = d.join("stdlib").join(stripped);
+            if p.exists() {
+                return Some(p);
+            }
+            dir = d.parent().map(Path::to_path_buf);
+        }
+    }
     None
 }
 
@@ -545,13 +557,38 @@ fn compile(src_file: &str) -> Result<String, ()> {
 }
 
 fn emit_and_cc(c_src: &str, out: &Path) -> bool {
-    let dir = out.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).ok();
+    // intermediates go in a private scratch dir — never beside the
+    // user's -o where they could clobber existing out.c/rt.c/rt.h
+    let dir = std::env::temp_dir().join(format!(
+        "oxl-build-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("cannot create build dir {}: {e}", dir.display());
+        return false;
+    }
+    if let Some(od) = out.parent() {
+        if let Err(e) = std::fs::create_dir_all(od) {
+            eprintln!("cannot create output dir {}: {e}", od.display());
+            return false;
+        }
+    }
     let c_file = dir.join("out.c");
-    std::fs::write(&c_file, c_src).unwrap();
+    if let Err(e) = std::fs::write(&c_file, c_src) {
+        eprintln!("cannot write {}: {e}", c_file.display());
+        return false;
+    }
     let (rt_h, rt_c) = codegen::runtime_files();
-    std::fs::write(dir.join("rt.h"), rt_h).unwrap();
-    std::fs::write(dir.join("rt.c"), rt_c).unwrap();
+    for (name, text) in [("rt.h", rt_h), ("rt.c", rt_c)] {
+        if let Err(e) = std::fs::write(dir.join(name), text) {
+            eprintln!("cannot write {}: {e}", dir.join(name).display());
+            return false;
+        }
+    }
     let cc = std::env::var("LANG_CC").unwrap_or_else(|_| "cc".into());
     let mut cmd = Command::new(&cc);
     cmd.args(["-O2", "-pthread", "-o"])
@@ -571,7 +608,10 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
         .stderr(Stdio::inherit())
         .status();
     match status {
-        Ok(s) if s.success() => true,
+        Ok(s) if s.success() => {
+            let _ = std::fs::remove_dir_all(&dir); // scratch dir — best effort
+            true
+        }
         _ => {
             eprintln!("cc failed (emitted C kept at {})", c_file.display());
             false

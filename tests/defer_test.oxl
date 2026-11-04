@@ -19,8 +19,26 @@ fn errpath() -> [int, err] {
     return 0, nil
 }
 
+fn loopdef() {
+    // per-iteration registration, captured by value: drains 2 1 0
+    i := 0
+    for i < 3 {
+        defer dmark(i)
+        i = i + 1
+    }
+}
+
+fn untaken(c: int) {
+    if c > 100 {
+        defer dmark(99)
+    }
+    defer dmark(7)
+}
+
 fn main() {
     i := lifo()
     [v, e] = errpath()
+    loopdef()
+    untaken(0)
     println("done")
 }

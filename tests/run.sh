@@ -108,6 +108,23 @@ echo "== defer (b5) =="
 out=$("$OXL" run tests/defer_test.oxl)
 [ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }
 grep -q "^9$" <<<"$out" || { echo "FAIL defer error-return path: $out"; exit 1; }
+# loop registers per-iteration (drains 2 1 0); untaken branch registers nothing (7 only)
+grep -q $'2\n1\n0' <<<"$out" || { echo "FAIL defer loop/capture: $out"; exit 1; }
+if grep -q "^99$" <<<"$out"; then echo "FAIL defer untaken branch: $out"; exit 1; fi
+# trap unwind still drains the task's defer stack before aborting
+cat > /tmp/d5trap.oxl <<'EOF'
+fn dmark(x: int) { println(itoa(x)) }
+fn willtrap() {
+    defer dmark(6)
+    defer dmark(5)
+    s := mkslice(int, 2)
+    println(s[9])
+}
+fn main() { willtrap() }
+EOF
+trapout=$(with_timeout 10 "$OXL" run /tmp/d5trap.oxl 2>&1 || true)
+grep -q "^5$" <<<"$trapout" || { echo "FAIL defer trap drain: $trapout"; exit 1; }
+grep -q "^6$" <<<"$trapout" || { echo "FAIL defer trap drain order: $trapout"; exit 1; }
 
 echo "== methods + interfaces (d3) =="
 out=$("$OXL" run tests/methods.oxl)
@@ -162,7 +179,7 @@ EOF
 if "$OXL" build /tmp/d2for.oxl -o /tmp/d2for 2>/dev/null; then
     echo "FAIL: move-in-loop compiled"; exit 1
 fi
-# re-init clears the mark; moved-in-one-branch stays live after the join
+# re-init clears the mark
 cat > /tmp/d2ok.oxl <<'EOF'
 struct P { v: int }
 fn take(p: own P) { }
@@ -170,13 +187,22 @@ fn main() {
     p := new(P)
     take(p)
     p = new(P)
-    if len("x") > 0 { take(p) }
     take(p)
     println("ok")
 }
 EOF
 out=$("$OXL" run /tmp/d2ok.oxl)
-[ "$out" = "ok" ] || { echo "FAIL d2 reinit/branch: $out"; exit 1; }
+[ "$out" = "ok" ] || { echo "FAIL d2 reinit: $out"; exit 1; }
+# moved in one branch: the join can't prove which path ran — reject the
+# later read unless EVERY path re-initializes the binding
+cat > /tmp/d2branch.oxl <<'EOF'
+struct P { v: int }
+fn take(p: own P) { }
+fn main() { p := new(P); if len("x") > 0 { take(p) }; take(p) }
+EOF
+if "$OXL" build /tmp/d2branch.oxl -o /tmp/d2branch 2>/dev/null; then
+    echo "FAIL: one-branch move compiled"; exit 1
+fi
 # shared cells are copy/shareable — same cell to four workers is intended
 out=$("$OXL" run tests/stdmods_test.oxl)
 grep -q "^4000$" <<<"$out" || { echo "FAIL d2 shared workers: $out"; exit 1; }

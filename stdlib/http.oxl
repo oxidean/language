@@ -35,31 +35,41 @@ fn http_ok(body: str) -> str {
     return "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: " + itoa(len(body)) + "\r\n\r\n" + body
 }
 
-fn handle_conn(h: Handler, fd: int) {
-    buf := mkbuf(4096)
-    n := read(fd, buf, 4095)
-    if n <= 0 {
-        close(fd)
-        return
-    }
-    req := bufstr(buf, n)
+/// in-flight connection cap — accept()s past it are closed at once so
+/// a flood can't pile up unbounded blocking-pool threads
+let MAX_CONN = 64
 
-    // "METHOD PATH HTTP/1.x" — split on the first two spaces
-    sp1 := find(req, " ")
-    rest := substr(req, sp1 + 1, len(req))
-    sp2 := find(rest, " ")
-    path := substr(rest, 0, sp2)
-    method := substr(req, 0, sp1)
-    hdr_end := find(req, "\r\n\r\n")
-    body := ""
-    if hdr_end >= 0 {
-        body = substr(req, hdr_end + 4, len(req))
-    }
+fn handle_conn(h: Handler, fd: int, inflight: shared) {
+    // conn-scoped arena: the request buffer + parse garbage die when the
+    // handler returns instead of accumulating in the serve scope
+    scope {
+        set_rcvtimo(fd, 10) // slowloris guard: reads give up after 10s
+        buf := mkbuf(4096)
+        n := read(fd, buf, 4095)
+        if n <= 0 {
+            close(fd)
+        } else {
+            req := bufstr(buf, n)
 
-    resp_body := h.route(method, path, body)
-    resp := http_ok(resp_body)
-    write(fd, cstr(resp), len(resp))
-    close(fd)
+            // "METHOD PATH HTTP/1.x" — split on the first two spaces
+            sp1 := find(req, " ")
+            rest := substr(req, sp1 + 1, len(req))
+            sp2 := find(rest, " ")
+            path := substr(rest, 0, sp2)
+            method := substr(req, 0, sp1)
+            hdr_end := find(req, "\r\n\r\n")
+            body := ""
+            if hdr_end >= 0 {
+                body = substr(req, hdr_end + 4, len(req))
+            }
+
+            resp_body := h.route(method, path, body)
+            resp := http_ok(resp_body)
+            write(fd, cstr(resp), len(resp))
+            close(fd)
+        }
+    }
+    sadd(inflight, -1)
 }
 
 /// listen+serve on port; dispatches `h.route` per request
@@ -79,11 +89,18 @@ fn serve(port: int, h: Handler) {
     listen(srv, 64)
     println("listening on :" + itoa(port))
 
+    inflight := mkshared(0)
     scope {
         for true {
             cfd := accept(srv, addr, one)
             if cfd >= 0 {
-                spawnBlocking handle_conn(h, cfd)
+                // claim a slot before spawning; sadd returns the OLD count
+                if sadd(inflight, 1) >= MAX_CONN {
+                    sadd(inflight, -1)
+                    close(cfd)
+                } else {
+                    spawnBlocking handle_conn(h, cfd, inflight)
+                }
             }
         }
     }

@@ -467,6 +467,78 @@ fn all_params(f: &Fn) -> Vec<&Param> {
     f.recv.iter().chain(f.params.iter()).collect()
 }
 
+/// env-bound idents referenced by a deferred call, first-seen order —
+/// these get captured by value into the site's env struct. Globals,
+/// fn names and type params are not captured (they outlive the call).
+fn defer_caps(g: &Gen, call: &Expr) -> Vec<(String, Ty)> {
+    fn walk(e: &Expr, g: &Gen, out: &mut Vec<(String, Ty)>) {
+        match &e.kind {
+            ExprKind::Ident(n) => {
+                if g.env.iter().skip(1).any(|s| s.contains_key(n))
+                    || g.fslots.iter().any(|s| s.contains_key(n))
+                {
+                    if !g.globals.contains_key(n)
+                        && !out.iter().any(|(m, _)| m == n)
+                    {
+                        out.push((n.clone(), g.lookup(n)));
+                    }
+                }
+            }
+            ExprKind::Call { f, args } => {
+                walk(f, g, out);
+                for a in args {
+                    walk(a, g, out);
+                }
+            }
+            ExprKind::Bin { l, r, .. } => {
+                walk(l, g, out);
+                walk(r, g, out);
+            }
+            ExprKind::Un { e, .. } | ExprKind::As { e, .. } => walk(e, g, out),
+            ExprKind::Field { obj, .. } => walk(obj, g, out),
+            ExprKind::Index { obj, idx } => {
+                walk(obj, g, out);
+                walk(idx, g, out);
+            }
+            ExprKind::Slice { obj, lo, hi } => {
+                walk(obj, g, out);
+                if let Some(x) = lo {
+                    walk(x, g, out);
+                }
+                if let Some(x) = hi {
+                    walk(x, g, out);
+                }
+            }
+            ExprKind::StructLit { fields, .. } => {
+                for (_, e) in fields {
+                    walk(e, g, out);
+                }
+            }
+            ExprKind::Match { e, arms } => {
+                walk(e, g, out);
+                for a in arms {
+                    match &a.body {
+                        MatchBody::Expr(be) => walk(be, g, out),
+                        MatchBody::Block(b) => {
+                            for s in &b.stmts {
+                                if let Stmt::Expr(e) | Stmt::Let { init: e, .. }
+                                | Stmt::Assign { val: e, .. } = s
+                                {
+                                    walk(e, g, out);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(call, g, &mut out);
+    out
+}
+
 fn inst_name(fname: &str, bind: &[(String, Ty)]) -> String {
     let mut n = fname.to_string();
     for (_, t) in bind {
@@ -640,6 +712,7 @@ impl<'a> Gen<'a> {
         };
         self.defers.clear();
         self.env.push(HashMap::new());
+        let _ = writeln!(self.out, "    RtDefer *_dmark = rt_defer_mark();");
         for p in all_params(f) {
             let t = self.ty_of_ref(&p.ty);
             self.env.last_mut().unwrap().insert(p.name.clone(), t);
@@ -708,6 +781,7 @@ impl<'a> Gen<'a> {
             RetTy::Void => Ty::Void,
         };
         self.env.push(HashMap::new());
+        let _ = writeln!(self.out, "    RtDefer *_dmark = rt_defer_mark();");
         for p in all_params(f) {
             let t = self.ty_of_ref(&p.ty);
             self.env.last_mut().unwrap().insert(p.name.clone(), t);
@@ -998,14 +1072,60 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// emit registered defers in LIFO order (fn exit paths)
+    /// drain the fn's runtime defer stack down to its entry mark —
+    /// emitted at every exit path (the task itself drains leftovers on
+    /// trap/cancel unwind in run_task)
     fn emit_defers(&mut self) {
-        let defs = std::mem::take(&mut self.defers);
-        for d in defs.iter().rev() {
-            let v = self.expr(d);
-            let _ = writeln!(self.out, "    {v};");
+        if self.in_frame {
+            let _ = writeln!(self.out, "    rt_defer_drain_to(fr->_dmark);");
+        } else {
+            let _ = writeln!(self.out, "    rt_defer_drain_to(_dmark);");
         }
-        self.defers = defs;
+    }
+
+    /// `defer call` — register a thunk on the task's defer stack NOW
+    /// (per execution: loops accumulate, untaken branches register
+    /// nothing). The call's local idents are captured by value into a
+    /// generated env so the deferred call reads register-time values.
+    fn stmt_defer(&mut self, call: &Expr) {
+        let di = self.defers.len();
+        self.defers.push(call.clone());
+        let fname = cname(&self.cur_fn);
+        let denv = format!("o_denv_{fname}_{di}");
+        let thunk = format!("o_def_{fname}_{di}");
+        let caps = defer_caps(self, call);
+        // struct + thunk proto precede all bodies; body goes last
+        let mut proto = format!("struct {denv} {{");
+        if caps.is_empty() {
+            proto += " char _none;";
+        }
+        for (n, t) in &caps {
+            proto += &format!(" {} {};", self.cty(t), cname(n));
+        }
+        proto += &format!(" }}; static void {thunk}(void *);\n");
+        self.closure_protos.push_str(&proto);
+        // thunk: locals of the captured names shadow, so the deferred
+        // call compiles exactly as written against register-time values
+        let saved_frame = self.in_frame;
+        let saved_fslots = std::mem::take(&mut self.fslots);
+        self.in_frame = false;
+        let mut body = format!("static void {thunk}(void *_env) {{\n    struct {denv} *_e = _env;\n");
+        for (n, t) in &caps {
+            body += &format!("    {} {} = _e->{};\n", self.cty(t), cname(n), cname(n));
+        }
+        let v = self.expr(call);
+        body += &format!("    (void)({v});\n}}\n");
+        self.in_frame = saved_frame;
+        self.fslots = saved_fslots;
+        self.closure_bodies.push_str(&body);
+        // registration site: evaluate captures, push the node
+        let mut reg = format!("    {{ struct {denv} *_de = malloc(sizeof *_de);");
+        for (n, _) in &caps {
+            let val = self.expr(&Expr { kind: ExprKind::Ident(n.clone()), span: call.span });
+            reg += &format!(" _de->{} = {val};", cname(n));
+        }
+        reg += &format!(" rt_defer_push({thunk}, _de); }}");
+        let _ = writeln!(self.out, "{reg}");
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -1088,8 +1208,7 @@ impl<'a> Gen<'a> {
                 let _ = writeln!(self.out, "    {v};");
             }
             Stmt::Defer { call, .. } => {
-                // register: call runs at fn exit, LIFO (see emit_defers)
-                self.defers.push(call.clone());
+                self.stmt_defer(call);
             }
             Stmt::Return { vals, .. } => {
                 self.emit_defers();
@@ -1465,7 +1584,7 @@ impl<'a> Gen<'a> {
                 format!(
                     "({{ RtSlice _ms = {sv}; int64_t _ma = {av}; int64_t _mb = {bv}; \
                      if (_ma < 0 || _mb < _ma || _mb > _ms.len) rt_trap(10); \
-                     (RtSlice){{ ({ect}*)_ms.ptr + _ma, _mb - _ma, _ms.cap - _ma }}; }})")
+                     (RtSlice){{ ({ect}*)_ms.ptr + _ma, _mb - _ma, _ms.cap - _ma, _ms.heap }}; }})")
             }
             ExprKind::Closure { params, body } => self.closure_expr(e, params, body),
             // checker rejects TyLit outside mkslice — unreachable there
@@ -1582,6 +1701,7 @@ impl<'a> Gen<'a> {
         let saved_defers = std::mem::take(&mut self.defers);
         let saved_fn = std::mem::replace(&mut self.cur_fn, format!("o_cl_{id}"));
         let _ = writeln!(self.out, "static {ret_c} o_cl_{id}(struct o_env_{id} *_e{psig}) {{");
+        let _ = writeln!(self.out, "    RtDefer *_dmark = rt_defer_mark();");
         let mut scope = HashMap::new();
         for (n, t) in &captures {
             let _ = writeln!(self.out, "    {} {} = _e->{};", self.cty(t), cname(n), cname(n));
@@ -1807,6 +1927,7 @@ impl<'a> Gen<'a> {
             "byteat" | "substr" | "find" | "bufstr" | "poke8" | "poke16" | "poke32"
             | "sqlite_exec" | "sqlite_query" => format!("rt_{name}({})", j(argvs)),
             "atoi" | "mkbuf" | "htons" | "htonl" | "cstr" | "str" | "sqlite_open" | "sqlite_close"
+            | "sqlite_exec_bind" | "set_rcvtimo"
             | "readfile" | "writefile" | "exit" | "mkshared" | "sget" | "sset" | "scas"
             | "sadd" | "now" | "now_ms" | "usleep" | "atof" | "ftoa" => {
                 format!("rt_{name}({})", j(argvs))
@@ -2252,6 +2373,13 @@ impl<'a> Gen<'a> {
                             // zero-init: field presence is tested with `== nil`
                             return format!("({{ struct o_s_{0} *_nb = rt_alloc(sizeof(struct o_s_{0})); __builtin_memset(_nb, 0, sizeof(struct o_s_{0})); _nb; }})", cname(&sn));
                         }
+                    }
+                    // new(slice) — deep-copy header+backing to heap so the
+                    // own slice can outlive the scope arena (slices.md)
+                    if let Ty::Slice(el) = self.expr_ty(&args[0]) {
+                        let ect = self.cty(&el);
+                        let v = self.expr(&args[0]);
+                        return format!("rt_slice_own({v}, sizeof({ect}))");
                     }
                     // new(value) — heap-box the value: `own <ty>`
                     let ct = self.cty(&self.expr_ty(&args[0]));
@@ -3132,7 +3260,7 @@ impl<'a> Gen<'a> {
                 let _ = writeln!(self.out, "    {v};");
             }
             Stmt::Defer { call, .. } => {
-                self.defers.push(call.clone());
+                self.stmt_defer(call);
             }
             Stmt::Return { vals, .. } => {
                 self.emit_defers();
@@ -3333,6 +3461,9 @@ impl<'a> Gen<'a> {
             RetTy::Pair(_) => format!(" struct o_ret_{} result;", cname(ename)),
         };
         let saved_out = std::mem::take(&mut self.out);
+        // defer mark must live on the frame — a suspend between push and
+        // exit would drop a C-local mark
+        let _ = writeln!(self.out, "    fr->_dmark = rt_defer_mark();");
         self.fslots.push(HashMap::new());
         if let Some(b) = &hoisted.body {
             self.fstmts(&b.stmts);
@@ -3347,7 +3478,7 @@ impl<'a> Gen<'a> {
         }
         let ce = cname(ename);
         let _ = writeln!(self.frame_head,
-            "struct o_frm_{ce} {{ RtScope *cur_scope; int state; RtFrame *child;{res_field}{pfields} {}}};\nint o_poll_{ce}(RtFrame *_f, RtTask *task);\n",
+            "struct o_frm_{ce} {{ RtScope *cur_scope; int state; RtFrame *child; RtDefer *_dmark;{res_field}{pfields} {}}};\nint o_poll_{ce}(RtFrame *_f, RtTask *task);\n",
             self.frame_decls.join(" " ) + " " + &self.scope_decls.join(" "));
         let _ = writeln!(self.frame_out,
             "int o_poll_{ce}(RtFrame *_f, RtTask *task) {{\n    struct o_frm_{ce} *fr = (struct o_frm_{ce} *)_f;\n    RtScope *saved = tls_scope;\n    tls_scope = fr->cur_scope;\n    int _p;\n    switch (fr->state) {{ {cases} default: tls_scope = saved; return RT_READY; }}\n    s0: ;\n{body}    fr->cur_scope = tls_scope; tls_scope = saved; return RT_READY;\n}}\n");

@@ -15,12 +15,18 @@ typedef struct {
     int64_t n;
 } OxlStr;
 
-typedef struct {
+typedef struct RtScope RtScope;
+typedef struct ObjHdr {
     uint32_t gen;
     uint8_t borrow; /* 0 free, 1 read-held, 2 mut-held */
     uint8_t arena;
     uint8_t poisoned;
     uint8_t _pad;
+    /* heap-fallback tracking: non-own blocks that miss the arena are
+     * still scope-lived — chained on the scope's `heap` list and freed
+     * at join. hscope links back for rt_free's unlink. */
+    RtScope *hscope;
+    struct ObjHdr *hnext;
 } ObjHdr;
 
 /* --- frames & tasks ---
@@ -41,7 +47,7 @@ typedef int (*RtPoll)(RtFrame *, RtTask *);
  * Executor: fixed worker pool driving frame tasks on a shared MPMC
  * queue; blocking FFI still gets thread-per-task. Scopes join by
  * pending-task count — join is itself a suspend point for frames. */
-typedef struct RtScope {
+struct RtScope {
     volatile int pending;
     volatile int trapped;
     volatile int cancel;
@@ -54,7 +60,8 @@ typedef struct RtScope {
     /* arena: bump allocator freed on leave */
     char *arena_buf;
     int64_t arena_off, arena_cap;
-} RtScope;
+    ObjHdr *heap;      /* non-own blocks that missed the arena (freed at join) */
+};
 
 /* the calling thread's innermost scope — frame drivers save/restore it
  * around poll() so interleaved tasks on one worker keep their own chain */
@@ -75,6 +82,20 @@ void rt_task_wake(RtTask *t);                    /* re-enqueue a suspended task 
 int rt_cancelled(void);
 int64_t rt_task_data(RtTask *t);                 /* delivered channel value */
 void rt_trap(int64_t code);
+
+/* --- defer: runtime registration stack, per task ---
+ * `defer f(x)` pushes {thunk, captured env} at statement execution; fn
+ * exits drain down to their entry mark (LIFO). The stack lives on the
+ * task so entries survive suspends; trap/cancel unwinds drain whatever
+ * remains before the task settles. */
+typedef struct RtDefer {
+    void (*fp)(void *);
+    void *env;
+    struct RtDefer *next;
+} RtDefer;
+RtDefer *rt_defer_mark(void);
+void rt_defer_push(void (*fp)(void *), void *env);
+void rt_defer_drain_to(RtDefer *mark);
 
 /* --- Shared<T>: atomic word cell for cross-scope sharing --- */
 typedef struct {
@@ -118,16 +139,20 @@ int rt_sleep_poll(int64_t secs, RtTask *t);
 int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t);
 int64_t rt_select_arm(RtTask *t); /* cleanup parked waiters; returns arm */
 
-/* --- slices: {ptr,len,cap} fat header, erased element type ---
- * backing store comes from rt_alloc (scope arena when inside a scope,
- * heap otherwise) so slices die with their scope like other values */
+/* --- slices: {ptr,len,cap,heap} fat header, erased element type ---
+ * borrow-slice backing comes from rt_alloc (scope arena when inside a
+ * scope) and dies with the scope; `heap` marks backings that must
+ * outlive scopes (own slices) — views inherit it and growth preserves
+ * it, so an own slice never follows a freed arena pointer. */
 typedef struct {
     void *ptr;
     int64_t len;
     int64_t cap;
+    int64_t heap;
 } RtSlice;
 RtSlice rt_mkslice(int64_t n, int64_t esz);            /* len==cap==n, zeroed */
 RtSlice rt_slice_push(RtSlice s, int64_t esz, void *v); /* grow + append */
+RtSlice *rt_slice_own(RtSlice s, int64_t esz);          /* deep-copy to heap: own []T */
 
 /* --- function values (B4): {env, fnptr} fat pair. The callee
  * signature is always (void* env, args...) — named fns get a
@@ -176,6 +201,7 @@ OxlStr rt_bufstr(void *buf, int64_t n);
 void rt_poke8(void *buf, int64_t off, int64_t v);
 void rt_poke16(void *buf, int64_t off, int64_t v);
 void rt_poke32(void *buf, int64_t off, int64_t v);
+int64_t rt_set_rcvtimo(int64_t fd, int64_t secs);      /* SO_RCVTIMEO, portable */
 int64_t rt_htons(int64_t v);
 int64_t rt_htonl(int64_t v);
 OxlStr rt_readfile(OxlStr path);
@@ -186,6 +212,7 @@ void rt_exit(int64_t code);
  * system gains address-of; direct calls (strlen etc.) use `extern` */
 void *rt_sqlite_open(const char *path);
 int64_t rt_sqlite_exec(void *db, const char *sql);
+int64_t rt_sqlite_exec_bind(void *db, const char *sql, OxlStr param); /* bind ?1 */
 OxlStr rt_sqlite_query(void *db, const char *sql);
 void rt_sqlite_close(void *db);
 

@@ -17,10 +17,13 @@ checker — the runtime stays the semantic backstop):
 - Using a moved binding = compile error ("use of moved value `c`")
 - Passing `own` to an `own` param, `return own`, `field = own` — all
   move-sites; assignment to a moved-from binding clears the bit
-- Control flow: merge `moved` bits at joins (moved in BOTH branches =
-  moved after); a `for` body's moves require care (moved-in-body is a
-  compile error unless the binding is re-assigned in the same
-  iteration — keep it simple: error)
+- Control flow: **union** `moved` bits at joins — a move on ANY branch
+  is possible after the join, so the bit survives unless every
+  fall-through path re-initializes the binding. Branches that end in
+  `return`/`break`/`continue` can't reach the join and don't
+  contribute their moves. A `for` body's moves require care
+  (moved-in-body is a compile error unless the binding is re-assigned
+  in the same iteration — keep it simple: error)
 - `own` returned from a fn is a fresh binding — no tracking needed
 
 Explicitly out: partial moves (`a.b` fields), lifetime inference,
@@ -32,7 +35,8 @@ that catches the actual bug class (use-after-move) statically.
 - `spawn worker(c)` twice on the same `own` → compile error naming `c`
 - `v := own_thing(); use(v)` → error; `v = new_own(); use(v)` → ok
 - if/else merge: moved-in-both-branches → moved after; moved-in-one →
-  live after
+  moved after (later reads error); the mark clears only when every
+  fall-through path re-initializes the binding
 - Existing valid code (`worker(ch: chan)` — `chan` isn't `own`) keeps
   compiling — `chan`, `int`, `str`, `bool` are copy types, untracked
 

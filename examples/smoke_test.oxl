@@ -5,16 +5,12 @@ fn add(a: int, b: int) -> int {
 }
 
 fn test_add() {
-    if add(2, 3) != 5 {
-        return
-    }
+    assert(add(2, 3) == 5)
 }
 
 fn test_strings() {
     s := "a" + "b"
-    if len(s) != 2 {
-        return
-    }
+    assert(len(s) == 2)
 }
 
 fn test_chan() {
@@ -22,9 +18,7 @@ fn test_chan() {
     scope {
         spawn send(ch, 7)
         v := recv(ch)
-        if v != 7 {
-            println("FAIL")
-        }
+        assert(v == 7)
     }
 }
 

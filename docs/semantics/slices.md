@@ -1,8 +1,10 @@
 # Slices — `[]T`
 
-A slice is a 24-byte fat header `{ ptr, len, cap }` passed **by value**.
-The elements live in a shared backing store; copies of the header —
-including views created by `s[a:b]` — point at the same backing.
+A slice is a 32-byte fat header `{ ptr, len, cap, heap }` passed **by
+value**. The elements live in a shared backing store; copies of the
+header — including views created by `s[a:b]` — point at the same
+backing. `heap` records the backing's domain: `0` = scope arena,
+`1` = heap (`malloc`).
 
 ## Construction
 
@@ -55,16 +57,17 @@ Bounds may be omitted: `s[:b]`, `s[a:]`, `s[:]`. The invariant
 
 ## Ownership and escape
 
-- `own []T` boxes the 24-byte header (`RtSlice*`); indexing, `len`, and
-  view slicing auto-deref the handle. The backing store is still
-  arena-allocated — `own` marks the *header* as escaping, not the
-  elements.
-- Escaping a slice beyond its scope's lifetime is unsafe for the same
-  reason escaping any arena allocation is: the backing dies with the
-  scope. There is no separate escape check for slices yet — the
-  `own`-move tracking work (D2) is where that discipline lands.
+- `own []T` (written `new(slice)`) deep-copies header **and** backing to
+  the heap via `rt_slice_own`: the `own` value may outlive the scope
+  that produced the source slice. Indexing, `len`, and view slicing
+  auto-deref the handle, and views/growth of a heap slice keep the heap
+  domain (`push` reallocs with `malloc`, never into the arena).
+- Ordinary (non-`own`) slices keep arena backing: escaping one past its
+  scope is unsafe for the same reason escaping any arena allocation is.
+  There is no general escape check yet — the `own`-move tracking work
+  (D2) is where that discipline lands.
 - `nil` assigns to `[]T` and produces the empty header
-  `{ nil, 0, 0 }`.
+  `{ nil, 0, 0, 0 }`.
 
 ## Generics
 

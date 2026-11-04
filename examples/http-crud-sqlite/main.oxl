@@ -21,11 +21,16 @@ fn (a App) route(method: str, path: str, reqbody: str) -> str {
     body := ""
     if find(path, "/items") == 0 {
         if find(method, "POST") == 0 {
-            sqlite_exec(db, cstr("CREATE TABLE IF NOT EXISTS items(name TEXT)"))
-            sqlite_exec(db, cstr("INSERT INTO items VALUES('" + reqbody + "')"))
-            r := json.jobj()
-            json.jadd(r, "created", json.jstr(reqbody))
-            body = json.tojson(r) + "\n"
+            if sqlite_exec(db, cstr("CREATE TABLE IF NOT EXISTS items(name TEXT)")) != 0 {
+                body = "{\"error\":\"db init failed\"}\n"
+            } else if sqlite_exec_bind(db, cstr("INSERT INTO items VALUES(?)"), reqbody) != 0 {
+                // ^ request body is bound, never concatenated into SQL
+                body = "{\"error\":\"insert failed\"}\n"
+            } else {
+                r := json.jobj()
+                json.jadd(r, "created", json.jstr(reqbody))
+                body = json.tojson(r) + "\n"
+            }
         } else {
             // rows arrive as "id|name" lines — reshape into real JSON
             items := json.jarr()

@@ -156,10 +156,11 @@ fn gav(g: mut G, args: ref parser.NList) -> own GAv {
         c.v = v
         if head == nil {
             head = c
+            tail = c
         } else {
             tail.next = c
+            tail = tail.next
         }
-        tail = c
         l = l.next
     }
     return head
@@ -1546,7 +1547,7 @@ fn gxslice(g: mut G, obj: ref parser.Node, lo: ref parser.Node, hi: ref parser.N
     if hi != nil {
         bv = gx(g, hi)
     }
-    return "({ RtSlice _ms = " + sv + "; int64_t _ma = " + av + "; int64_t _mb = " + bv + "; if (_ma < 0 || _mb < _ma || _mb > _ms.len) rt_trap(10); (RtSlice){ (" + ect + "*)_ms.ptr + _ma, _mb - _ma, _ms.cap - _ma }; })"
+    return "({ RtSlice _ms = " + sv + "; int64_t _ma = " + av + "; int64_t _mb = " + bv + "; if (_ma < 0 || _mb < _ma || _mb > _ms.len) rt_trap(10); (RtSlice){ (" + ect + "*)_ms.ptr + _ma, _mb - _ma, _ms.cap - _ma, _ms.heap }; })"
 }
 
 // ---------- call emission (Rust call) ----------
@@ -1757,10 +1758,11 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
         c.v = v
         if coerced == nil {
             coerced = c
+            ctail = c
         } else {
             ctail.next = c
+            ctail = ctail.next
         }
-        ctail = c
         al = al.next
         av = av.next
     }
@@ -1870,10 +1872,11 @@ fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
                 c.v = "a->a" + itoa(i)
                 if afs == nil {
                     afs = c
+                    atail = c
                 } else {
                     atail.next = c
+                    atail = atail.next
                 }
-                atail = c
                 i = i + 1
                 al = al.next
             }
@@ -2650,10 +2653,11 @@ fn gfselect(g: mut G, arms: ref parser.NList) {
                     cv.v = gx(g, ch)
                     if cvs == nil {
                         cvs = cv
+                        cvtail = cv
                     } else {
                         cvtail.next = cv
+                        cvtail = cvtail.next
                     }
-                    cvtail = cv
                     ncv = ncv + 1
                 }
                 if kind == "timeout" {

@@ -11,10 +11,14 @@ the design's Go-shape implies.
 - `defer expr` — runs when the enclosing fn returns (any exit: value,
   error return, or scope-trap unwind).
 - LIFO order (Zig/Go), evaluated at return-site in reverse.
-- Lowering: codegen wraps each return in the fn's defer stack —
-  mechanical statement reordering; no new runtime machinery.
-- In a trap unwind: defers run during scope teardown (trap containment
-  already unwinds — defer hooks into that path).
+- Lowering: **runtime registration**, not statement reordering — each
+  executed `defer` pushes a thunk (call + value-captured env) onto the
+  running task's per-task defer stack; fns drain down to their entry
+  mark at every exit. Compile-time collection can't express
+  conditional/looping registration, so the stack lives in the runtime.
+- In a trap/cancel unwind: the task driver drains the defer stack
+  before settling the scope — registered defers run on every exit:
+  value return, error return, trap, cancel.
 
 ## Acceptance
 
@@ -22,6 +26,8 @@ the design's Go-shape implies.
 - LIFO: three defers print 3-2-1
 - `defer` inside a loop = per-iteration defer at fn scope (Go
   semantics — document, don't "fix")
+- `defer` inside an untaken branch registers nothing — only executed
+  `defer` statements run
 
 ## Depends on
 

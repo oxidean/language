@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -22,13 +23,28 @@ static void *alloc_in(RtScope *s, int64_t size, int own) {
     size = (size + 15) & ~15LL;
     int64_t total = size + sizeof(ObjHdr);
     ObjHdr *h;
-    if (!own && s && s->arena_buf && s->arena_off + total <= s->arena_cap) {
-        h = (ObjHdr *)(s->arena_buf + s->arena_off);
-        s->arena_off += total;
+    /* several tasks can share one scope arena — the bump must be an
+     * atomic claim or two allocs can land on the same offset */
+    int64_t off = -1;
+    if (!own && s && s->arena_buf && s->arena_off + total <= s->arena_cap)
+        off = __sync_fetch_and_add(&s->arena_off, total);
+    if (off >= 0 && off + total <= s->arena_cap) {
+        h = (ObjHdr *)(s->arena_buf + off);
         h->arena = 1;
+        h->hscope = NULL;
     } else {
         h = malloc(total);
         h->arena = 0;
+        h->hscope = NULL;
+        /* non-own allocs that miss the arena are still scope-lived:
+         * track them so join_scope frees them with the arena */
+        if (!own && s) {
+            pthread_mutex_lock(&s->mu);
+            h->hscope = s;
+            h->hnext = s->heap;
+            s->heap = h;
+            pthread_mutex_unlock(&s->mu);
+        }
     }
     static uint32_t gen = 1;
     h->gen = __sync_fetch_and_add(&gen, 1);
@@ -43,7 +59,19 @@ void *rt_alloc_own(int64_t size) { return alloc_in(tls_scope, size, 1); }
 void rt_free(void *obj) {
     if (!obj) return;
     ObjHdr *h = hdr_of(obj);
-    if (!h->arena) free(h);
+    if (!h->arena) {
+        if (h->hscope) { /* scope-tracked: unlink before freeing */
+            RtScope *s = h->hscope;
+            pthread_mutex_lock(&s->mu);
+            ObjHdr **pp = &s->heap;
+            while (*pp) {
+                if (*pp == h) { *pp = h->hnext; break; }
+                pp = &(*pp)->hnext;
+            }
+            pthread_mutex_unlock(&s->mu);
+        }
+        free(h);
+    }
     /* arena blocks free with their scope */
 }
 
@@ -123,6 +151,7 @@ struct RtTask {
      * a waker swaps PARKED->WAKE_REQ or plants WAKE_REQ for the driver
      * to self-enqueue when it actually leaves the C stack */
     volatile int wstate;
+    struct RtDefer *defers;  /* fn-scope defer stack (LIFO) */
 };
 #define WK_RECV 1
 #define WK_SEND 2
@@ -201,6 +230,57 @@ static void scope_done(RtScope *s) {
  * before unwinding, or the scope join waits forever */
 static _Thread_local RtTask *tls_task;
 
+/* defer stack — per task so entries survive suspends (a parked frame
+ * must not leak its defers onto the next task sharing this thread);
+ * TLS only for foreign threads with no task */
+static _Thread_local RtDefer *tls_defers;
+
+static RtDefer **defer_head(void) {
+    return tls_task ? &tls_task->defers : &tls_defers;
+}
+
+RtDefer *rt_defer_mark(void) { return *defer_head(); }
+
+void rt_defer_push(void (*fp)(void *), void *env) {
+    RtDefer *d = malloc(sizeof *d);
+    d->fp = fp;
+    d->env = env;
+    RtDefer **hp = defer_head();
+    d->next = *hp;
+    *hp = d;
+}
+
+void rt_defer_drain_to(RtDefer *mark) {
+    RtDefer **hp = defer_head();
+    while (*hp != mark) {
+        RtDefer *d = *hp;
+        *hp = d->next;
+        d->fp(d->env);
+        free(d->env);
+        free(d);
+    }
+}
+
+static void task_defers_drain(RtTask *t) {
+    while (t->defers) {
+        RtDefer *d = t->defers;
+        t->defers = d->next;
+        d->fp(d->env);
+        free(d->env);
+        free(d);
+    }
+}
+
+/* cancel/unwind for thread tasks: pthread_exit would skip the settle
+ * (scope_done + free) AND kill the pool worker — unwind into the
+ * task's own setjmp slot instead, exactly like frame traps */
+static void task_unwind(void) {
+    RtTask *t = tls_task;
+    if (!t) pthread_exit(0); /* foreign thread: nothing to settle */
+    park_del(t);
+    longjmp(tls_jb, 1);
+}
+
 static void run_task(RtTask *t) {
     tls_scope = t->scope;
     tls_task = t;
@@ -221,8 +301,11 @@ static void run_task(RtTask *t) {
         }
         /* READY / CANCEL / trapped(longjmp) all land here */
     } else {
-        t->fn(t->arg);
+        if (setjmp(tls_jb) == 0) t->fn(t->arg);
+        /* cancel-unwound (task_unwind) lands here */
     }
+    /* defers of unwound fns still run — the task dies either way */
+    task_defers_drain(t);
     tls_task = NULL;
     if (t->sel) rt_select_arm(t); /* dropped select wait: reclaim it */
     scope_done(t->scope);
@@ -316,6 +399,7 @@ static void *task_wrap_frame(void *p) {
             pthread_mutex_unlock(&wk.mu);
         }
     }
+    task_defers_drain(t);
     tls_task = NULL;
     if (t->sel) rt_select_arm(t);
     scope_done(t->scope);
@@ -342,6 +426,7 @@ void rt_spawn(void *(*fn)(void *), void *arg) {
         t->fn = fn; t->arg = arg;
         pthread_t th;
         if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
+        else free(t);
         return;
     }
     RtTask *t = malloc(sizeof *t);
@@ -360,6 +445,7 @@ void rt_spawnb(void *(*fn)(void *), void *arg) {
     t->fn = fn; t->arg = arg; t->scope = s;
     pthread_t th;
     if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
+    else { scope_done(s); free(t); } /* don't leak the pending slot */
 }
 
 /* one allocation per task: [RtTask][frame bytes]. Generated code gets
@@ -391,6 +477,7 @@ void rt_spawnb_task(RtFrame *fr) {
     t->external = 1;
     pthread_t th;
     if (pthread_create(&th, NULL, task_wrap_frame, t) == 0) pthread_detach(th);
+    else { scope_done(t->scope); free(t); } /* don't leak the pending slot */
 }
 
 /* drive one frame task to completion on the calling thread — the root
@@ -422,6 +509,7 @@ int rt_run_root(RtFrame *fr) {
     } else {
         trapped = 1;
     }
+    task_defers_drain(t);
     tls_task = prev;
     if (t->sel) rt_select_arm(t);
     t->wk = NULL;
@@ -436,6 +524,16 @@ int rt_cancelled(void) { return tls_scope && tls_scope->cancel; }
 
 int64_t rt_task_data(RtTask *t) { return t->chan_res; }
 
+static void scope_heap_free(RtScope *s) {
+    ObjHdr *h = s->heap;
+    while (h) {
+        ObjHdr *n = h->hnext;
+        free(h);
+        h = n;
+    }
+    s->heap = NULL;
+}
+
 static int join_scope(RtScope *s) {
     pthread_mutex_lock(&s->mu);
     while (s->pending > 0) pthread_cond_wait(&s->cv, &s->mu);
@@ -443,6 +541,7 @@ static int join_scope(RtScope *s) {
     pthread_mutex_unlock(&s->mu);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->cv);
+    scope_heap_free(s);
     free(s->arena_buf); /* bulk-free: the arena story */
     tls_scope = s->parent;
     return err;
@@ -468,6 +567,7 @@ int rt_scope_finish(RtScope *s) {
     pthread_mutex_unlock(&s->mu);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->cv);
+    scope_heap_free(s);
     free(s->arena_buf);
     tls_scope = s->parent;
     return err;
@@ -517,8 +617,17 @@ void rt_trap(int64_t code) {
     }
     if (!t) {
         /* trap on a non-task thread (main/foreign) — no joiner exists to
-         * consume it; fail loudly instead of pthread_exit's silent exit-0 */
+         * consume it; defers on the thread stack still unwind, then fail
+         * loudly instead of pthread_exit's silent exit-0 */
+        while (tls_defers) {
+            RtDefer *d = tls_defers;
+            tls_defers = d->next;
+            d->fp(d->env);
+            free(d->env);
+            free(d);
+        }
         fprintf(stderr, "trap %lld\n", (long long)code);
+        fflush(NULL);
         abort();
     }
     pthread_mutex_lock(&s->mu);
@@ -529,10 +638,7 @@ void rt_trap(int64_t code) {
     s->cancel = 1; /* siblings observe + unwind */
     pthread_mutex_unlock(&s->mu);
     scope_cancel_wake(s);
-    tls_task = NULL;
-    scope_done(t->scope);
-    free(t);
-    pthread_exit(0);
+    task_unwind(); /* run_task drains defers + settles pending */
 }
 
 /* ---------------- Shared<T>: atomic word cell ---------------- */
@@ -618,6 +724,7 @@ struct RtChan {
     int64_t count;      /* ring entries */
     int64_t val;
     int has, closed;
+    RtTask *slot_owner; /* thread sender that deposited `val` */
     int trecv;          /* thread receivers inside cv_recv wait */
     RtTask *recvq;      /* parked frame receivers (task->next chain) */
     SendReq *sendq;     /* parked frame sends */
@@ -705,13 +812,14 @@ RtChan *rt_mkchan(int64_t cap) {
 }
 
 void rt_send(RtChan *ch, int64_t v) {
-    if (rt_cancelled()) pthread_exit(0);
+    if (rt_cancelled()) task_unwind();
     RtTask *me = tls_task;
     pthread_mutex_lock(&ch->mu);
     park_add(me, me ? me->scope : NULL, ch, WK_TSEND);
     for (;;) {
         while (ch->has && !ch->closed) pthread_cond_wait(&ch->cv_send, &ch->mu);
         if (ch->closed) break;
+        if (rt_cancelled()) goto cancelled; /* cancel-wake must not re-wait */
         RtTask *r = chan_pop_recv(ch);
         if (r) { /* hand directly to a parked frame receiver */
             r->chan_res = v;
@@ -729,20 +837,31 @@ void rt_send(RtChan *ch, int64_t v) {
         }
         ch->val = v;
         ch->has = 1;
+        ch->slot_owner = me;
         pthread_cond_broadcast(&ch->cv_recv);
         while (ch->has && !ch->closed) pthread_cond_wait(&ch->cv_send, &ch->mu);
-        if (!ch->closed) break;
-        /* closed mid-wait: the deposited slot may have been taken — either
-         * way this send is complete under the v0 send-on-closed rule */
+        if (rt_cancelled()) {
+            /* retract our own unclaimed slot only — a 1 here could be
+             * another thread sender's fresh deposit */
+            if (ch->has && ch->slot_owner == me) { ch->has = 0; ch->slot_owner = NULL; }
+            goto cancelled;
+        }
+        /* consumed or closed mid-wait: the send is complete either way
+         * under the v0 send-on-closed rule */
         break;
     }
     pthread_mutex_unlock(&ch->mu);
 done:
     if (me && park_claim(me)) park_del(me);
+    return;
+cancelled:
+    pthread_mutex_unlock(&ch->mu);
+    if (me && park_claim(me)) park_del(me);
+    task_unwind();
 }
 
 int64_t rt_recv(RtChan *ch) {
-    if (rt_cancelled()) pthread_exit(0);
+    if (rt_cancelled()) task_unwind();
     RtTask *me = tls_task;
     int64_t v = 0;
     park_add(me, me ? me->scope : NULL, ch, WK_TRECV);
@@ -769,7 +888,10 @@ int64_t rt_recv(RtChan *ch) {
         pthread_cond_wait(&ch->cv_recv, &ch->mu);
         ch->trecv--;
         pthread_mutex_unlock(&ch->mu);
-        if (rt_cancelled()) pthread_exit(0);
+        if (rt_cancelled()) {
+            if (me && park_claim(me)) park_del(me);
+            task_unwind();
+        }
     }
     v = ch->val;
     ch->has = 0;
@@ -918,6 +1040,7 @@ int rt_sleep_poll(int64_t secs, RtTask *t) {
     timer->chan_res = secs;
     pthread_t th;
     if (pthread_create(&th, NULL, sleep_tick, timer) == 0) pthread_detach(th);
+    else { free(timer); return RT_READY; } /* no timer thread: don't park */
     return RT_PENDING;
 }
 
@@ -1048,7 +1171,19 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
     free(sorted);
     if (tmo_ms >= 0) {
         pthread_t th;
-        if (pthread_create(&th, NULL, sel_timer, s) == 0) pthread_detach(th);
+        if (pthread_create(&th, NULL, sel_timer, s) == 0) {
+            pthread_detach(th);
+        } else {
+            /* no timer thread: fire the timeout arm ourselves so the
+             * task isn't parked forever; drop the ref we pre-armed */
+            if (__sync_bool_compare_and_swap(&s->winner, -1, RT_SEL_TMO)
+                && park_claim(t)) {
+                t->sel_arm = RT_SEL_TMO;
+                rt_task_wake(t);
+            }
+            if (__sync_sub_and_fetch(&s->refs, 1) == 0) free(s);
+            return RT_PENDING;
+        }
     }
     return RT_PENDING;
 }
@@ -1060,6 +1195,9 @@ int64_t rt_select_arm(RtTask *t) {
     struct RtSel *s = t->sel;
     t->sel = NULL;
     if (!s) return arm;
+    /* every WK_SEL waker claims the parked flag but never unlinks —
+     * without this the freed task stays on scope->parked (UAF) */
+    park_del(t);
     for (int i = 0; i < s->n; i++) {
         RtChan *ch = s->w[i].ch;
         pthread_mutex_lock(&ch->mu);
@@ -1120,6 +1258,9 @@ static void scope_cancel_wake(RtScope *s) {
             }
             case WK_SEL: {
                 struct RtSel *sel = t->waitobj;
+                /* fence off a live timer: with winner still -1 its CAS
+                 * would claim a task we've already woken (→ freed) */
+                __sync_bool_compare_and_swap(&sel->winner, -1, RT_SEL_ELSE);
                 for (int i = 0; i < sel->n; i++) {
                     RtChan *ch = sel->w[i].ch;
                     pthread_mutex_lock(&ch->mu);
@@ -1173,12 +1314,17 @@ OxlStr rt_itoa(int64_t v) {
     return rt_str(p);
 }
 
-/* ---------------- slices ({ptr,len,cap} headers, B3) ---------------- */
+/* ---------------- slices ({ptr,len,cap,heap} headers, B3) ----------------
+ * Borrow slices use the scope arena (bulk-freed at scope end); `own`
+ * slices get a heap backing via rt_slice_own so the header can escape
+ * its scope without dangling. The `heap` flag travels the header so
+ * views and growth preserve the backing's domain. */
 
 RtSlice rt_mkslice(int64_t n, int64_t esz) {
     RtSlice s;
     s.len = n;
     s.cap = n;
+    s.heap = 0;
     s.ptr = n > 0 ? rt_alloc(n * esz) : 0;
     if (s.ptr) memset(s.ptr, 0, (size_t)(n * esz));
     return s;
@@ -1187,7 +1333,9 @@ RtSlice rt_mkslice(int64_t n, int64_t esz) {
 RtSlice rt_slice_push(RtSlice s, int64_t esz, void *v) {
     if (s.len >= s.cap) {
         int64_t ncap = s.cap > 0 ? s.cap * 2 : 4;
-        void *nb = rt_alloc(ncap * esz);
+        /* growth keeps the backing's domain: arena stays scope-lived,
+         * heap stays escape-safe */
+        void *nb = s.heap ? rt_alloc_own(ncap * esz) : rt_alloc(ncap * esz);
         if (s.ptr) memcpy(nb, s.ptr, (size_t)(s.len * esz));
         s.ptr = nb;
         s.cap = ncap;
@@ -1195,6 +1343,20 @@ RtSlice rt_slice_push(RtSlice s, int64_t esz, void *v) {
     memcpy((char *)s.ptr + s.len * esz, v, (size_t)esz);
     s.len++;
     return s;
+}
+
+/* own []T: boxed header + private heap copy of the backing — escaping
+ * the scope can't leave the elements pointing into a freed arena */
+RtSlice *rt_slice_own(RtSlice s, int64_t esz) {
+    RtSlice *b = rt_alloc_own(sizeof *b);
+    *b = s;
+    if (s.ptr && s.cap > 0) {
+        void *nb = rt_alloc_own(s.cap * esz);
+        memcpy(nb, s.ptr, (size_t)(s.len * esz));
+        b->ptr = nb;
+    }
+    b->heap = 1;
+    return b;
 }
 
 const char *rt_cstr(OxlStr s) {
@@ -1213,7 +1375,7 @@ void rt_print_f64(double v) { printf("%.15g", v); }
 void rt_println_f64(double v) { printf("%.15g\n", v); fflush(stdout); }
 
 void rt_sleep(int64_t secs) {
-    if (rt_cancelled()) pthread_exit(0);
+    if (rt_cancelled()) task_unwind();
     sleep((unsigned)secs);
 }
 
@@ -1301,6 +1463,14 @@ int64_t rt_writefile(OxlStr path, OxlStr data) {
 
 void rt_exit(int64_t code) { exit((int)code); }
 
+/* portable receive timeout — SO_RCVTIMEO's constant differs by OS */
+int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
+    struct timeval tv;
+    tv.tv_sec = (time_t)secs;
+    tv.tv_usec = 0;
+    return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+
 /* ---------------- sqlite3 shims ---------------- */
 /* v0 FFI can't express T** out-params; these wrap the three calls the
  * pilots need. sqlite3* itself crosses as a plain owned pointer. */
@@ -1322,6 +1492,22 @@ int64_t rt_sqlite_exec(void *db, const char *sql) {
         if (rc != SQLITE_BUSY && rc != SQLITE_LOCKED) {
             return rc;
         }
+        sleep_us(10000);
+    }
+    return SQLITE_BUSY;
+}
+/* prepared-statement insert for request-supplied values — body text is
+ * bound, never concatenated into SQL */
+int64_t rt_sqlite_exec_bind(void *db, const char *sql, OxlStr param) {
+    sqlite3_stmt *st = NULL;
+    for (int i = 0; i < 500; i++) {
+        if (sqlite3_prepare_v2((sqlite3 *)db, sql, -1, &st, NULL) != SQLITE_OK)
+            return -1;
+        sqlite3_bind_text(st, 1, param.p, (int)param.n, SQLITE_TRANSIENT);
+        int rc = sqlite3_step(st);
+        sqlite3_finalize(st);
+        if (rc != SQLITE_BUSY && rc != SQLITE_LOCKED)
+            return rc == SQLITE_DONE ? 0 : rc;
         sleep_us(10000);
     }
     return SQLITE_BUSY;
