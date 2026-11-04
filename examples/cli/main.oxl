@@ -36,7 +36,7 @@ fn main() {
     n := argc()
     if n < 2 {
         println("usage: cli <name> [count]")
-        return
+        exit(2)
     }
     println(greet(argv(1)))
 
@@ -44,7 +44,7 @@ fn main() {
         [c, err] = parse_count(argv(2))
         if err != nil {
             println("bad count arg")
-            return
+            exit(2)
         }
         i := 0
         for i < c {

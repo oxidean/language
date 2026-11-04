@@ -167,11 +167,24 @@ struct RtTask {
 #define WK_TRECV 5
 #define WK_TSEND 6
 
+/* task lifetime: `holds` is the allocation's refcount — one "run" ref
+ * taken at spawn and dropped at settle, plus one per queue membership
+ * (scope parked list, chan recvq/sendq node, select arm node, the
+ * RtSel itself) and per live orphan scope. A waker inherits the ref of
+ * whatever node it removes, so claimed-or-not the task stays valid
+ * memory across claim+wake; the last dropper frees task+frame. */
+static void task_ref(RtTask *t) { __sync_add_and_fetch(&t->holds, 1); }
+static void task_unref(RtTask *t) {
+    if (__sync_sub_and_fetch(&t->holds, 1) == 0) free(t);
+}
+
 /* register `t` as parked on `obj` in scope `s` — callers hold the wait
- * queue's own lock when the enqueue must be atomic with registration */
+ * queue's own lock when the enqueue must be atomic with registration.
+ * A listed node holds one task ref; whoever unlinks it owns that ref. */
 static void park_add(RtTask *t, RtScope *s, void *obj, int kind) {
     if (!t) return;
     if (!s) { t->parked = 1; t->waitobj = obj; t->waitkind = kind; return; }
+    task_ref(t);
     pthread_mutex_lock(&s->mu);
     t->parked = 1;
     t->park_scope = s;
@@ -187,16 +200,18 @@ static void park_add(RtTask *t, RtScope *s, void *obj, int kind) {
 static void park_del(RtTask *t) {
     RtScope *s = t->park_scope;
     if (!s) return;
+    int unlinked = 0;
     pthread_mutex_lock(&s->mu);
     if (t->pnext != t) { /* parked-list sentinel: self-link = not listed */
         RtTask **pp = &s->parked;
         while (*pp) {
-            if (*pp == t) { *pp = t->pnext; break; }
+            if (*pp == t) { *pp = t->pnext; unlinked = 1; break; }
             pp = &(*pp)->pnext;
         }
         t->pnext = t;
     }
     pthread_mutex_unlock(&s->mu);
+    if (unlinked) task_unref(t); /* the list's ref leaves with the node */
 }
 
 /* the wake claim: whoever flips parked 1->0 owns the wake */
@@ -238,7 +253,7 @@ static void scope_teardown(RtScope *s) {
 static void scope_orphan_free(RtScope *s) {
     scope_teardown(s);
     RtTask *o = s->owner;
-    if (o && __sync_sub_and_fetch(&o->holds, 1) == 0) free(o);
+    if (o) task_unref(o);
 }
 
 static void scope_done(RtScope *s) {
@@ -253,9 +268,16 @@ static void scope_done(RtScope *s) {
         else pthread_cond_signal(&s->cv);
     }
     pthread_mutex_unlock(&s->mu);
-    /* outside s->mu: avoids s->mu/pool.mu inversion */
+    /* outside s->mu: avoids s->mu/pool.mu inversion. The joiner is ours
+     * to wake — but its parked ref can be the last one, and park_del
+     * would free it under us: pin it across the wake first. */
     if (orphan_drain) scope_orphan_free(s);
-    if (wake && park_claim(wake)) { park_del(wake); rt_task_wake(wake); }
+    if (wake && park_claim(wake)) {
+        task_ref(wake);
+        park_del(wake);
+        rt_task_wake(wake);
+        task_unref(wake);
+    }
 }
 
 /* defer stack — per task so entries survive suspends (a parked frame
@@ -318,26 +340,26 @@ static void task_unwind(void) {
  * torn down inline. The self-hold makes the frees last-dropper-wins:
  * whoever drops holds to 0 frees the frame. */
 static void task_release_frame(RtTask *t, int trapped) {
-    /* thread tasks never enter rt_trap's frame branch — `trapped` for
-     * one means cancel-unwound, no self-hold exists to skip, so they
-     * always settle on the normal path or the free never runs */
-    if (!trapped || !t->is_frame) {
-        __sync_add_and_fetch(&t->holds, 1);
-        if (t->is_frame) {
-            for (RtScope *x = t->frame->cur_scope;
-                 x && x != t->scope; x = x->parent) {
-                pthread_mutex_lock(&x->mu);
-                x->orphan = 1;
-                x->cancel = 1;
-                int live = x->pending > 0;
-                if (live) __sync_add_and_fetch(&t->holds, 1);
-                pthread_mutex_unlock(&x->mu);
-                if (live) scope_cancel_wake(x);
-                else scope_teardown(x);
-            }
+    /* a trapped frame task's inner scopes were orphan-marked inside
+     * rt_trap while its stack was live — everyone else walks
+     * fr->cur_scope (the last-suspend innermost) here. Live orphans
+     * keep a frame hold their last child drops; drained ones tear
+     * down inline. The spawn-time run ref keeps the frame allocated
+     * through the walk — the final unref is the last drop. */
+    if (t->is_frame && !trapped) {
+        for (RtScope *x = t->frame->cur_scope;
+             x && x != t->scope; x = x->parent) {
+            pthread_mutex_lock(&x->mu);
+            x->orphan = 1;
+            x->cancel = 1;
+            int live = x->pending > 0;
+            if (live) task_ref(t);
+            pthread_mutex_unlock(&x->mu);
+            if (live) scope_cancel_wake(x);
+            else scope_teardown(x);
         }
     }
-    if (__sync_sub_and_fetch(&t->holds, 1) == 0) free(t);
+    task_unref(t);
 }
 
 static void run_task(RtTask *t) {
@@ -506,14 +528,16 @@ void rt_spawn(void *(*fn)(void *), void *arg) {
     if (!s) { /* outside scope: dedicated thread, nothing to join */
         RtTask *t = malloc(sizeof *t);
         memset(t, 0, sizeof *t);
+        task_ref(t); /* run ref — dropped at settle */
         t->fn = fn; t->arg = arg;
         pthread_t th;
         if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
-        else free(t);
+        else task_unref(t);
         return;
     }
     RtTask *t = malloc(sizeof *t);
     memset(t, 0, sizeof *t);
+    task_ref(t); /* run ref — dropped at settle */
     t->fn = fn; t->arg = arg; t->scope = s;
     pool_push(t);
 }
@@ -525,10 +549,11 @@ void rt_spawnb(void *(*fn)(void *), void *arg) {
     scope_pending_up(s);
     RtTask *t = malloc(sizeof *t);
     memset(t, 0, sizeof *t);
+    task_ref(t); /* run ref — dropped at settle */
     t->fn = fn; t->arg = arg; t->scope = s;
     pthread_t th;
     if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
-    else { scope_done(s); free(t); } /* don't leak the pending slot */
+    else { scope_done(s); task_unref(t); } /* don't leak the pending slot */
 }
 
 /* one allocation per task: [RtTask][frame bytes]. Generated code gets
@@ -539,6 +564,7 @@ RtFrame *rt_task_new(RtPoll poll, int64_t bytes) {
     memset(t, 0, sizeof(RtTask) + (size_t)bytes);
     t->poll = poll;
     t->is_frame = 1;
+    task_ref(t); /* run ref — dropped at settle */
     t->scope = tls_scope;
     RtFrame *fr = (RtFrame *)(t + 1);
     fr->cur_scope = tls_scope;
@@ -560,7 +586,7 @@ void rt_spawnb_task(RtFrame *fr) {
     t->external = 1;
     pthread_t th;
     if (pthread_create(&th, NULL, task_wrap_frame, t) == 0) pthread_detach(th);
-    else { scope_done(t->scope); free(t); } /* don't leak the pending slot */
+    else { scope_done(t->scope); task_unref(t); } /* don't leak the pending slot */
 }
 
 /* drive one frame task to completion on the calling thread — the root
@@ -680,9 +706,9 @@ void rt_trap(int64_t code) {
     if (!s) { fprintf(stderr, "trap %lld outside scope\n", (long long)code); abort(); }
     RtTask *t = tls_task;
     if (t && t->is_frame) {
-        /* self-hold before any orphan can drain: the frame frees only
-         * when the last hold drops (settle in task_release_frame) */
-        __sync_add_and_fetch(&t->holds, 1);
+        /* the spawn-time run ref already pins the frame: orphan drains
+         * can never drop holds to 0 until this task settles, so no
+         * separate self-hold is needed here */
         /* mark the whole chain from innermost to the task's spawn scope —
          * inner scopes live inside this task's frame and never join, so
          * orphan each: live ones keep a frame hold their last child
@@ -701,7 +727,7 @@ void rt_trap(int64_t code) {
                  * releases it via scope_orphan_free. */
                 x->orphan = 1;
                 x->pending++;
-                __sync_add_and_fetch(&t->holds, 1);
+                task_ref(t); /* orphan hold — scope_orphan_free drops it */
             }
             pthread_mutex_unlock(&x->mu);
             if (x == t->scope) break;
@@ -743,14 +769,41 @@ void rt_trap(int64_t code) {
         fflush(NULL);
         abort();
     }
-    pthread_mutex_lock(&s->mu);
-    if (!s->trapped) { /* first trap wins */
-        s->trapped = 1;
-        s->err = code;
+    /* thread task: same chain walk as the frame path — mark every scope
+     * from innermost up to the task's spawn scope so the trap reaches
+     * t->scope (its joiner reads `trapped`/`err`) and siblings cancel,
+     * then wake each level's parked tasks. Inner scopes live on THIS
+     * thread's C stack: drained ones tear down inline while the stack
+     * is still valid. A live orphan can't be handed to children — the
+     * scope struct unwinds with us — so it fails loudly instead of
+     * dangling. The checker bans `scope {}` in non-susp fns, so past
+     * t->scope the chain is empty in practice. */
+    for (RtScope *x = s; x; x = x->parent) {
+        pthread_mutex_lock(&x->mu);
+        if (!x->trapped) { x->trapped = 1; x->err = code; }
+        x->cancel = 1;
+        if (x != t->scope) { x->orphan = 1; x->pending++; }
+        pthread_mutex_unlock(&x->mu);
+        if (x == t->scope) break;
     }
-    s->cancel = 1; /* siblings observe + unwind */
-    pthread_mutex_unlock(&s->mu);
-    scope_cancel_wake(s);
+    for (RtScope *x = s; x; x = x->parent) {
+        scope_cancel_wake(x);
+        if (x == t->scope) break;
+    }
+    for (RtScope *x = s; x; x = x->parent) {
+        if (x != t->scope) {
+            int drain = 0;
+            pthread_mutex_lock(&x->mu);
+            if (--x->pending <= 0) drain = 1;
+            pthread_mutex_unlock(&x->mu);
+            if (drain) scope_teardown(x); /* stack scope, still live */
+            else {
+                fprintf(stderr, "trap: thread task abandoned live stack scope\n");
+                abort();
+            }
+        }
+        if (x == t->scope) break;
+    }
     task_unwind(); /* run_task drains defers + settles pending */
 }
 
@@ -821,12 +874,23 @@ typedef struct SelW {
 
 struct RtSel {
     volatile int winner;   /* slot index once claimed; -1 while parked */
-    volatile int refs;     /* task + (optional) timer hold refs */
+    volatile int refs;     /* task + (optional) timer + drain refs */
     int n;
     int64_t tmo;           /* ms; timer armed when >= 0 */
     RtTask *t;
     SelW w[];
 };
+
+/* the RtSel pins its task: while any RtSel ref is held (task, timer,
+ * or a drain that detached SelW nodes) s->t cannot be freed — the ref
+ * taken at arm time is released only when the RtSel itself dies */
+static void sel_unref(struct RtSel *s) {
+    if (__sync_sub_and_fetch(&s->refs, 1) == 0) {
+        RtTask *ot = s->t;
+        free(s);
+        task_unref(ot);
+    }
+}
 
 struct RtChan {
     pthread_mutex_t mu;
@@ -869,13 +933,16 @@ static int sel_fire(RtChan *ch, int64_t v) {
         SelW *w = ch->selq;
         ch->selq = w->next;
         struct RtSel *s = w->sel;
-        if (!park_claim(s->t)) continue; /* dead waiter — drop it */
+        /* the popped node's task ref is ours now: s->t stays valid
+         * memory win or lose, then the ref leaves with the node */
+        if (!park_claim(s->t)) { task_unref(s->t); continue; }
         s->winner = w->slot;
         s->t->chan_res = v;
         s->t->sel_arm = w->slot;
         RtTask *t = s->t;
         pthread_mutex_unlock(&ch->mu);
         rt_task_wake(t);
+        task_unref(t);
         return 1;
     }
     return 0;
@@ -884,6 +951,7 @@ static int sel_fire(RtChan *ch, int64_t v) {
 /* park a frame receiver: node = the task itself on recvq */
 static void chan_park_recv(RtChan *ch, RtTask *t) {
     park_add(t, t->scope, ch, WK_RECV);
+    task_ref(t); /* the recvq node's ref — leaves with the node */
     t->next = ch->recvq;
     ch->recvq = t;
 }
@@ -894,9 +962,9 @@ static RtTask *chan_pop_recv(RtChan *ch) {
     while (ch->recvq) {
         RtTask *r = ch->recvq;
         ch->recvq = r->next;
-        if (!park_claim(r)) continue; /* dead node (cancel claimed it) */
+        if (!park_claim(r)) { task_unref(r); continue; } /* dead node */
         park_del(r);
-        return r;
+        return r; /* node ref rides out — caller drops it after the wake */
     }
     return NULL;
 }
@@ -907,9 +975,9 @@ static SendReq *chan_pop_send(RtChan *ch) {
     while (ch->sendq) {
         SendReq *r = ch->sendq;
         ch->sendq = r->next;
-        if (!park_claim(r->t)) { free(r); continue; }
+        if (!park_claim(r->t)) { task_unref(r->t); free(r); continue; }
         park_del(r->t);
-        return r;
+        return r; /* r->t's node ref rides out — caller drops post-wake */
     }
     return NULL;
 }
@@ -938,6 +1006,7 @@ void rt_send(RtChan *ch, int64_t v) {
             r->chan_res = v;
             pthread_mutex_unlock(&ch->mu);
             rt_task_wake(r);
+            task_unref(r); /* the recvq node ref we inherited */
             goto done;
         }
         if (sel_fire(ch, v)) goto done; /* sel_fire releases ch->mu */
@@ -984,7 +1053,7 @@ int64_t rt_recv(RtChan *ch) {
             RtTask *w = NULL;
             v = chan_ring_pop(ch, &w);
             pthread_mutex_unlock(&ch->mu);
-            if (w) rt_task_wake(w);
+            if (w) { rt_task_wake(w); task_unref(w); }
             goto done;
         }
         SendReq *r = chan_pop_send(ch); /* parked frame sender delivers */
@@ -994,6 +1063,7 @@ int64_t rt_recv(RtChan *ch) {
             free(r);
             pthread_mutex_unlock(&ch->mu);
             rt_task_wake(st);
+            task_unref(st); /* the sendq node ref we inherited */
             goto done;
         }
         if (ch->has || ch->closed) break;
@@ -1025,7 +1095,7 @@ int rt_recv_poll(RtChan *ch, RtTask *t) {
         RtTask *w = NULL;
         t->chan_res = chan_ring_pop(ch, &w);
         pthread_mutex_unlock(&ch->mu);
-        if (w) rt_task_wake(w);
+        if (w) { rt_task_wake(w); task_unref(w); }
         return RT_READY;
     }
     SendReq *r = chan_pop_send(ch);
@@ -1035,6 +1105,7 @@ int rt_recv_poll(RtChan *ch, RtTask *t) {
         free(r);
         pthread_mutex_unlock(&ch->mu);
         rt_task_wake(st);
+        task_unref(st);
         return RT_READY;
     }
     if (ch->has || ch->closed) {
@@ -1056,6 +1127,7 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
         r->chan_res = v;
         pthread_mutex_unlock(&ch->mu);
         rt_task_wake(r);
+        task_unref(r);
         return RT_READY;
     }
     if (sel_fire(ch, v)) return RT_READY; /* sel_fire releases ch->mu */
@@ -1087,6 +1159,7 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
     sr->v = v;
     sr->next = ch->sendq;
     ch->sendq = sr;
+    task_ref(t); /* the sendq node's ref — leaves with the node */
     park_add(t, t->scope, ch, WK_SEND);
     pthread_mutex_unlock(&ch->mu);
     return RT_PENDING;
@@ -1106,6 +1179,10 @@ void rt_close(RtChan *ch) {
     ch->sendq = NULL;
     SelW *sw = ch->selq;
     ch->selq = NULL;
+    /* pin each RtSel before unlocking: the woken task's rt_select_arm
+     * can unref+free it while we still walk detached nodes */
+    for (SelW *w = sw; w; w = w->next)
+        __sync_add_and_fetch(&w->sel->refs, 1);
     int64_t val = ch->val;
     pthread_mutex_unlock(&ch->mu);
     while (r) {
@@ -1115,6 +1192,7 @@ void rt_close(RtChan *ch) {
             r->chan_res = val;
             rt_task_wake(r);
         }
+        task_unref(r); /* recvq node ref */
         r = n;
     }
     while (sq) {
@@ -1123,18 +1201,23 @@ void rt_close(RtChan *ch) {
             park_del(sq->t);
             rt_task_wake(sq->t);
         }
+        task_unref(sq->t); /* sendq node ref */
         free(sq);
         sq = n;
     }
     while (sw) {
         SelW *n = sw->next;
         struct RtSel *s = sw->sel;
+        /* detached node refs are ours: s->t stays valid across the
+         * claim; the RtSel ref (taken under ch->mu) keeps s itself */
         if (park_claim(s->t)) {
             s->winner = sw->slot;
             s->t->chan_res = val;
             s->t->sel_arm = sw->slot;
             rt_task_wake(s->t);
         }
+        task_unref(s->t);
+        sel_unref(s);
         sw = n;
     }
 }
@@ -1181,7 +1264,9 @@ static int sel_ready(RtChan *ch, int64_t *v, RtTask **wake_me) {
         *v = r->v;
         if (park_claim(r->t)) {
             park_del(r->t);
-            *wake_me = r->t;
+            *wake_me = r->t; /* caller wakes + drops the node ref */
+        } else {
+            task_unref(r->t); /* dead node — its ref dies here */
         }
         free(r);
         return 1;
@@ -1203,7 +1288,7 @@ static void *sel_timer(void *p) {
         s->t->sel_arm = RT_SEL_TMO;
         rt_task_wake(s->t);
     }
-    if (__sync_sub_and_fetch(&s->refs, 1) == 0) free(s);
+    sel_unref(s);
     return 0;
 }
 
@@ -1222,7 +1307,7 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
         RtTask *wm = NULL;
         if (sel_ready(chs[i], &v, &wm)) {
             pthread_mutex_unlock(&chs[i]->mu);
-            if (wm) rt_task_wake(wm);
+            if (wm) { rt_task_wake(wm); task_unref(wm); }
             t->chan_res = v;
             t->sel_arm = i;
             return RT_READY;
@@ -1268,7 +1353,7 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
             if (i == 0 || sorted[i] != sorted[i - 1])
                 pthread_mutex_unlock(&sorted[i]->mu);
         free(sorted);
-        if (wm) rt_task_wake(wm);
+        if (wm) { rt_task_wake(wm); task_unref(wm); }
         t->chan_res = v;
         t->sel_arm = arm;
         return RT_READY;
@@ -1281,6 +1366,7 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
     s->n = n;
     s->tmo = tmo_ms;
     s->t = t;
+    task_ref(t); /* the RtSel's ref — released when s is freed */
     t->sel = s;
     park_add(t, t->scope, s, WK_SEL);
     for (int i = 0; i < n; i++) {
@@ -1290,6 +1376,7 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
         s->w[i].ch = ch;
         s->w[i].next = ch->selq;
         ch->selq = &s->w[i];
+        task_ref(t); /* one ref per selq node — leaves with the node */
     }
     for (int i = 0; i < n; i++)
         if (i == 0 || sorted[i] != sorted[i - 1])
@@ -1307,7 +1394,7 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
                 t->sel_arm = RT_SEL_TMO;
                 rt_task_wake(t);
             }
-            if (__sync_sub_and_fetch(&s->refs, 1) == 0) free(s);
+            sel_unref(s); /* drop the pre-armed timer ref */
             return RT_PENDING;
         }
     }
@@ -1326,15 +1413,19 @@ int64_t rt_select_arm(RtTask *t) {
     park_del(t);
     for (int i = 0; i < s->n; i++) {
         RtChan *ch = s->w[i].ch;
+        int unlinked = 0;
         pthread_mutex_lock(&ch->mu);
         SelW **pp = &ch->selq;
         while (*pp) {
-            if (*pp == &s->w[i]) { *pp = s->w[i].next; break; }
+            if (*pp == &s->w[i]) { *pp = s->w[i].next; unlinked = 1; break; }
             pp = &(*pp)->next;
         }
         pthread_mutex_unlock(&ch->mu);
+        /* a node already popped (waker/close-drain) carries its ref
+         * to whoever removed it — only ours to drop when we unlink */
+        if (unlinked) task_unref(t);
     }
-    if (__sync_sub_and_fetch(&s->refs, 1) == 0) free(s);
+    sel_unref(s);
     return arm;
 }
 
@@ -1350,24 +1441,29 @@ static void scope_cancel_wake(RtScope *s) {
         if (t) s->parked = t->pnext;
         pthread_mutex_unlock(&s->mu);
         if (!t) return;
+        /* the pop hands us the node's parked-list ref: t stays valid
+         * through our claim+wake and the ref drops at loop bottom */
         /* joiners stay parked: they wake via scope_done when pending
          * drains — a premature finish would consume a live scope */
-        if (t->waitkind == WK_JOIN) continue;
-        if (!park_claim(t)) continue; /* a normal waker owns the wake */
+        if (t->waitkind == WK_JOIN) { task_unref(t); continue; }
+        if (!park_claim(t)) { task_unref(t); continue; }
         switch (t->waitkind) {
             case WK_RECV: {
                 RtChan *ch = t->waitobj;
+                int unlinked = 0;
                 pthread_mutex_lock(&ch->mu);
                 RtTask **pp = &ch->recvq;
                 while (*pp) {
-                    if (*pp == t) { *pp = t->next; break; }
+                    if (*pp == t) { *pp = t->next; unlinked = 1; break; }
                     pp = &(*pp)->next;
                 }
                 pthread_mutex_unlock(&ch->mu);
+                if (unlinked) task_unref(t); /* recvq node ref */
                 break;
             }
             case WK_SEND: {
                 RtChan *ch = t->waitobj;
+                int unlinked = 0;
                 pthread_mutex_lock(&ch->mu);
                 SendReq **pp = &ch->sendq;
                 while (*pp) {
@@ -1375,11 +1471,13 @@ static void scope_cancel_wake(RtScope *s) {
                         SendReq *d = *pp;
                         *pp = d->next;
                         free(d);
+                        unlinked = 1;
                         break;
                     }
                     pp = &(*pp)->next;
                 }
                 pthread_mutex_unlock(&ch->mu);
+                if (unlinked) task_unref(t); /* sendq node ref */
                 break;
             }
             case WK_SEL: {
@@ -1389,13 +1487,15 @@ static void scope_cancel_wake(RtScope *s) {
                 __sync_bool_compare_and_swap(&sel->winner, -1, RT_SEL_ELSE);
                 for (int i = 0; i < sel->n; i++) {
                     RtChan *ch = sel->w[i].ch;
+                    int unlinked = 0;
                     pthread_mutex_lock(&ch->mu);
                     SelW **pp = &ch->selq;
                     while (*pp) {
-                        if (*pp == &sel->w[i]) { *pp = sel->w[i].next; break; }
+                        if (*pp == &sel->w[i]) { *pp = sel->w[i].next; unlinked = 1; break; }
                         pp = &(*pp)->next;
                     }
                     pthread_mutex_unlock(&ch->mu);
+                    if (unlinked) task_unref(t); /* selq node ref */
                 }
                 break;
             }
@@ -1412,10 +1512,12 @@ static void scope_cancel_wake(RtScope *s) {
                 pthread_cond_broadcast(&ch->cv_recv);
                 pthread_cond_broadcast(&ch->cv_send);
                 pthread_mutex_unlock(&ch->mu);
+                task_unref(t);
                 continue; /* thread wakes on its cv, exits on cancel check */
             }
         }
         rt_task_wake(t);
+        task_unref(t);
     }
 }
 
@@ -1597,9 +1699,12 @@ int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 }
 
-/* ---------------- sqlite3 shims ---------------- */
-/* v0 FFI can't express T** out-params; these wrap the three calls the
- * pilots need. sqlite3* itself crosses as a plain owned pointer. */
+/* ---------------- sqlite3 shims ----------------
+ * Built only under -DOXL_SQLITE: the compiler defines it (and links
+ * -lsqlite3) when the emitted program references rt_sqlite_*, so a
+ * stock system without the sqlite dev headers can still build oxl
+ * programs that never touch a database. */
+#ifdef OXL_SQLITE
 
 #include <sqlite3.h>
 
@@ -1640,22 +1745,37 @@ int64_t rt_sqlite_exec_bind(void *db, const char *sql, OxlStr param) {
 }
 OxlStr rt_sqlite_query(void *db, const char *sql) {
     sqlite3_stmt *st = NULL;
-    OxlStr out = rt_str("");
     if (sqlite3_prepare_v2((sqlite3 *)db, sql, -1, &st, NULL) != SQLITE_OK)
-        return out;
+        return rt_str("");
+    /* rt_strcat re-copies the prefix per field — quadratic on wide or
+     * long result sets. Accumulate in a doubling scratch, then pay one
+     * copy into scope memory for the result. */
+    size_t cap = 4096, n = 0;
+    char *buf = malloc(cap);
     while (sqlite3_step(st) == SQLITE_ROW) {
         int cols = sqlite3_column_count(st);
         for (int c = 0; c < cols; c++) {
             const unsigned char *t = sqlite3_column_text(st, c);
-            out = rt_strcat(out, rt_str(t ? (const char *)t : ""));
-            if (c + 1 < cols) out = rt_strcat(out, rt_str("|"));
+            size_t tl = t ? strlen((const char *)t) : 0;
+            if (n + tl + 2 > cap) { /* field + separator + slack */
+                while (n + tl + 2 > cap) cap *= 2;
+                buf = realloc(buf, cap);
+            }
+            if (tl) { memcpy(buf + n, t, tl); n += tl; }
+            if (c + 1 < cols) buf[n++] = '|';
         }
-        out = rt_strcat(out, rt_str("\n"));
+        buf[n++] = '\n';
     }
     sqlite3_finalize(st);
-    return out;
+    char *p = rt_alloc((int64_t)n + 1);
+    memcpy(p, buf, n);
+    p[n] = 0;
+    free(buf);
+    return (OxlStr){ p, (int64_t)n };
 }
 void rt_sqlite_close(void *db) { sqlite3_close((sqlite3 *)db); }
+
+#endif /* OXL_SQLITE */
 
 /* ---------------- entry ---------------- */
 

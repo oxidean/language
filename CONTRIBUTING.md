@@ -12,6 +12,8 @@ bash tests/run.sh ./oxl/target/debug/oxl    # end-to-end suite
 
 `tests/run.sh` exercises every example, `oxl test`, the stdlib modules,
 and the HTTP/SQLite pilot (needs `sqlite3` + `libsqlite3-dev`, curl).
+The parser and LSP checks also invoke `python3`, so have Python 3 on
+`PATH` before running the suite.
 
 ## Layout
 

@@ -43,7 +43,7 @@ rot.
 ## What the language already has (sufficient for frontend)
 
 - `readfile`/`writefile`/`exit` builtins (file io + process)
-- `import` — multi-file crates with a merged namespace + `std/` lookup
+- `import "std/http"` — binds the module under a namespace qualifier (`http.serve(...)`); `as` renames it and `.{name, ...}` imports select names unqualified. `std/` resolves against the toolchain stdlib
 - `own` linked structures + `nil` — token lists and AST trees
 - `mut`/`ref` borrows — parser cursors mutate through borrow regions
 - Generics: `fn f[T constraint]` monomorphized per instantiation

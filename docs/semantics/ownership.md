@@ -81,8 +81,11 @@ through a handle, and are elided where the typechecker proves safety
   (`x = new(T)`, `x := f()`) clears the mark. Deliberately *not* move
   sites: `y := x` and `y = x` between variables (the aliasing walk
   idiom `cur := head`), field reads, and `ref`/`mut` borrows — those
-  stay runtime-checked. At branch joins a binding is dead only when
-  moved on *every* path (`if`/`else`, `match`, `select` arms); a net
+  stay runtime-checked. At branch joins a binding is dead when
+  moved on *any* reachable fall-through path (`if`/`else`, `match`,
+  `select` arms) — a union merge, since the join can't prove which
+  branch ran; a move inside a branch that always diverges (returns,
+  breaks) still doesn't count. A net
   move inside a `for` body is a compile error since the next iteration
   would read a moved value — re-initializing it in the same iteration
   is the fix. `mkshared` returns `shared` — a copyable atomic-cell type

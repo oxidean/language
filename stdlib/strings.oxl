@@ -1,4 +1,9 @@
 // std/strings — string helpers written in the language itself.
+
+// explicit release for `own ?` buffers (mkbuf) — scope arenas don't
+// reclaim them, so a temporary scratch must be freed by hand
+extern fn rt_free(p: mut void)
+
 // Exercises: imports, self-referential owned structs (split lists),
 // byte-level iteration. Import with `import "std/strings"`.
 
@@ -101,5 +106,7 @@ fn upper(s: str) -> str {
         }
         i = i + 1
     }
-    return bufstr(buf, len(s))
+    out := bufstr(buf, len(s))
+    rt_free(buf) // `own` scratch: done once the string is copied out
+    return out
 }

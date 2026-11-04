@@ -239,7 +239,10 @@ echo "== bootstrap codegen =="
 cgen_dir=$(mktemp -d)
 for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl; do
     "$OXL" run bootstrap/codegen.oxl -- "$f" > "$cgen_dir/out.c"
-    "${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/out.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/out" || { echo "FAIL codegen cc $f"; exit 1; }
+    # sqlite only when the emitted C calls it — mirrors emit_and_cc
+    sq=""
+    grep -q 'rt_sqlite_' "$cgen_dir/out.c" && sq="-DOXL_SQLITE -lsqlite3"
+    "${LANG_CC:-cc}" -O2 -pthread -Iruntime $sq "$cgen_dir/out.c" runtime/rt.c -o "$cgen_dir/out" || { echo "FAIL codegen cc $f"; exit 1; }
     got=$("$cgen_dir/out")
     want=$("$OXL" run "$f")
     [ "$got" = "$want" ] || { echo "FAIL codegen $f"; exit 1; }

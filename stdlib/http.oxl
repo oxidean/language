@@ -24,6 +24,10 @@ extern fn close(fd: int) -> int
 
 extern fn setsockopt(fd: int, lvl: int, opt: int, v: ref intp, n: int) -> int
 
+// explicit release for `own ?` buffers (mkbuf) — scope arenas don't
+// reclaim them, so a per-request scratch must be freed by hand
+extern fn rt_free(p: mut void)
+
 struct sockaddr { a: int, b: int } // 16 bytes: sockaddr_in fits
 
 struct intp { v: int }
@@ -80,6 +84,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
         n := read(fd, buf, 4095)
         if n > 0 {
             req := bufstr(buf, n)
+            rt_free(buf) // `own` scratch: done once the bytes are copied
 
             // "METHOD PATH HTTP/1.x" — split on the first two spaces
             sp1 := find(req, " ")
@@ -96,6 +101,8 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
             r := h.route(method, path, body)
             resp := http_resp(r.status, r.body)
             write(fd, cstr(resp), len(resp))
+        } else {
+            rt_free(buf) // unread/failed read: scratch still must die
         }
     }
 }
@@ -113,8 +120,13 @@ fn serve(port: int, h: Handler) {
     poke8(addr, 1, 0)
     poke16(addr, 2, port) // sin_port = htons(port)
     poke32(addr, 4, 0) // sin_addr = INADDR_ANY
-    bind(srv, addr, 16)
-    listen(srv, 64)
+    if bind(srv, addr, 16) != 0 || listen(srv, 64) != 0 {
+        // a failed bind/listen makes every accept return -1 at once:
+        // the serve loop would spin at 100% CPU serving nothing
+        close(srv)
+        println("serve: bind/listen failed on :" + itoa(port))
+        exit(1)
+    }
     println("listening on :" + itoa(port))
 
     inflight := mkshared(0)
@@ -129,6 +141,10 @@ fn serve(port: int, h: Handler) {
                 } else {
                     spawnBlocking handle_conn(h, cfd, inflight)
                 }
+            } else {
+                // persistent accept errors (EMFILE and friends) would
+                // spin the accept loop — back off briefly and retry
+                usleep(50000)
             }
         }
     }

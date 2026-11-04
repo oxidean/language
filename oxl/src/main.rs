@@ -616,14 +616,24 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
         }
     }
     let cc = std::env::var("LANG_CC").unwrap_or_else(|_| "cc".into());
+    // Link (and compile) SQLite only when the emitted program uses it:
+    // -lsqlite3 fails outright where libsqlite3-dev isn't installed,
+    // which would break every build — including `oxl run hello.oxl` —
+    // on a stock system. rt.c compiles its sqlite section only under
+    // -DOXL_SQLITE, so the flag and the library arrive together.
+    let needs_sqlite = std::fs::read_to_string(&c_file)
+        .map(|s| s.contains("rt_sqlite_"))
+        .unwrap_or(false);
     let mut cmd = Command::new(&cc);
     cmd.args(["-O2", "-pthread", "-o"])
         .arg(out)
         .arg(&c_file)
-        .arg(dir.join("rt.c"))
-        // -l after sources: --as-needed linkers (Ubuntu gcc default)
-        // drop libs seen before the undefined refs they resolve
-        .arg("-lsqlite3");
+        .arg(dir.join("rt.c"));
+    if needs_sqlite {
+        // -D before sources, -l after: --as-needed linkers (Ubuntu gcc
+        // default) drop libs seen before the undefined refs they resolve
+        cmd.arg("-DOXL_SQLITE").arg("-lsqlite3");
+    }
     // extra link inputs (FFI shim objects, libs) — e.g. the gui pilot's
     // LANG_LDFLAGS="gui_shim.o $(pkg-config --libs gtk4)"
     if let Ok(flags) = std::env::var("LANG_LDFLAGS") {

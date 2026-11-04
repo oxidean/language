@@ -70,13 +70,12 @@ pool, channels, and the `extern` FFI shim table.
 
 | Symbol | Contract |
 |---|---|
-| `rt_arena_push/pop` | scope enter/exit; frees arena on pop |
-| `rt_alloc(size, scope)` → `void*` | arena or heap per flag |
-| `rt_borrow_mut/read(obj)` / `rt_unborrow*` | aliasing checks |
-| `rt_deref(obj, gen)` | dangling check before access |
-| `rt_scope_enter/leave` | trap containment + sibling cancel |
-| `rt_spawn(fn, args, scope)` / `rt_send/recv/close` | executor + channels |
-| `rt_trap(code)` | raise trap at current scope boundary |
+| `rt_scope_enter/leave(s)` / `rt_scope_join_poll` / `rt_scope_finish` | scope lifecycle; join frees the arena; trapped codes propagate to the joiner |
+| `rt_alloc(size)` / `rt_alloc_own(size)` → `void*` | scope arena (heap fallback, scope-tracked) / always-heap for escaping data |
+| `rt_borrow_read/mut(obj)` / `rt_unborrow(obj)` / `rt_free(obj)` | aliasing checks + explicit release of own blocks |
+| `rt_spawn(fn, arg)` / `rt_spawnb(fn, arg)` / `rt_spawn_task(frame)` | thread tasks (non-susp fns) / blocking pool / frame tasks |
+| `rt_send/recv/close(ch, v)` + `rt_send/recv_poll` | channels: blocking surface for thread tasks, poll surface for frames |
+| `rt_trap(code)` | raise trap; the chain up to the task's spawn scope cancels siblings and propagates `err` to the joiner |
 | `oxl_main()` | emitted entry; `main()` lives in rt.c |
 
 ## Error semantics
