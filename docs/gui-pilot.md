@@ -50,13 +50,14 @@ the FFI bridge.
    grows native GUI support it needs "pin this task to this thread"
    (or a dedicated UI-thread primitive), not more pool semantics.
 5. **Callback lifetime vs scopes.** The shim heap-copies the `RtFnv`
-   and frees it (plus `rt_free` on the env — safe because `rt_free`
-   skips arena blocks) when GTK destroys the signal. But an OXL
-   closure created *inside* a `scope{}` has arena env — if GTK held it
-   past scope exit it would dangle. The pilot avoids this by creating
-   handlers before the loop in `main`. A path-(b) layer must either
-   guarantee handlers outlive scopes (escape analysis → heap) or
-   document the rule as sharply as GTK documents its thread rule.
+   and frees it (plus `rt_free` on the env) when GTK destroys the
+   signal. Closure envs are `rt_alloc_own` — escaping storage, so a
+   closure created inside `scope{}` already outlives its scope. What
+   must not escape is captured *borrowed* data: a capture that points
+   into the scope arena (e.g. a non-`own` slice's backing storage)
+   dangles once that scope closes, and GTK holding it past that point
+   would read freed memory. A path-(b) layer must document that rule
+   as sharply as GTK documents its thread rule.
 
 ## What path (b) — a portable UI layer — would need
 

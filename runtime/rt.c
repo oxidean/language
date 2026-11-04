@@ -106,6 +106,17 @@ void rt_scope_enter(RtScope *s) {
     s->arena_buf = malloc(ARENA_CAP);
     s->arena_cap = ARENA_CAP;
     s->owner = tls_task;
+    if (s->parent) {
+        /* link into the parent's descendant list so rt_trap can cancel
+         * the whole subtree; a scope born under an already-cancelled
+         * parent starts cancelled — its first suspend point dies
+         * instead of outliving the trap that spawned it */
+        pthread_mutex_lock(&s->parent->mu);
+        if (s->parent->cancel) s->cancel = 1;
+        s->sib = s->parent->children;
+        s->parent->children = s;
+        pthread_mutex_unlock(&s->parent->mu);
+    }
     tls_scope = s;
 }
 
@@ -241,7 +252,24 @@ static void scope_heap_free(RtScope *s);
  * and the scope-tracked heap blocks. Sync objects die too — pending==0
  * means no thread can still be holding or waiting on them. The scope
  * struct itself is frame (or stack) memory — not freed here. */
+/* drop s from its parent's descendant list — idempotent. The list is
+ * only walked by rt_trap's cancel propagation under the parent's mu,
+ * so an unlinked scope is invisible to in-flight traps. */
+static void scope_unlink(RtScope *s) {
+    RtScope *p = s->parent;
+    if (!p) return;
+    pthread_mutex_lock(&p->mu);
+    RtScope **pp = &p->children;
+    while (*pp) {
+        if (*pp == s) { *pp = s->sib; break; }
+        pp = &(*pp)->sib;
+    }
+    s->sib = NULL;
+    pthread_mutex_unlock(&p->mu);
+}
+
 static void scope_teardown(RtScope *s) {
+    scope_unlink(s);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->cv);
     scope_heap_free(s);
@@ -265,7 +293,7 @@ static void scope_done(RtScope *s) {
     s->pending--;
     if (s->pending <= 0) {
         if (s->join_task) wake = s->join_task;
-        else if (s->orphan) orphan_drain = 1;
+        else if (s->orphan) { orphan_drain = 1; s->dead = 1; }
         else pthread_cond_signal(&s->cv);
     }
     pthread_mutex_unlock(&s->mu);
@@ -278,6 +306,64 @@ static void scope_done(RtScope *s) {
         park_del(wake);
         rt_task_wake(wake);
         task_unref(wake);
+    }
+}
+
+/* heap-allocated scope for library code that can't name RtScope's
+ * size (stdlib http trap containment). Join with rt_scope_join_free —
+ * rt_scope_try semantics: the trap code returns instead of
+ * propagating to the parent. */
+void *rt_scope_new(void) {
+    /* rt_alloc into the CURRENT scope, not raw malloc/own: callers wrap
+     * the value in borrow checks (rt_borrow_mut) that need a real
+     * ObjHdr, and the trailing rt_unborrow lands after join_free — so
+     * the struct must outlive its own join. The enclosing scope reaps
+     * the dead struct with its arena; rt_scope_try already tears down
+     * the internals (arena_buf, sync, heap list) at join. */
+    RtScope *s = rt_alloc(sizeof *s);
+    rt_scope_enter(s);
+    return s;
+}
+
+int64_t rt_scope_join_free(void *sv) {
+    return rt_scope_try((RtScope *)sv);
+}
+
+/* serializes trap-time descendant passes: trappers share the wnext
+ * scratch links, so two racing traps must not clobber each other */
+static pthread_mutex_t cancel_tree_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* cancel every scope below s and force-wake their parked tasks.
+ * Lock order is parent->child only: while s->mu is held, no linked
+ * child can unlink or finish teardown, so c->mu is safe to take. A
+ * child that already committed teardown (dead) is skipped; a live one
+ * gets a temp pending hold so its join/drain can't complete between
+ * our unlock and the wake — dropped after its subtree is done. */
+static void scope_cancel_tree(RtScope *s) {
+    RtScope *list = NULL;
+    pthread_mutex_lock(&s->mu);
+    for (RtScope *c = s->children; c; c = c->sib) {
+        pthread_mutex_lock(&c->mu);
+        if (!c->dead) {
+            c->cancel = 1;
+            c->pending++;
+            c->wnext = list;
+            list = c;
+        }
+        pthread_mutex_unlock(&c->mu);
+    }
+    pthread_mutex_unlock(&s->mu);
+    while (list) {
+        RtScope *c = list;
+        list = c->wnext;
+        c->wnext = NULL;
+        scope_cancel_wake(c);
+        scope_cancel_tree(c);
+        int drain = 0;
+        pthread_mutex_lock(&c->mu);
+        if (--c->pending <= 0 && c->orphan) { c->dead = 1; drain = 1; }
+        pthread_mutex_unlock(&c->mu);
+        if (drain) scope_orphan_free(c);
     }
 }
 
@@ -359,13 +445,14 @@ static void task_release_frame(RtTask *t, int trapped) {
              * the last child's scope_done can tear x down while
              * scope_cancel_wake still walks it (rt_trap protocol) */
             if (live) { task_ref(t); x->pending++; }
+            else x->dead = 1; /* tearing down below — traps must skip */
             RtScope *up = x->parent;
             pthread_mutex_unlock(&x->mu);
             if (!live) { scope_teardown(x); x = up; continue; }
             scope_cancel_wake(x);
             int drain = 0;
             pthread_mutex_lock(&x->mu);
-            if (--x->pending <= 0) drain = 1;
+            if (--x->pending <= 0) { x->dead = 1; drain = 1; }
             pthread_mutex_unlock(&x->mu);
             if (drain) scope_orphan_free(x);
             x = up;
@@ -659,7 +746,9 @@ static int join_scope(RtScope *s) {
     pthread_mutex_lock(&s->mu);
     while (s->pending > 0) pthread_cond_wait(&s->cv, &s->mu);
     int err = s->trapped ? (int)s->err : 0;
+    s->dead = 1; /* teardown commits here: trap walks must skip us */
     pthread_mutex_unlock(&s->mu);
+    scope_unlink(s);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->cv);
     scope_heap_free(s);
@@ -685,7 +774,9 @@ int rt_scope_join_poll(RtScope *s, RtTask *t) {
 int rt_scope_finish(RtScope *s) {
     pthread_mutex_lock(&s->mu);
     int err = s->trapped ? (int)s->err : 0;
+    s->dead = 1;
     pthread_mutex_unlock(&s->mu);
+    scope_unlink(s);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->cv);
     scope_heap_free(s);
@@ -750,6 +841,16 @@ void rt_trap(int64_t code) {
             scope_cancel_wake(x);
             if (x == t->scope) break;
         }
+        /* descendants of every marked scope: tasks parked inside
+         * sibling subtrees aren't on this task's ancestor chain —
+         * without cancelling them they park forever and their pending
+         * slots keep the join open */
+        pthread_mutex_lock(&cancel_tree_mu);
+        for (RtScope *x = s; x; x = x->parent) {
+            scope_cancel_tree(x);
+            if (x == t->scope) break;
+        }
+        pthread_mutex_unlock(&cancel_tree_mu);
         /* drop the temp refs: a drained orphan tears down here (its
          * owner hold drops with it); live ones drain later under their
          * last child's scope_done */
@@ -757,7 +858,7 @@ void rt_trap(int64_t code) {
             if (x != t->scope) {
                 int drain = 0;
                 pthread_mutex_lock(&x->mu);
-                if (--x->pending <= 0) drain = 1;
+                if (--x->pending <= 0) { x->dead = 1; drain = 1; }
                 pthread_mutex_unlock(&x->mu);
                 if (drain) scope_orphan_free(x);
             }
@@ -802,11 +903,19 @@ void rt_trap(int64_t code) {
         scope_cancel_wake(x);
         if (x == t->scope) break;
     }
+    /* descendant cancel, same as the frame path — nested scopes below
+     * the chain belong to other tasks' frames (heap), safe to walk */
+    pthread_mutex_lock(&cancel_tree_mu);
+    for (RtScope *x = s; x; x = x->parent) {
+        scope_cancel_tree(x);
+        if (x == t->scope) break;
+    }
+    pthread_mutex_unlock(&cancel_tree_mu);
     for (RtScope *x = s; x; x = x->parent) {
         if (x != t->scope) {
             int drain = 0;
             pthread_mutex_lock(&x->mu);
-            if (--x->pending <= 0) drain = 1;
+            if (--x->pending <= 0) { x->dead = 1; drain = 1; }
             pthread_mutex_unlock(&x->mu);
             if (drain) scope_teardown(x); /* stack scope, still live */
             else {

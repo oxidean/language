@@ -71,9 +71,11 @@ any interface.
 
 A method-declaring interface works as a constraint — `fn f[T Writer](v: T)`
 may call `v.write(..)`, monomorphizing to the concrete `T.write` per
-instantiation. A generic *impl* (`fn (s Stack[T]) push[..]`) satisfies
-interfaces too: the vtab slot pins the instantiation the interface's
-declared signature implies.
+instantiation. A generic *method* on a non-generic receiver
+(`fn (s Stack) push[T](v: T)`) satisfies interfaces too: the vtab slot
+pins the instantiation the interface's declared signature implies.
+Generic receivers (`fn (s Stack[T]) ...`) are not parsed in v0.2 —
+structs are not generic.
 
 ## Limits (v0.2)
 

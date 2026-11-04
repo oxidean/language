@@ -89,8 +89,11 @@ select {
 ```
 
 - recv arms only; send arms are rejected (cut for v0.2).
-- Multiple ready arms: uniform-random pick. `else` fires when no arm
-  is ready. `timeout` fires once after `ms` and never with `else`.
+- Multiple ready arms: the poll starts from a random arm and takes
+  the FIRST ready arm it finds — ready arms are not picked uniformly
+  (an arm right after the start point wins over equally-ready others).
+  `else` fires when no arm is ready. `timeout` fires once after `ms`
+  and never with `else`.
 - A parked `select` holds one waiter node per arm chan; the first
   delivery wins via an atomic claim — losers unlink on resume.
 - Scope cancellation force-wakes parked `select`/`recv`/`send` waiters;
@@ -106,8 +109,9 @@ select {
   to `GOMAXPROCS`-equivalent (CPU count, capped at 32). Workers pull
   tasks off one MPMC queue and drive each task's `poll` until it
   suspends or completes — cooperative, not preemptive.
-- Blocking `extern` calls and `spawnBlocking` tasks run on a separate
-  blocking pool so they cannot starve task threads.
+- `spawnBlocking` tasks run on a separate blocking pool so they cannot
+  starve task threads. Plain `extern` calls are NOT re-routed — they
+  run inline on the caller; wrap them in `spawnBlocking` yourself.
 - Scale: a parked task costs one small heap block, not a thread.
   Measured ~1.9 MB RSS with 10k parked tasks; ~2x faster than the
   thread-pool executor at 1k+ tasks on the rendezvous bench

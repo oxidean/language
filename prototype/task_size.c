@@ -85,12 +85,14 @@ int main(void) {
             spawned = i;
             break;
         }
-    while (arrived < spawned) sched_yield();
+    while (__sync_fetch_and_add(&arrived, 0) < spawned) sched_yield();
     long th_rss = rss_kb() - before;
     printf("%d thread tasks RSS:       %+ld kB (~%ld B/task)\n",
            spawned, th_rss, spawned ? th_rss * 1024 / spawned : 0);
 
-    if (sm_rss > 0 && th_rss > 0)
+    /* a partial spawn makes the totals incommensurate — only a full
+     * run of N_TASKS threads yields a meaningful ratio */
+    if (spawned == N_TASKS && sm_rss > 0 && th_rss > 0)
         printf("ratio:                    %.0fx\n", (double)th_rss / sm_rss);
     return 0;
 }

@@ -91,37 +91,44 @@ fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
                 json.jadd(r, "created", json.jstr(reqbody))
                 body = json.tojson(r) + "\n"
             }
-        } else if sqlite_exec(db, cstr("SELECT rowid, name FROM items")) != 0 {
-            // sqlite_exec can't return rows, but its status answers
-            // what sqlite_query's bare "" conflates: a failed SELECT
-            // vs. an empty table. Failure is a 500, not {items:[]}.
-            status = 500
-            body = "{\"error\":\"query failed\"}\n"
-        } else {
-            status = 200
-            // rows arrive as "id|name" lines — reshape into real JSON
-            items := json.jarr()
-            rows := strings.split(sqlite_query(db, cstr("SELECT rowid, name FROM items")), "\n")
-            r := rows
-            for r != nil {
-                if len(r.v) > 0 {
-                    item := json.jobj()
-                    idstr := ""
-                    nm := r.v
-                    sep := find(r.v, "|")
-                    if sep >= 0 {
-                        idstr = substr(r.v, 0, sep)
-                        nm = substr(r.v, sep + 1, len(r.v))
+        } else if method == "GET" {
+            if sqlite_exec(db, cstr("SELECT rowid, name FROM items")) != 0 {
+                // sqlite_exec can't return rows, but its status answers
+                // what sqlite_query's bare "" conflates: a failed SELECT
+                // vs. an empty table. Failure is a 500, not {items:[]}.
+                status = 500
+                body = "{\"error\":\"query failed\"}\n"
+            } else {
+                status = 200
+                // rows arrive as "id|name" lines — reshape into real JSON
+                items := json.jarr()
+                rows := strings.split(sqlite_query(db, cstr("SELECT rowid, name FROM items")), "\n")
+                r := rows
+                for r != nil {
+                    if len(r.v) > 0 {
+                        item := json.jobj()
+                        idstr := ""
+                        nm := r.v
+                        sep := find(r.v, "|")
+                        if sep >= 0 {
+                            idstr = substr(r.v, 0, sep)
+                            nm = substr(r.v, sep + 1, len(r.v))
+                        }
+                        json.jadd(item, "id", json.jint(atoi(idstr)))
+                        json.jadd(item, "name", json.jstr(nm))
+                        json.jadd(items, "", item)
                     }
-                    json.jadd(item, "id", json.jint(atoi(idstr)))
-                    json.jadd(item, "name", json.jstr(nm))
-                    json.jadd(items, "", item)
+                    r = r.next
                 }
-                r = r.next
+                res := json.jobj()
+                json.jadd(res, "items", items)
+                body = json.tojson(res) + "\n"
             }
-            res := json.jobj()
-            json.jadd(res, "items", items)
-            body = json.tojson(res) + "\n"
+        } else {
+            // /items speaks POST+GET only — other methods get a status
+            // instead of falling through to the item list
+            status = 405
+            body = "{\"error\":\"method not allowed\"}\n"
         }
     }
     return http.Resp{status: status, body: body}

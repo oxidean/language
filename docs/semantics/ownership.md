@@ -15,11 +15,15 @@ contract the typechecker, codegen, and runtime are built against.
 
 ## Allocation sites
 
-- **Scope arena (default).** `new(T)` inside a scope allocates in the
-  enclosing scope's arena. Arena memory is bulk-freed when the scope
-  closes. Arena objects may NOT escape their scope — the typechecker
-  rejects returning, storing into outer structures, or sending arena
-  references up-scope.
+- **Scope arena (default).** Plain allocations inside a scope —
+  params, locals, temporaries — come from the enclosing scope's arena.
+  Arena memory is bulk-freed when the scope closes. Arena objects may
+  NOT escape their scope — the typechecker rejects returning, storing
+  into outer structures, or sending arena references up-scope.
+  `new(T)` is the exception: it allocates via `rt_alloc_own` (owned
+  heap), so the result is NOT scope-tracked and is NOT bulk-freed when
+  the scope closes — it lives until `rt_free` or the owning handle's
+  death (see below).
 - **Owned heap.** `own new(T)` (or the `own` keyword on an allocation)
   produces an `own T` handle valid until its owner dies. Ownership moves
   on assignment/argument/return; after a move the old handle is dead —
@@ -51,11 +55,15 @@ reliable. `new(expr)` heap-boxes a *value*: `new(E.V(...))` yields
 Each checked heap object carries a header:
 
 ```c
-typedef struct {
-    uint32_t gen;        // generation tag — dangling detection
-    uint8_t  borrow;     // 0 = free, 1 = shared-readers>0, 2 = mut-held
-    uint8_t  arena;      // arena-owned flag
-} ObjHdr;
+typedef struct ObjHdr {
+    uint32_t gen;            // generation tag — dangling detection
+    uint8_t  borrow;         // 0 = free, 1 = shared-readers>0, 2 = mut-held
+    uint8_t  arena;          // arena-owned flag
+    uint8_t  poisoned;       // owner trapped mid-mutation — next access traps
+    uint8_t  _pad;
+    RtScope *hscope;         // owning scope for heap-fallback blocks
+    struct ObjHdr *hnext;    // scope heap-list link
+} ObjHdr;                    // 24 bytes on x86_64
 ```
 
 Checks are emitted at every borrow activation and every dereference

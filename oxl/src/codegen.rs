@@ -1552,6 +1552,11 @@ impl<'a> Gen<'a> {
                         format!("{rv}.data")
                     } else { rv.clone() };
                     format!("({le} {cop} (void*){re})")
+                } else if *op == BinOp::Mul && self.dt(&lt) == Ty::Int {
+                    // signed int64 overflow is UB in C — the language's
+                    // int mul wraps, so emit through unsigned where -O2
+                    // can't exploit it (stdlib fnv relies on the wrap)
+                    format!("((int64_t)((uint64_t)({lv}) * (uint64_t)({rv})))")
                 } else {
                     format!("({lv} {cop} {rv})")
                 }

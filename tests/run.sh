@@ -285,9 +285,13 @@ grep -q "bounces=5000" <<<"$out" || { echo "FAIL ping: $out"; exit 1; }
 echo "== a2 select =="
 out=$("$OXL" run tests/select.oxl)
 [ "$(tail -1 <<<"$out")" = "select done" ] || { echo "FAIL select: $out"; exit 1; }
-# parked select must unwedge on sibling trap — exits nonzero, not a hang
-if with_timeout 10 "$OXL" run tests/select_cancel.oxl >/dev/null 2>&1; then
-    echo "FAIL select_cancel: expected nonzero exit"; exit 1
+# parked select must unwedge on sibling trap — exits nonzero, not a hang.
+# 124 = with_timeout expiry = the hang this test exists to catch; a
+# compile error also returns nonzero, so accept only a fast trap exit
+rc=0
+with_timeout 10 "$OXL" run tests/select_cancel.oxl >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
+    echo "FAIL select_cancel: expected trap exit, got rc=$rc"; exit 1
 fi
 
 echo "== a3 buffered channels =="

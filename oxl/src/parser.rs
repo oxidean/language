@@ -95,6 +95,15 @@ impl<'a> Parser<'a> {
             Tok::Eof => "end of file".into(),
         }
     }
+    /// item-start keywords, same set `item()` dispatches on — recovery
+    /// must resume at one of these or stray tokens re-diagnose forever
+    fn item_start(k: Kw) -> bool {
+        matches!(
+            k,
+            Kw::Struct | Kw::Enum | Kw::Interface | Kw::Let | Kw::Extern | Kw::Fn | Kw::Import
+        )
+    }
+
     fn skip_to_item_boundary(&mut self) {
         let mut depth = 0i32;
         while !self.at_eof() {
@@ -107,7 +116,7 @@ impl<'a> Parser<'a> {
                     }
                     depth -= 1;
                 }
-                _ if depth == 0 => return,
+                Tok::Kw(k) if depth == 0 && Self::item_start(k) => return,
                 _ => {}
             }
             self.bump();
@@ -646,6 +655,17 @@ impl<'a> Parser<'a> {
         e
     }
 
+    /// expr with struct literals re-enabled: a `{` nested inside
+    /// parens/brackets can't be a block start, so cond_expr's no_lit
+    /// must not leak through these delimiters
+    fn expr_allow_lit(&mut self) -> Option<Expr> {
+        let old = self.no_lit;
+        self.no_lit = false;
+        let e = self.expr(0, false);
+        self.no_lit = old;
+        e
+    }
+
     // ---- expressions (pratt) ----
     fn expr(&mut self, min_bp: u8, call_only: bool) -> Option<Expr> {
         let mut lhs = self.unary()?;
@@ -709,7 +729,7 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let mut args = Vec::new();
                     while !self.eat_p(P::RParen) && !self.at_eof() {
-                        args.push(self.expr(0, false)?);
+                        args.push(self.expr_allow_lit()?);
                         if !self.eat_p(P::Comma) {
                             self.expect_p(P::RParen, "`)`");
                             break;
@@ -744,12 +764,12 @@ impl<'a> Parser<'a> {
                     if self.cur().tok == Tok::P(P::Colon) {
                         is_slice = true;
                     } else if self.cur().tok != Tok::P(P::RBracket) {
-                        lo = Some(Box::new(self.expr(0, false)?));
+                        lo = Some(Box::new(self.expr_allow_lit()?));
                     }
                     if self.eat_p(P::Colon) {
                         is_slice = true;
                         if self.cur().tok != Tok::P(P::RBracket) {
-                            hi = Some(Box::new(self.expr(0, false)?));
+                            hi = Some(Box::new(self.expr_allow_lit()?));
                         }
                     }
                     self.expect_p(P::RBracket, "`]`");
@@ -851,7 +871,7 @@ impl<'a> Parser<'a> {
             }
             Tok::P(P::LParen) => {
                 self.bump();
-                let e = self.expr(0, false)?;
+                let e = self.expr_allow_lit()?;
                 self.expect_p(P::RParen, "`)`");
                 Some(e)
             }

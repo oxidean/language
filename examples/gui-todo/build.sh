@@ -4,7 +4,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-OXL=${OXL:-../../oxl/target/release/oxl}
+if [ -z "${OXL:-}" ]; then
+    # source checkout builds into oxl/target/release; the packaged
+    # toolchain drops `oxl` at the root next to stdlib/ + examples/
+    if [ -x ../../oxl/target/release/oxl ]; then
+        OXL=../../oxl/target/release/oxl
+    else
+        OXL=../../oxl
+    fi
+fi
 GTK_CFLAGS=$(pkg-config --cflags gtk4)
 GTK_LIBS=$(pkg-config --libs gtk4)
 

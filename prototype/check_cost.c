@@ -33,7 +33,7 @@ static inline int64_t read_checked(Obj *o, uint32_t gen) {
 
 static double bench(int64_t (*fn)(Obj *, uint32_t), Obj *objs) {
     struct timespec a, b;
-    volatile int64_t sink = 0;
+    int64_t sink = 0; /* plain local — volatile would time the accumulator too */
     clock_gettime(CLOCK_MONOTONIC, &a);
     for (int it = 0; it < N_ITERS; it++)
         for (int i = 0; i < N_OBJS; i++)

@@ -28,6 +28,17 @@ extern fn setsockopt(fd: int, lvl: int, opt: int, v: ref intp, n: int) -> int
 // reclaim them, so a per-request scratch must be freed by hand
 extern fn rt_free(p: mut void)
 
+// signal(2): SIGPIPE(13) + SIG_IGN(1) — a client that resets mid-write
+// must not kill the process before write() returns an error
+extern fn signal(sig: int, handler: int) -> int
+
+// heap try-scope for per-conn trap containment — the runtime's
+// documented contract (rt_scope_try): join returns the trap code
+// instead of propagating it to the parent scope
+extern fn rt_scope_new() -> own void
+
+extern fn rt_scope_join_free(s: mut void) -> int
+
 struct sockaddr { a: int, b: int } // 16 bytes: sockaddr_in fits
 
 struct intp { v: int }
@@ -52,6 +63,9 @@ fn status_text(status: int) -> str {
     if status == 404 {
         return "Not Found"
     }
+    if status == 405 {
+        return "Method Not Allowed"
+    }
     if status == 500 {
         return "Internal Server Error"
     }
@@ -72,6 +86,16 @@ let MAX_CONN = 64
 fn conn_cleanup(fd: int, inflight: shared) {
     close(fd)
     sadd(inflight, -1)
+}
+
+/// runs one request through the handler and writes the response.
+/// Spawned inside the conn's try-scope — a trap in here marks only
+/// that scope, so serve's shared scope and every sibling connection
+/// survive a bad handler
+fn route_serve(h: Handler, method: str, path: str, body: str, fd: int) {
+    r := h.route(method, path, body)
+    resp := http_resp(r.status, r.body)
+    write(fd, cstr(resp), len(resp))
 }
 
 fn handle_conn(h: Handler, fd: int, inflight: shared) {
@@ -98,9 +122,16 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
                 body = substr(req, hdr_end + 4, len(req))
             }
 
-            r := h.route(method, path, body)
-            resp := http_resp(r.status, r.body)
-            write(fd, cstr(resp), len(resp))
+            // per-conn trap containment: route_serve runs as a nested
+            // task inside a heap try-scope. Its trap stops at
+            // rt_scope_join_free instead of propagating through serve's
+            // shared spawn scope and cancelling sibling handlers
+            rsc := rt_scope_new()
+            spawnBlocking route_serve(h, method, path, body, fd)
+            if rt_scope_join_free(rsc) != 0 {
+                resp := http_resp(500, "handler trapped\n")
+                write(fd, cstr(resp), len(resp))
+            }
         } else {
             rt_free(buf) // unread/failed read: scratch still must die
         }
@@ -109,6 +140,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
 
 /// listen+serve on port; dispatches `h.route` per request
 fn serve(port: int, h: Handler) {
+    signal(13, 1) // SIGPIPE, SIG_IGN — reset clients must not kill us
     srv := socket(2, 1, 0) // AF_INET, SOCK_STREAM
     one := new(intp)
     one.v = 1

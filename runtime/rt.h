@@ -63,6 +63,15 @@ struct RtScope {
      * the frame */
     RtTask *owner;
     volatile int orphan;
+    /* descendants: a scope entered while this is tls_scope links into
+     * `children` so a trap can cancel+wake the whole subtree — tasks
+     * parked in nested scopes aren't on the trapping task's ancestor
+     * chain. `dead` marks a scope whose teardown already committed;
+     * trap walks skip it (its mu may be destroyed any moment). */
+    struct RtScope *children;
+    struct RtScope *sib;    /* next sibling in parent->children */
+    struct RtScope *wnext;  /* scratch wake-list link, owned by rt_trap */
+    volatile int dead;
     /* arena: bump allocator freed on leave */
     char *arena_buf;
     int64_t arena_off, arena_cap;
@@ -78,6 +87,8 @@ void rt_scope_leave(RtScope *s);
 int rt_scope_try(RtScope *s); /* join; return trap code without propagating */
 int rt_scope_join_poll(RtScope *s, RtTask *t); /* frame join: READY/PENDING */
 int rt_scope_finish(RtScope *s);              /* post-join teardown -> err */
+void *rt_scope_new(void);                     /* heap scope: opaque size for lib code */
+int64_t rt_scope_join_free(void *s);          /* try-join + free: swallow trap code */
 void rt_spawn(void *(*fn)(void *), void *arg);   /* fn task (non-susp fns) */
 void rt_spawnb(void *(*fn)(void *), void *arg);  /* blocking pool (FFI) */
 RtFrame *rt_task_new(RtPoll poll, int64_t bytes); /* one alloc: task+frame */

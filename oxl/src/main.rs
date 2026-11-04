@@ -918,8 +918,11 @@ fn uri_to_path(uri: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            // decode on bytes — a str slice at i+3 can land mid-char
+            // after a multibyte byte and panic
+            let nib = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+            if let (Some(h), Some(l)) = (nib(b[i + 1]), nib(b[i + 2])) {
+                out.push(h * 16 + l);
                 i += 3;
                 continue;
             }

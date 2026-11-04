@@ -33,9 +33,12 @@ compare + borrow-flag compare + payload load, branch-predictable.
 | overhead | −0.7%…+3.8% — **within measurement noise** |
 
 Two well-predicted branches sit under the load the access already pays.
-Checks are effectively free on hot paths; the real cost is the 8-byte
-header per heap object and the checks that survive into cold paths —
-both bounded. Elision (proving safe sites statically) remains upside,
+Checks are effectively free on hot paths; the real cost is the object
+header per heap object — 24 bytes on x86_64 (`runtime/rt.h`'s `ObjHdr`:
+gen + borrow/arena/poisoned + the scope heap-list links; the synthetic
+8-byte header in `check_cost.c` only models the check fields, not the
+full runtime layout) — and the checks that survive into cold paths.
+Both bounded. Elision (proving safe sites statically) remains upside,
 not a requirement.
 
 ## Verdict: GO

@@ -809,11 +809,13 @@ fn atomic(e: &Expr) -> bool {
     )
 }
 
-/// ops where `a op (b op' c)` at equal precedence re-associates safely
+/// ops where `a op (b op' c)` at equal precedence re-associates safely.
+/// Add/Mul are excluded: the formatter can't prove int vs float operands,
+/// and float +/* are not associative — their parens must be kept.
 fn assoc(op: BinOp) -> bool {
     matches!(
         op,
-        BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or | BinOp::BitAnd | BinOp::BitOr | BinOp::Xor
+        BinOp::And | BinOp::Or | BinOp::BitAnd | BinOp::BitOr | BinOp::Xor
     )
 }
 

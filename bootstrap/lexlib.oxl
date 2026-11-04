@@ -84,6 +84,22 @@ fn lex(src: str) -> own Tok {
             }
             continue
         }
+        if c == 47 && byteat(src, i + 1) == 42 { // /* ... */ comment
+            i = i + 2
+            for i + 1 < len(src) && !(byteat(src, i) == 42 && byteat(src, i + 1) == 47) {
+                if byteat(src, i) == 10 {
+                    ln = ln + 1
+                }
+                i = i + 1
+            }
+            // unterminated comments end the scan without walking past
+            // the source — same clamp as the Rust lexer
+            i = i + 2
+            if i > len(src) {
+                i = len(src)
+            }
+            continue
+        }
         if is_alpha(c) {
             a := i
             for i < len(src) && (is_alpha(byteat(src, i)) || is_digit(byteat(src, i))) {

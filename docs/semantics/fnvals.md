@@ -37,6 +37,13 @@ creating scope) at closure creation; later writes to the outer variable don't re
 (and vice versa). A closure may not re-bind a captured name — the
 checker reports the shadow instead of silently aliasing.
 
+Caveat — slice captures: a non-`own` slice copies only its header
+(`ptr`, `len`, `cap`); the backing storage stays in the creating
+scope's arena and is bulk-freed when that scope closes. A closure that
+captures such a slice must not be called after the scope ends — the
+elements dangle. Copy the slice into `own` storage (`new(slice)`)
+before capturing, or keep the closure inside the creating scope.
+
 ## Representation
 
 Every function value is an `RtFnv` fat pair `{ void *env, void *fp }`

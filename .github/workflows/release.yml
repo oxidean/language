@@ -24,6 +24,10 @@ jobs:
           mkdir -p dist/oxl-toolchain
           cp oxl/target/release/oxl dist/oxl-toolchain/
           cp -r stdlib examples dist/oxl-toolchain/
+          # gui_shim.c includes ../../runtime/rt.h — ship the header at
+          # the same relative spot so the packaged example still builds
+          mkdir -p dist/oxl-toolchain/runtime
+          cp runtime/rt.h dist/oxl-toolchain/runtime/
           cp LICENSE dist/oxl-toolchain/
           # the repo README documents building from oxl/ and other paths
           # the archive doesn't ship — give it release-specific steps
