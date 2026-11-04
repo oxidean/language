@@ -3,13 +3,13 @@
 ## Problem
 
 The checker's env scopes, fn tables, and generic-instantiation maps are
-`map[str]T`-shaped; `bootstrap/check.lang` needs real associative
+`map[str]T`-shaped; `bootstrap/check.oxl` needs real associative
 containers — linked lists at O(n) is fine for v0 but the *API shape*
 should be real now so the port doesn't invent its own.
 
 ## Design sketch
 
-Written in `.lang` (stdlib convention):
+Written in `.oxl` (stdlib convention):
 
 ```
 m := map_new()
@@ -33,7 +33,7 @@ s := set_new(); set_add(s, "x"); set_has(s, "x")
 
 - 10k set/get, no collisions bug, `map_get` miss returns `err != nil`
 - delete removes correctly
-- `bootstrap/check.lang` env uses `std/collections` (acceptance is the
+- `bootstrap/check.oxl` env uses `std/collections` (acceptance is the
   port itself using it)
 
 ## Depends on

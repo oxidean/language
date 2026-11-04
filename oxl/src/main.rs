@@ -12,7 +12,7 @@ use std::process::{exit, Command, Stdio};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("lang — one toolchain binary\n\n  lang build <file.lang> [-o out]\n  lang run <file.lang>\n  lang test <file.lang>\n  lang fmt <file.lang>\n  lang doc <file.lang>\n  lang lsp");
+        eprintln!("oxl — one toolchain binary\n\n  oxl build <file.oxl> [-o out]\n  oxl run <file.oxl>\n  oxl test <file.oxl>\n  oxl fmt <file.oxl>\n  oxl doc <file.oxl>\n  oxl lsp");
         exit(2);
     }
     match args[1].as_str() {
@@ -33,14 +33,14 @@ fn main() {
 /// under any ancestor of the importing file (for `std/...` paths)
 fn resolve_import(from_file: &Path, imp: &str) -> Option<PathBuf> {
     let mut cand = imp.to_string();
-    if !cand.ends_with(".lang") {
-        cand.push_str(".lang");
+    if !cand.ends_with(".oxl") {
+        cand.push_str(".oxl");
     }
     let rel = from_file.parent().unwrap_or(Path::new(".")).join(&cand);
     if rel.exists() {
         return Some(rel);
     }
-    // std/x -> <ancestor>/stdlib/x.lang walking up from the importing file
+    // std/x -> <ancestor>/stdlib/x.oxl walking up from the importing file
     let stripped = cand.strip_prefix("std/").unwrap_or(&cand);
     let mut dir = from_file.parent().map(Path::to_path_buf);
     while let Some(d) = dir {
@@ -58,7 +58,7 @@ fn mod_stem(path: &Path) -> String {
     path.file_stem().unwrap_or_default().to_string_lossy().to_string()
 }
 
-/// rename a lang identifier through this module's maps:
+/// rename an oxl identifier through this module's maps:
 /// `a.b` -> alias-mapped `stem.b`; bare `n` -> own-decl `mod.n` / selective `s.n`
 fn map_name(
     n: &str,
@@ -384,7 +384,7 @@ fn cmd_run(args: &[String]) {
     let file = &args[2];
     match compile(file) {
         Ok(c) => {
-            let dir = std::env::temp_dir().join(format!("lang-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("oxl-{}", std::process::id()));
             let out = dir.join("a.out");
             if !emit_and_cc(&c, &out) {
                 exit(1);
@@ -405,7 +405,7 @@ fn cmd_test(args: &[String]) {
     let file = &args[2];
     match compile_mode(file, true) {
         Ok(c) => {
-            let dir = std::env::temp_dir().join(format!("lang-test-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("oxl-test-{}", std::process::id()));
             let out = dir.join("a.out");
             if !emit_and_cc(&c, &out) {
                 exit(1);

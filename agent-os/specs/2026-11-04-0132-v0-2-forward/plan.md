@@ -42,7 +42,7 @@ after A1 lands to avoid churning the channel internals twice.
 ### Task B1: `enum` tagged unions [not started]
 
 `items/b1-enum.md`. Highest leverage: the AST is a tagged-union
-problem and `bootstrap/check.lang` is blocked without it.
+problem and `bootstrap/check.oxl` is blocked without it.
 
 ### Task B2: `match` [not started]
 
@@ -68,14 +68,14 @@ existing primitives. The checker's env/fn tables consume it.
 
 ## Track C — Self-host compiler (sequential after B)
 
-### Task C1: `bootstrap/check.lang` [not started]
+### Task C1: `bootstrap/check.oxl` [not started]
 
 `items/c1-check.md`. Typechecker in the language. Needs B1, B2, B6.
 
-### Task C2: `bootstrap/codegen.lang` [not started]
+### Task C2: `bootstrap/codegen.oxl` [not started]
 
 `items/c2-codegen.md`. Emits C against `runtime/` — the last piece
-before the classic bootstrap chain (self-compiled `lang` compiles
+before the classic bootstrap chain (self-compiled `oxl` compiles
 itself). Needs C1 + B3.
 
 ## Track D — Type-system depth (parallel-safe)
@@ -120,7 +120,7 @@ stdlib grows further.
 
 `items/e2-ast-fmt.md`. Replaces the lexical normalizer with a real
 pretty-printer over the AST. Cheap once B-landed (could even be written
-in `.lang` on the self-hosted parser's AST).
+in `.oxl` on the self-hosted parser's AST).
 
 ### Task E3: platform matrix [not started]
 

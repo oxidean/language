@@ -36,7 +36,7 @@ pub fn callee_name(e: &Expr) -> Option<String> {
 }
 
 /// top-level `let name[: ty] = init` — process-wide state, initialized
-/// in lang_main prologue (order: before user main runs)
+/// in oxl_main prologue (order: before user main runs)
 #[derive(Debug)]
 pub struct Global {
     pub name: String,

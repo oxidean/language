@@ -2,9 +2,9 @@
 
 ## Problem
 
-The AST is a tagged-union problem. `bootstrap/parser.lang` models it
+The AST is a tagged-union problem. `bootstrap/parser.oxl` models it
 with `std/json` nodes and kind ints — works, but verbose and
-type-unsafe. `bootstrap/check.lang` (the next self-host component) is
+type-unsafe. `bootstrap/check.oxl` (the next self-host component) is
 genuinely blocked: it needs real sum types for `ExprKind`, `Ty`, `Item`.
 
 ## Design sketch
@@ -34,7 +34,7 @@ enum ExprKind {
 
 ## Acceptance
 
-- `bootstrap/parser.lang`'s `Json`-tree replaced by a typed `Expr`
+- `bootstrap/parser.oxl`'s `Json`-tree replaced by a typed `Expr`
   enum — same output, typed internals
 - Round-trip: `ExprKind::Bin{...}` constructed, matched, read back
 - Payloads: int, str, `own` struct, nested `own` enum — all work

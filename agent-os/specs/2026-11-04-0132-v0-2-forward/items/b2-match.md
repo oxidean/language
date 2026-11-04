@@ -31,7 +31,7 @@ match e.kind {
 - All variants covered: compiles; missing one: error naming the variant
 - Payload binding (positional + named) yields correctly-typed locals
 - Expression-position `match` unifies arm types
-- `bootstrap/parser.lang` rewritten to `match` where if-chains
+- `bootstrap/parser.oxl` rewritten to `match` where if-chains
   currently dispatch (proves the ergonomic gain, keeps CI honest)
 
 ## Depends on

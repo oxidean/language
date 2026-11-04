@@ -20,7 +20,7 @@ feature early adopters hit within minutes of opening a file.
 ## Acceptance
 
 - Hover over `jadd` → `fn jadd(parent: own Json, key: str, val: own Json)`
-- Goto on `lex(` in `parser.lang` → jumps to `lexlib.lang:51` (imports
+- Goto on `lex(` in `parser.oxl` → jumps to `lexlib.oxl:51` (imports
   resolve to the definition file)
 - Diagnostics keep working; index rebuilds on didChange
 

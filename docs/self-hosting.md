@@ -4,11 +4,11 @@ The goal: the compiler, written in the language, compiled by itself.
 
 **Done so far — the entire frontend is self-hosted:**
 
-- `bootstrap/lexlib.lang` — a working lexer for `.lang`, written in
-  `.lang` (shared library: token kinds, `lex`, cursor helpers)
-- `bootstrap/lexer.lang` — thin driver over lexlib (token dump)
-- `bootstrap/parser.lang` — a recursive-descent parser for `.lang`,
-  written in `.lang`, emitting the AST as JSON via `std/json`.
+- `bootstrap/lexlib.oxl` — a working lexer for `.oxl`, written in
+  `.oxl` (shared library: token kinds, `lex`, cursor helpers)
+- `bootstrap/lexer.oxl` — thin driver over lexlib (token dump)
+- `bootstrap/parser.oxl` — a recursive-descent parser for `.oxl`,
+  written in `.oxl`, emitting the AST as JSON via `std/json`.
   **It parses itself with zero skipped tokens** — full round-trip.
 
 Both components are compiled by the Rust bootstrap compiler and run in
@@ -45,14 +45,14 @@ Ordered by what the checker/codegen port actually needs:
 ## Path
 
 ```
-bootstrap/lexlib.lang   (done — tokenizes .lang, shared library)
-bootstrap/lexer.lang    (done — token-dump driver)
-bootstrap/parser.lang   (done — AST → JSON, self-parses clean)
-bootstrap/check.lang    (next — needs maps or long if-chains)
-bootstrap/codegen.lang  (emits C, links against runtime/)
+bootstrap/lexlib.oxl   (done — tokenizes .oxl, shared library)
+bootstrap/lexer.oxl    (done — token-dump driver)
+bootstrap/parser.oxl   (done — AST → JSON, self-parses clean)
+bootstrap/check.oxl    (next — needs maps or long if-chains)
+bootstrap/codegen.oxl  (emits C, links against runtime/)
 ```
 
-At that point `lang` (Rust) is only needed to *first-compile* the
+At that point `oxl` (Rust) is only needed to *first-compile* the
 self-hosted compiler — the classic bootstrap chain. The interim C
 backend stays the codegen target through this; the state-machine
 transform lands independently of self-hosting.
@@ -60,6 +60,6 @@ transform lands independently of self-hosting.
 ## Keeping the claim honest
 
 `tests/run.sh` runs both bootstrap components in CI: the lexer over
-`examples/hello.lang` and the parser over `features.lang` *and itself*
+`examples/hello.oxl` and the parser over `features.oxl` *and itself*
 (asserting zero skipped tokens both ways). "The language can parse
 itself" is tested on every push.

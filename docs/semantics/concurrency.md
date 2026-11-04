@@ -2,7 +2,7 @@
 
 ## Surface
 
-```lang
+```oxl
 scope {
     spawn worker(a, b)      // task in this scope
     go pump(ch)             // shorthand: fire within scope
@@ -40,7 +40,7 @@ downstream track. Transition to stackless frames is ABI-internal.
 
 ## Channels
 
-```lang
+```oxl
 ch := mkchan()          // unbuffered, ownership-typed
 send(ch, v)             // moves v into the channel; v dead after
 [v, ok] := recv(ch)     // ok=false when closed+empty

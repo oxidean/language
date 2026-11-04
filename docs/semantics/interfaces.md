@@ -36,7 +36,7 @@ send recv chan own ref mut unsafe nil true false import`
 ## AST (parser output)
 
 `Crate { items: Vec<Item> }` where `Item = Fn | Struct | Extern | Import`.
-Expressions/statements per `lang/src/ast.rs` — the AST is deliberately
+Expressions/statements per `oxl/src/ast.rs` — the AST is deliberately
 syntactic (no desugaring in parser except `x := e` → `Let{infer:true}`).
 
 ## TAST (typechecker output)
@@ -74,7 +74,7 @@ pool, channels, and the `extern` FFI shim table.
 | `rt_scope_enter/leave` | trap containment + sibling cancel |
 | `rt_spawn(fn, args, scope)` / `rt_send/recv/close` | executor + channels |
 | `rt_trap(code)` | raise trap at current scope boundary |
-| `lang_main()` | emitted entry; `main()` lives in rt.c |
+| `oxl_main()` | emitted entry; `main()` lives in rt.c |
 
 ## Error semantics
 

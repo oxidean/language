@@ -1,9 +1,9 @@
-// bootstrap/parser.lang — a parser for .lang, written in .lang.
+// bootstrap/parser.oxl — a parser for .oxl, written in .oxl.
 // Second self-host component: consumes lexlib's token list and emits
 // the AST as JSON via std/json. With the lexer, the entire compiler
 // frontend now exists in-language.
 //
-//   lang run bootstrap/parser.lang -- examples/hello.lang
+//   oxl run bootstrap/parser.oxl -- examples/hello.oxl
 
 import "lexlib"
 import "std/json"
@@ -448,7 +448,7 @@ fn parse(toks: own lexlib.Tok) -> own json.Json {
 
 fn main() {
     if argc() < 2 {
-        println("usage: parser <file.lang>")
+        println("usage: parser <file.oxl>")
         exit(1)
     }
     src := readfile(argv(1))

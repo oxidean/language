@@ -22,8 +22,8 @@
   `select`, buffered channels
 - **Track B (self-host features):** `enum`, `match`, slices `[]T`,
   function values, `defer`, `std/collections` maps/sets
-- **Track C (self-host compiler):** `bootstrap/check.lang`,
-  `bootstrap/codegen.lang` — the full bootstrap chain
+- **Track C (self-host compiler):** `bootstrap/check.oxl`,
+  `bootstrap/codegen.oxl` — the full bootstrap chain
 - **Track D (type depth):** `float`, `own` move tracking, methods +
   interface dispatch, shape-based generics, module qualification
 - **Track E (tooling):** LSP hover/goto, AST-printer fmt, platform

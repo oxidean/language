@@ -40,6 +40,6 @@ stdlib grows much further — each new module widens the migration diff.
 
 ## Risks
 
-- The migration diff touches every `.lang` file — mechanical but wide.
+- The migration diff touches every `.oxl` file — mechanical but wide.
   This is the one explicitly breaking change in the milestone; bundle
   it into a single commit and re-tag.

@@ -1,6 +1,6 @@
-// bootstrap/lexlib.lang — the lexer as a library (no main).
-// Shared by bootstrap/lexer.lang (token dump) and
-// bootstrap/parser.lang (AST → JSON). See docs/self-hosting.md.
+// bootstrap/lexlib.oxl — the lexer as a library (no main).
+// Shared by bootstrap/lexer.oxl (token dump) and
+// bootstrap/parser.oxl (AST → JSON). See docs/self-hosting.md.
 
 import "std/strings"
 

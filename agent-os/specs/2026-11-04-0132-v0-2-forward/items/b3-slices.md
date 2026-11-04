@@ -22,7 +22,7 @@ or `mkbuf`/`poke8` (byte-level, untyped).
 - `mkbuf`-free resizable buffer: push 10k ints, index, slice
 - `len`, bounds-checked index (trap on OOB — same trap machinery)
 - `s[a:b]` view semantics (writes visible in parent)
-- `bootstrap/parser.lang`'s token list optionally moved to `[]Tok` —
+- `bootstrap/parser.oxl`'s token list optionally moved to `[]Tok` —
   measurable allocation drop (document if kept linked for simplicity)
 
 ## Depends on

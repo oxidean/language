@@ -2,7 +2,7 @@
 // Now built on std/http: the server plumbing lives in stdlib, this file
 // only declares the route.
 //
-//   lang run examples/http-crud-sqlite/main.lang
+//   oxl run examples/http-crud-sqlite/main.oxl
 //   curl localhost:8080/items             → list rows
 //   curl -d 'widget' localhost:8080/items → insert row
 
@@ -49,7 +49,7 @@ fn route(method: str, path: str, reqbody: str) -> str {
             body = json.tojson(res) + "\n"
         }
     } else {
-        body = "lang http server — try /items\n"
+        body = "oxl http server — try /items\n"
     }
     return body
 }

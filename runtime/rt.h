@@ -1,4 +1,4 @@
-/* lang runtime — public surface for generated code.
+/* oxl runtime — public surface for generated code.
  * Implements the contracts in docs/semantics/{ownership,concurrency}.md:
  * ObjHdr checks, scope arenas, scope-contained traps, task executor,
  * unbuffered ownership-transfer channels.
@@ -10,7 +10,7 @@
 typedef struct {
     const char *p;
     int64_t n;
-} LangStr;
+} OxlStr;
 
 typedef struct {
     uint32_t gen;
@@ -75,47 +75,47 @@ void rt_close(RtChan *ch);
 
 /* --- misc builtins --- */
 void rt_sleep(int64_t secs);
-LangStr rt_str_lit(const char *s);
-LangStr rt_strcat(LangStr a, LangStr b);
-int rt_streq(LangStr a, LangStr b);
-LangStr rt_itoa(int64_t v);
-LangStr rt_str(const char *s);
-void rt_print_str(LangStr s);
+OxlStr rt_str_lit(const char *s);
+OxlStr rt_strcat(OxlStr a, OxlStr b);
+int rt_streq(OxlStr a, OxlStr b);
+OxlStr rt_itoa(int64_t v);
+OxlStr rt_str(const char *s);
+void rt_print_str(OxlStr s);
 void rt_print_i64(int64_t v);
-void rt_println_str(LangStr s);
+void rt_println_str(OxlStr s);
 void rt_println_i64(int64_t v);
 void rt_print_f64(double v);
 void rt_println_f64(double v);
-const char *rt_cstr(LangStr s);
+const char *rt_cstr(OxlStr s);
 
 /* args + strings + byte buffers (stdlib wave-1 surface) */
 void rt_set_args(int argc, char **argv);
 int64_t rt_argc(void);
-LangStr rt_argv(int64_t i);
-int64_t rt_len(LangStr s);
-int64_t rt_byteat(LangStr s, int64_t i);
-LangStr rt_substr(LangStr s, int64_t a, int64_t b);
-int64_t rt_find(LangStr s, LangStr sub);
-int64_t rt_atoi(LangStr s);
-double rt_atof(LangStr s);
-LangStr rt_ftoa(double v);
+OxlStr rt_argv(int64_t i);
+int64_t rt_len(OxlStr s);
+int64_t rt_byteat(OxlStr s, int64_t i);
+OxlStr rt_substr(OxlStr s, int64_t a, int64_t b);
+int64_t rt_find(OxlStr s, OxlStr sub);
+int64_t rt_atoi(OxlStr s);
+double rt_atof(OxlStr s);
+OxlStr rt_ftoa(double v);
 void *rt_mkbuf(int64_t size);
-LangStr rt_bufstr(void *buf, int64_t n);
+OxlStr rt_bufstr(void *buf, int64_t n);
 void rt_poke8(void *buf, int64_t off, int64_t v);
 void rt_poke16(void *buf, int64_t off, int64_t v);
 void rt_poke32(void *buf, int64_t off, int64_t v);
 int64_t rt_htons(int64_t v);
 int64_t rt_htonl(int64_t v);
-LangStr rt_readfile(LangStr path);
-int64_t rt_writefile(LangStr path, LangStr data);
+OxlStr rt_readfile(OxlStr path);
+int64_t rt_writefile(OxlStr path, OxlStr data);
 void rt_exit(int64_t code);
 
 /* sqlite3 shims — out-param (T**) FFI needs these until the type
  * system gains address-of; direct calls (strlen etc.) use `extern` */
 void *rt_sqlite_open(const char *path);
 int64_t rt_sqlite_exec(void *db, const char *sql);
-LangStr rt_sqlite_query(void *db, const char *sql);
+OxlStr rt_sqlite_query(void *db, const char *sql);
 void rt_sqlite_close(void *db);
 
-/* entry: generated code provides lang_main() */
-void lang_main(void);
+/* entry: generated code provides oxl_main() */
+void oxl_main(void);

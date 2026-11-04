@@ -7,9 +7,9 @@ fn test_args() {
 }
 
 fn test_file() {
-    n := os.writefile_("/tmp/lang-ostest.txt", "hello os")
+    n := os.writefile_("/tmp/oxl-ostest.txt", "hello os")
     testing.expect(n == 0, "write ok")
-    testing.expect_streq(os.readfile_("/tmp/lang-ostest.txt"), "hello os", "read back")
+    testing.expect_streq(os.readfile_("/tmp/oxl-ostest.txt"), "hello os", "read back")
 }
 
 fn main() {}

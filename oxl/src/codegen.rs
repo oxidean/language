@@ -10,7 +10,7 @@ pub fn runtime_files() -> (&'static str, &'static str) {
     (RT_H, RT_C)
 }
 
-/// lang `mod.name` -> C identifier `mod_name`
+/// oxl `mod.name` -> C identifier `mod_name`
 fn cname(n: &str) -> String {
     n.replace('.', "_")
 }
@@ -131,7 +131,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
     // struct defs
     for it in &c.items {
         if let Item::Struct(s) = it {
-            let _ = writeln!(out, "struct l_s_{} {{", cname(&s.name));
+            let _ = writeln!(out, "struct o_s_{} {{", cname(&s.name));
             for f in &s.fields {
                 let _ = writeln!(out, "    {} f_{};", g.cty(&g.ty_of_ref(&f.ty)), f.name);
             }
@@ -145,7 +145,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
             if f.ty_params.is_empty() {
                 if let RetTy::Pair(t) = &f.ret {
                     let _ = writeln!(
-                        out, "struct l_ret_{} {{ {} val; int64_t err; }};",
+                        out, "struct o_ret_{} {{ {} val; int64_t err; }};",
                         cname(&f.name), g.cty(&g.ty_of_ref(t))
                     );
                 }
@@ -153,11 +153,11 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
         }
     }
 
-    // file-scope globals (initialized in lang_main prologue)
+    // file-scope globals (initialized in oxl_main prologue)
     for it in &c.items {
         if let Item::Global(gl) = it {
             let t = g.globals.get(&gl.name).cloned().unwrap_or(Ty::Int);
-            let _ = writeln!(out, "static {} l_g_{};", g.cty(&t), cname(&gl.name));
+            let _ = writeln!(out, "static {} o_g_{};", g.cty(&t), cname(&gl.name));
         }
     }
 
@@ -195,23 +195,23 @@ pub fn generate_mode(c: &Crate, test_mode: bool) -> String {
             g.func_inst(f, &mangled, &bind);
         }
     }
-    // global initializers run first inside lang_main (base scope exists)
+    // global initializers run first inside oxl_main (base scope exists)
     let mut global_inits = String::new();
     for it in &c.items {
         if let Item::Global(gl) = it {
             let v = g.expr(&gl.init);
-            let _ = writeln!(global_inits, "    l_g_{} = {v};", cname(&gl.name));
+            let _ = writeln!(global_inits, "    o_g_{} = {v};", cname(&gl.name));
         }
     }
     if test_mode {
-        let _ = writeln!(g.out, "void lang_main(void) {{");
+        let _ = writeln!(g.out, "void oxl_main(void) {{");
         g.out.push_str(&global_inits);
         let mut id = 0usize;
         for it in &c.items {
             if let Item::Fn(f) = it {
                 if f.name.starts_with("test_") {
                     let _ = writeln!(g.out,
-                        "    {{ RtScope _t{id}; rt_scope_enter(&_t{id}); l_f_{cn}(); int _e{id} = rt_scope_try(&_t{id});\n      rt_print_str(rt_str(\"  {n} ... \")); rt_println_str(rt_str(_e{id} ? \"FAIL\" : \"ok\")); }}",
+                        "    {{ RtScope _t{id}; rt_scope_enter(&_t{id}); o_f_{cn}(); int _e{id} = rt_scope_try(&_t{id});\n      rt_print_str(rt_str(\"  {n} ... \")); rt_println_str(rt_str(_e{id} ? \"FAIL\" : \"ok\")); }}",
                         cn = cname(&f.name), n = f.name, id = id);
                     id += 1;
                 }
@@ -299,20 +299,20 @@ impl<'a> Gen<'a> {
             Ty::Int | Ty::Err => "int64_t".into(),
             Ty::Float => "double".into(),
             Ty::Bool => "int".into(),
-            Ty::Str => "LangStr".into(),
+            Ty::Str => "OxlStr".into(),
             Ty::CStr => "const char*".into(),
             Ty::Void => "void".into(),
             Ty::Chan => "RtChan*".into(),
-            Ty::Struct(n) => format!("struct l_s_{}", cname(n)),
+            Ty::Struct(n) => format!("struct o_s_{}", cname(n)),
             Ty::Var(v) => self
                 .subst
                 .get(v)
                 .map(|t| self.cty(t))
                 .unwrap_or_else(|| "int64_t".into()),
             Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
-                Ty::Struct(n) => format!("struct l_s_{}*", cname(n)),
+                Ty::Struct(n) => format!("struct o_s_{}*", cname(n)),
                 Ty::Var(v) => match self.subst.get(v) {
-                    Some(Ty::Struct(n)) => format!("struct l_s_{}*", cname(n)),
+                    Some(Ty::Struct(n)) => format!("struct o_s_{}*", cname(n)),
                     _ => "void*".into(),
                 },
                 _ => "void*".into(),
@@ -329,7 +329,7 @@ impl<'a> Gen<'a> {
         let (name, ret_c) = if is_extern {
             (f.name.clone(), self.ret_decl(f, false))
         } else {
-            (format!("l_f_{}", cname(&f.name)), self.ret_decl(f, true))
+            (format!("o_f_{}", cname(&f.name)), self.ret_decl(f, true))
         };
         let params: Vec<String> = f
             .params
@@ -340,13 +340,13 @@ impl<'a> Gen<'a> {
         let _ = writeln!(out, "{ret_c} {name}({params});");
     }
 
-    fn ret_decl(&self, f: &Fn, is_lang: bool) -> String {
+    fn ret_decl(&self, f: &Fn, is_oxl: bool) -> String {
         match &f.ret {
             RetTy::Void => "void".into(),
             RetTy::One(t) => self.pty(&self.ty_of_ref(t)),
             RetTy::Pair(_) => {
-                if is_lang {
-                    format!("struct l_ret_{}", cname(&f.name))
+                if is_oxl {
+                    format!("struct o_ret_{}", cname(&f.name))
                 } else {
                     "int64_t".into()
                 }
@@ -362,7 +362,7 @@ impl<'a> Gen<'a> {
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
         let params = if params.is_empty() { "void".into() } else { params.join(", ") };
-        let _ = writeln!(self.out, "{ret_c} l_f_{}({params}) {{", cname(&f.name));
+        let _ = writeln!(self.out, "{ret_c} o_f_{}({params}) {{", cname(&f.name));
         self.cur_fn = f.name.clone();
         self.cur_ret_pair = matches!(f.ret, RetTy::Pair(_));
         self.defers.clear();
@@ -380,11 +380,11 @@ impl<'a> Gen<'a> {
         self.env.pop();
         let _ = writeln!(self.out, "}}\n");
         if f.name == "main" && !self.test_mode {
-            let _ = writeln!(self.out, "void lang_main(void) {{ /*GLOBALS*/ l_f_main(); }}\n");
+            let _ = writeln!(self.out, "void oxl_main(void) {{ /*GLOBALS*/ o_f_main(); }}\n");
         }
     }
 
-    /// emit a monomorphized copy of generic fn `f` as `l_f_{mangled}`
+    /// emit a monomorphized copy of generic fn `f` as `o_f_{mangled}`
     fn func_inst(&mut self, f: &Fn, mangled: &str, bind: &[(String, Ty)]) {
         let saved_subst = std::mem::replace(
             &mut self.subst,
@@ -395,7 +395,7 @@ impl<'a> Gen<'a> {
         if let RetTy::Pair(t) = &f.ret {
             let _ = writeln!(
                 self.inst_out,
-                "struct l_ret_{} {{ {} val; int64_t err; }};",
+                "struct o_ret_{} {{ {} val; int64_t err; }};",
                 cname(&mangled), self.cty(&self.ty_of_ref(t))
             );
         }
@@ -410,7 +410,7 @@ impl<'a> Gen<'a> {
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
         let params = if params.is_empty() { "void".into() } else { params.join(", ") };
-        let _ = writeln!(self.out, "{ret_c} l_f_{}({params}) {{", cname(&mangled));
+        let _ = writeln!(self.out, "{ret_c} o_f_{}({params}) {{", cname(&mangled));
         self.cur_fn = mangled.to_string();
         self.cur_ret_pair = matches!(f.ret, RetTy::Pair(_));
         self.env.push(HashMap::new());
@@ -439,14 +439,14 @@ impl<'a> Gen<'a> {
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
         let params = if params.is_empty() { "void".into() } else { params.join(", ") };
-        let _ = writeln!(out, "{ret_c} l_f_{}({params});", cname(&name));
+        let _ = writeln!(out, "{ret_c} o_f_{}({params});", cname(&name));
     }
 
     fn ret_decl_named(&self, f: &Fn, name: &str) -> String {
         match &f.ret {
             RetTy::Void => "void".into(),
             RetTy::One(t) => self.pty(&self.ty_of_ref(t)),
-            RetTy::Pair(_) => format!("struct l_ret_{}", cname(&name)),
+            RetTy::Pair(_) => format!("struct o_ret_{}", cname(&name)),
         }
     }
 
@@ -602,7 +602,7 @@ impl<'a> Gen<'a> {
                             Some(bind) => (inst_name(fn_name, &bind), Some(bind)),
                             None => (fn_name.clone(), None),
                         };
-                        let _ = writeln!(self.out, "    struct l_ret_{} _r{n} = {c};", cname(&ret_name));
+                        let _ = writeln!(self.out, "    struct o_ret_{} _r{n} = {c};", cname(&ret_name));
                         let vt = match self.fns.get(fn_name).map(|x| x.1.clone()) {
                             Some(crate::check::Ret::Pair(t)) => match &bind {
                                 Some(bind) => {
@@ -647,7 +647,7 @@ impl<'a> Gen<'a> {
                     let v = self.expr(&vals[0]);
                     let e = self.expr(&vals[1]);
                     let cf = self.cur_fn.clone();
-                    let _ = writeln!(self.out, "    return (struct l_ret_{}){{ {v}, {e} }};", cname(&cf));
+                    let _ = writeln!(self.out, "    return (struct o_ret_{}){{ {v}, {e} }};", cname(&cf));
                 } else if self.cur_ret_pair && vals.len() == 1 {
                     let c = self.expr(&vals[0]);
                     let _ = writeln!(self.out, "    return {c};");
@@ -718,7 +718,7 @@ impl<'a> Gen<'a> {
                 let id = self.tmp();
                 // args struct + trampoline at file scope
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr_ty(a)).collect();
-                let mut tr = format!("struct l_args_{id} {{");
+                let mut tr = format!("struct o_args_{id} {{");
                 for (i, t) in arg_tys.iter().enumerate() {
                     tr.push_str(&format!(" {} a{i};", self.cty(t)));
                 }
@@ -736,16 +736,16 @@ impl<'a> Gen<'a> {
                 }
                 _ => match self.builtin_emit(fn_name, &arg_refs) {
                     Some(b) => format!("{b};"),
-                    None => format!("l_f_{}({});", cname(&fn_name), arg_refs.join(", ")),
+                    None => format!("o_f_{}({});", cname(&fn_name), arg_refs.join(", ")),
                 },
             };
             tr.push_str(&format!(
-                "static void* l_tr_{id}(void* _p) {{ struct l_args_{id}* a = _p; {body} return 0; }}\n"
+                "static void* l_tr_{id}(void* _p) {{ struct o_args_{id}* a = _p; {body} return 0; }}\n"
             ));
                 self.trampolines.push_str(&tr);
                 // call site
                 let _ = writeln!(self.out,
-                    "    {{ struct l_args_{id}* a = rt_alloc(sizeof(struct l_args_{id}));");
+                    "    {{ struct o_args_{id}* a = rt_alloc(sizeof(struct o_args_{id}));");
                 for (i, arg) in args.iter().enumerate() {
                     let v = self.expr(arg);
                     let _ = writeln!(self.out, "      a->a{i} = {v};");
@@ -764,10 +764,10 @@ impl<'a> Gen<'a> {
             ExprKind::Bool(b) => format!("{b}"),
             ExprKind::Nil => "0".into(),
             ExprKind::Ident(n) => {
-                // locals shadow globals; a bare global emits l_g_name
+                // locals shadow globals; a bare global emits o_g_name
                 let local = self.env.iter().skip(1).any(|s| s.contains_key(n));
                 if !local && self.globals.contains_key(n) {
-                    format!("l_g_{}", cname(&n))
+                    format!("o_g_{}", cname(&n))
                 } else {
                     n.clone()
                 }
@@ -786,7 +786,7 @@ impl<'a> Gen<'a> {
                     .map(|(n, fe)| format!(".f_{n} = {}", self.expr(fe)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("(struct l_s_{}){{ {init} }}", cname(&name))
+                format!("(struct o_s_{}){{ {init} }}", cname(&name))
             }
             ExprKind::Bin { op, l, r } => {
                 let lt = self.expr_ty(l);
@@ -871,23 +871,23 @@ impl<'a> Gen<'a> {
                 }
                 "new" => {
                     if let ExprKind::Ident(sn) = &args[0].kind {
-                        return format!("(struct l_s_{0}*)rt_alloc(sizeof(struct l_s_{0}))", cname(&sn));
+                        return format!("(struct o_s_{0}*)rt_alloc(sizeof(struct o_s_{0}))", cname(&sn));
                     }
                 }
                 _ => {
                     if let Some(b) = self.builtin_emit(name, &argvs) {
                         return b;
                     }
-                    let lang = self.fns.contains_key(name) && !self.externs.contains(name);
-                    let callee = if lang {
+                    let oxl = self.fns.contains_key(name) && !self.externs.contains(name);
+                    let callee = if oxl {
                         if let Some(bind) = call_bindings(self, name, args) {
                             let m = inst_name(name, &bind);
                             if !self.inst_done.contains(&m) {
                                 self.insts.push((name.clone(), bind));
                             }
-                            format!("l_f_{}", cname(&m))
+                            format!("o_f_{}", cname(&m))
                         } else {
-                            format!("l_f_{}", cname(&name))
+                            format!("o_f_{}", cname(&name))
                         }
                     } else {
                         name.clone()
@@ -944,8 +944,8 @@ impl<'a> Gen<'a> {
                                 }
                                 Ret::Pair(_) => {
                                     return format!(
-                                        "({{ struct l_ret_{} __rc; {pre}__rc = {inner}; {post}__rc; }})",
-                                        cname(callee.trim_start_matches("l_f_")).as_str()
+                                        "({{ struct o_ret_{} __rc; {pre}__rc = {inner}; {post}__rc; }})",
+                                        cname(callee.trim_start_matches("o_f_")).as_str()
                                     );
                                 }
                             }

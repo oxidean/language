@@ -1,7 +1,7 @@
 // simple CLI pilot: greets by name, counts args — exercises argv,
 // string ops, [v, err], and the toolchain end to end.
 //
-//   lang run examples/cli/main.lang -- Jesse extra
+//   oxl run examples/cli/main.oxl -- Jesse extra
 //   → "hello, Jesse" / "2 args after name"
 
 fn greet(name: str) -> str {

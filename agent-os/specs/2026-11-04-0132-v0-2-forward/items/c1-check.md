@@ -1,15 +1,15 @@
-# C1 — `bootstrap/check.lang` (typechecker in the language)
+# C1 — `bootstrap/check.oxl` (typechecker in the language)
 
 ## Problem
 
 The third self-host component: typecheck the AST that
-`bootstrap/parser.lang` produces (moved to a typed `Expr`/`Item`/`Ty`
+`bootstrap/parser.oxl` produces (moved to a typed `Expr`/`Item`/`Ty`
 enum tree once B1 lands). The checker's rules are all specified in
 `docs/semantics/` — the port is a translation, not a design.
 
 ## Design sketch
 
-Port `lang/src/check.rs` rule-for-rule:
+Port `oxl/src/check.rs` rule-for-rule:
 
 - `Env` scope stack over `std/collections` maps (B6)
 - fn/struct/interface registration pass, then per-item checks
@@ -23,11 +23,11 @@ Port `lang/src/check.rs` rule-for-rule:
 
 ## Acceptance
 
-- `lang run bootstrap/check.lang -- file.lang` → diagnostics or
-  "ok" — matching `lang build`'s errors on the example corpus
-- Self-application: `check.lang` checks `parser.lang` (the real AST
+- `oxl run bootstrap/check.oxl -- file.oxl` → diagnostics or
+  "ok" — matching `oxl build`'s errors on the example corpus
+- Self-application: `check.oxl` checks `parser.oxl` (the real AST
   corpus, ~450 lines) — error-free
-- Differential test in `tests/run.sh`: same `.lang` file, Rust
+- Differential test in `tests/run.sh`: same `.oxl` file, Rust
   checker's diagnostics == self-hosted checker's diagnostics
 
 ## Depends on
@@ -40,6 +40,6 @@ Port `lang/src/check.rs` rule-for-rule:
 
 - Rule drift: two checkers is a fork — mitigate with the differential
   test; the Rust one stays the reference until C2 completes the chain.
-- Volume: ~900 lines of checker to port — the largest single .lang
+- Volume: ~900 lines of checker to port — the largest single .oxl
   file written so far; will surface real DX gaps (that's the point —
   log them as they appear).

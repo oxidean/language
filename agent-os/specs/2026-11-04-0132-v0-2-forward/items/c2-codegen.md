@@ -1,14 +1,14 @@
-# C2 — `bootstrap/codegen.lang` (self-hosted C codegen)
+# C2 — `bootstrap/codegen.oxl` (self-hosted C codegen)
 
 ## Problem
 
 The last piece of the bootstrap chain: emit C from the typed AST so a
-self-compiled `lang` compiles itself. Until this lands, self-hosting
+self-compiled `oxl` compiles itself. Until this lands, self-hosting
 is a demo; after it, it's the actual compiler.
 
 ## Design sketch
 
-Port `lang/src/codegen.rs` (the C-emit backend — the LLVM target stays
+Port `oxl/src/codegen.rs` (the C-emit backend — the LLVM target stays
 a separate future seam, not part of bootstrap):
 
 - `Expr`/`Stmt`/`Item` → C text via a `std/buffer`-style string builder
@@ -16,7 +16,7 @@ a separate future seam, not part of bootstrap):
   same as the Rust backend so `runtime/` links identically)
 - spawn trampolines, `[v,err]` ret structs, borrow-check emission
   (must emit `rt_unborrow` — the exact discipline fixed in v0.0.1)
-- imports already merged by `parser.lang`'s crate walk
+- imports already merged by `parser.oxl`'s crate walk
 
 Output contract: the emitted C must compile against `runtime/rt.{c,h}`
 byte-for-byte-compatible at the ABI level (same struct layouts, same
@@ -24,13 +24,13 @@ byte-for-byte-compatible at the ABI level (same struct layouts, same
 
 ## Acceptance
 
-- `bootstrap/codegen.lang` emits C for all `examples/` — `cc` builds
+- `bootstrap/codegen.oxl` emits C for all `examples/` — `cc` builds
   them, they run identically
-- **The bootstrap chain**: `lang` (Rust) compiles
-  `lexlib+parser+check+codegen.lang` → that binary compiles
-  `hello.lang` → hello runs. This is the demo.
+- **The bootstrap chain**: `oxl` (Rust) compiles
+  `lexlib+parser+check+codegen.oxl` → that binary compiles
+  `hello.oxl` → hello runs. This is the demo.
 - Self-compile: the self-hosted compiler compiles *itself* (all four
-  bootstrap .lang files) — bit-identical output not required,
+  bootstrap .oxl files) — bit-identical output not required,
   behavior-identical is
 
 ## Depends on

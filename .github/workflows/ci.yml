@@ -17,7 +17,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y sqlite3 libsqlite3-dev
 
       - name: build compiler
-        run: cargo build --release --manifest-path lang/Cargo.toml
+        run: cargo build --release --manifest-path oxl/Cargo.toml
 
       - name: run test suite
-        run: bash tests/run.sh "$PWD/lang/target/release/lang"
+        run: bash tests/run.sh "$PWD/oxl/target/release/oxl"

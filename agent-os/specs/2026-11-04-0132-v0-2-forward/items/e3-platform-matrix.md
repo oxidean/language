@@ -18,7 +18,7 @@ Windows next. "Runs on the user's machine" is an adoption blocker.
     threads (or `std::thread` via a C++ shim), `Sleep`, `WinSock` —
     the smallest honest ifdef surface, or a second `rt_windows.c`
     behind the same `rt.h` contract
-- `lang`'s own C-compiler invocation: `cc` on POSIX, `cl` or `clang`
+- `oxl`'s own C-compiler invocation: `cc` on POSIX, `cl` or `clang`
   on Windows — the driver already invokes `cc`; parameterize the
   compiler lookup (env override `LANG_CC` first)
 

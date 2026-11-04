@@ -1,11 +1,11 @@
-// bootstrap/lexer.lang — token dump driver over bootstrap/lexlib.
-//   lang run bootstrap/lexer.lang -- examples/hello.lang
+// bootstrap/lexer.oxl — token dump driver over bootstrap/lexlib.
+//   oxl run bootstrap/lexer.oxl -- examples/hello.oxl
 
 import "lexlib"
 
 fn main() {
     if argc() < 2 {
-        println("usage: lexer <file.lang>")
+        println("usage: lexer <file.oxl>")
         exit(1)
     }
     src := readfile(argv(1))

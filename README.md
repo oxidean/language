@@ -27,24 +27,24 @@ Requires: Rust (cargo), a C compiler (`cc`), pthreads, sqlite3 dev
 headers (runtime links `-lsqlite3`).
 
 ```sh
-cd lang && cargo build --release
-# binary: lang/target/release/lang
+cd oxl && cargo build --release
+# binary: oxl/target/release/oxl
 ```
 
 ## Using it
 
 ```sh
-lang build file.lang [-o out]   # compile to a native binary
-lang run file.lang [args...]    # compile + run
-lang test file.lang             # run all fn test_*() in a scope each
-lang fmt file.lang [-w]         # normalize indentation/whitespace
-lang doc file.lang              # /// comments → markdown
-lang lsp                        # stdio LSP: live diagnostics in editors
+oxl build file.oxl [-o out]   # compile to a native binary
+oxl run file.oxl [args...]    # compile + run
+oxl test file.oxl             # run all fn test_*() in a scope each
+oxl fmt file.oxl [-w]         # normalize indentation/whitespace
+oxl doc file.oxl              # /// comments → markdown
+oxl lsp                        # stdio LSP: live diagnostics in editors
 ```
 
 ## Language surface (v0)
 
-```lang
+```oxl
 struct Point { x: int, y: int }
 
 fn fail(b: bool) -> [int, err] {
@@ -82,20 +82,20 @@ call site; `import "std/strings"` modules; top-level `let` globals
 
 | Path | What it proves |
 |---|---|
-| `examples/hello.lang` | hello world end-to-end |
-| `examples/features.lang` | structs, `own`/`mut`, `[v,err]`, FFI, scope/spawn/channels |
-| `examples/cli/main.lang` | CLI pilot: argv, string ops, error paths |
-| `examples/http-crud-sqlite/main.lang` | the flagship pilot: HTTP server + SQLite + per-connection tasks |
-| `examples/smoke_test.lang` | `lang test` scoped test harness |
-| `tests/stdlib_test.lang` | stdlib + break/continue coverage |
-| `tests/stdmods_test.lang` | `std/json`, `std/sync`, `std/time` end-to-end |
-| `bootstrap/lexer.lang` | **self-host**: the language's lexer written in the language |
-| `bootstrap/parser.lang` | **self-host**: the language's parser written in the language — parses itself, zero skips |
+| `examples/hello.oxl` | hello world end-to-end |
+| `examples/features.oxl` | structs, `own`/`mut`, `[v,err]`, FFI, scope/spawn/channels |
+| `examples/cli/main.oxl` | CLI pilot: argv, string ops, error paths |
+| `examples/http-crud-sqlite/main.oxl` | the flagship pilot: HTTP server + SQLite + per-connection tasks |
+| `examples/smoke_test.oxl` | `oxl test` scoped test harness |
+| `tests/stdlib_test.oxl` | stdlib + break/continue coverage |
+| `tests/stdmods_test.oxl` | `std/json`, `std/sync`, `std/time` end-to-end |
+| `bootstrap/lexer.oxl` | **self-host**: the language's lexer written in the language |
+| `bootstrap/parser.oxl` | **self-host**: the language's parser written in the language — parses itself, zero skips |
 
 Try it:
 
 ```sh
-lang run examples/http-crud-sqlite/main.lang &
+oxl run examples/http-crud-sqlite/main.oxl &
 curl -d 'widget' localhost:8080/items          # → {"created":"widget"}
 curl localhost:8080/items                      # → {"items":[{"id":1,"name":"widget"}]}
 ```
@@ -103,7 +103,7 @@ curl localhost:8080/items                      # → {"items":[{"id":1,"name":"w
 ## Repo layout
 
 ```
-lang/          the compiler (Rust): lexer → parser → check → codegen → C → cc
+oxl/          the compiler (Rust): lexer → parser → check → codegen → C → cc
 runtime/       rt.c/rt.h — arenas, ObjHdr checks, scopes/traps, executor, channels
 docs/          design doc, semantics annex, prototype report
 stdlib/        the standard library, written in the language (strings, testing, http, json, sync, time, os)

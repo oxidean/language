@@ -40,25 +40,25 @@ at measurement noise (~0–4%). Verdict: GO.
 
 ### Task 4: Toolchain skeleton [done]
 
-`lang/` (Rust): `build run test fmt doc lsp`. build/run/test work;
+`oxl/` (Rust): `build run test fmt doc lsp`. build/run/test work;
 fmt/doc are honest stubs; lsp is a stdio JSON-RPC scaffold (initialize/
 shutdown/exit).
 
 ### Task 5: Frontend core [done]
 
-`lang/src/{lexer,ast,parser}.rs` — full v0 subset: literals, fns,
+`oxl/src/{lexer,ast,parser}.rs` — full v0 subset: literals, fns,
 structs, extern decls, `let`/`:=`, `[v, err]` binding, if/else, for,
 scope/spawn/go, unsafe, struct literals, comments.
 
 ### Task 6: Typechecker v1 [done]
 
-`lang/src/check.rs` — boundary annotations enforced, `:=` local
+`oxl/src/check.rs` — boundary annotations enforced, `:=` local
 inference, dropped-error compile error, own→ref/mut borrow conversion,
 FFI arg restrictions, suspend-set computation.
 
 ### Task 7: Codegen v1 [done]
 
-`lang/src/codegen.rs` — C emit → cc → native binary. Interim backend
+`oxl/src/codegen.rs` — C emit → cc → native binary. Interim backend
 (LLVM remains the production target behind the same seam). Spawn
 trampolines, `[v, err]` structs, borrow-check emission, builtin
 expansion, test driver.
@@ -87,23 +87,23 @@ the state-machine transform itself is open (critical path item).
 
 Module system landed: `import "path"` / `import "std/x"` (merged
 namespace, cycle-safe, `stdlib/` lookup from ancestors). Stdlib is
-written in the language: `stdlib/strings.lang` (startswith/endswith/
-contains/trim/split→own StrList/join/upper), `stdlib/testing.lang`
-(expect/expect_eq/expect_streq), `stdlib/http.lang` (serve + user
+written in the language: `stdlib/strings.oxl` (startswith/endswith/
+contains/trim/split→own StrList/join/upper), `stdlib/testing.oxl`
+(expect/expect_eq/expect_streq), `stdlib/http.oxl` (serve + user
 route()). Builtins added: `readfile`, `writefile`, `exit`, `mkshared`,
 `sget`, `sset`. Wave-1 `io`/`os` coverage comes via file builtins;
 dedicated `os` module still open.
 
 ### Task 12: Stdlib wave 2 [done — v0 surface]
 
-`net/http` exists as `stdlib/http.lang` (socket externs, accept loop,
+`net/http` exists as `stdlib/http.oxl` (socket externs, accept loop,
 `spawnBlocking` per conn, user `route()` callback) — pilot rewritten on
-it. `stdlib/json.lang` — Json value tree, `tojson` serializer,
+it. `stdlib/json.oxl` — Json value tree, `tojson` serializer,
 `jparse` recursive-descent parser, `jget` member lookup (ints only,
-`\" \\ \n \t` escapes). `stdlib/sync.lang` — spin Mutex on `scas`,
-atomic `counter`/`cinc`/`cval` on `sadd`. `stdlib/time.lang` —
+`\" \\ \n \t` escapes). `stdlib/sync.oxl` — spin Mutex on `scas`,
+atomic `counter`/`cinc`/`cval` on `sadd`. `stdlib/time.oxl` —
 `unix`/`unix_ms`/`sleep_ms`. Top-level `let` globals (process-wide
-state, initialized in `lang_main` before user main) — the pilot uses
+state, initialized in `oxl_main` before user main) — the pilot uses
 one shared sqlite conn across all request tasks. New builtins:
 `scas`, `sadd`, `now`, `now_ms`, `usleep`. Dedicated `os` module and
 float JSON numbers remain open.
@@ -126,9 +126,9 @@ needs `ordered`).
 
 ### Task 15: LSP + fmt + doc [done — v0 quality]
 
-`lang lsp`: real `publishDiagnostics` on didOpen/didChange (full-text
-sync, imports resolved). `lang fmt`: indentation/whitespace normalizer
-(comment-preserving, `-w` to rewrite). `lang doc`: `///` comments on
+`oxl lsp`: real `publishDiagnostics` on didOpen/didChange (full-text
+sync, imports resolved). `oxl fmt`: indentation/whitespace normalizer
+(comment-preserving, `-w` to rewrite). `oxl doc`: `///` comments on
 decls → markdown. Hover/goto remain open (needs position index).
 
 ### Task 16: OSS plumbing [done]
@@ -152,7 +152,7 @@ lost-wakeup race, task-trap never decrementing scope pending (join
 hang), borrows never released (`rt_unborrow` now emitted post-call),
 reborrow-vs-fresh-borrow distinction, main-thread traps silently
 exiting 0 (now loud abort), parser spinning on unrecoverable items
-(guaranteed-progress skip). `bootstrap/lexer.lang` — lexer in the
+(guaranteed-progress skip). `bootstrap/lexer.oxl` — lexer in the
 language — is a pilot too: lexes itself (955 tokens) + runs in CI.
 
 ### Task 18: v0.0.1 tag [not started]

@@ -21,7 +21,7 @@ limitation; this unblocks it.
 
 - `float` arithmetic + comparisons; `ftoi`/`itof` round-trips
 - `jparse("3.14")` → float node; `tojson` emits `3.14`
-- `json_test.lang` asserts float round-trip
+- `json_test.oxl` asserts float round-trip
 - `int`/`float` mixing is a compile error, not silent widening
 
 ## Depends on

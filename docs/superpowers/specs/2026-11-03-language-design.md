@@ -1,4 +1,4 @@
-# Language Design — "language" (working name, TBD)
+# Language Design — "oxl"
 
 ## Intent and the why
 

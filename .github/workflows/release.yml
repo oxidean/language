@@ -13,19 +13,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: build lang
-        run: cargo build --release --manifest-path lang/Cargo.toml
+      - name: build oxl
+        run: cargo build --release --manifest-path oxl/Cargo.toml
       - name: test suite (gate)
-        run: bash tests/run.sh ./lang/target/release/lang
+        run: bash tests/run.sh ./oxl/target/release/oxl
       - name: package toolchain
         run: |
-          mkdir -p dist/lang-toolchain
-          cp lang/target/release/lang dist/lang-toolchain/
-          cp -r stdlib dist/lang-toolchain/
-          cp README.md LICENSE dist/lang-toolchain/
-          cd dist && tar czf lang-toolchain-linux-x86_64.tar.gz lang-toolchain
+          mkdir -p dist/oxl-toolchain
+          cp oxl/target/release/oxl dist/oxl-toolchain/
+          cp -r stdlib dist/oxl-toolchain/
+          cp README.md LICENSE dist/oxl-toolchain/
+          cd dist && tar czf oxl-toolchain-linux-x86_64.tar.gz oxl-toolchain
       - name: github release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/lang-toolchain-linux-x86_64.tar.gz
+          files: dist/oxl-toolchain-linux-x86_64.tar.gz
           generate_release_notes: true

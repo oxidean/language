@@ -1,4 +1,4 @@
-/* lang runtime — v0 implementation. See docs/semantics/. */
+/* oxl runtime — v0 implementation. See docs/semantics/. */
 #include "rt.h"
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -331,37 +331,37 @@ void rt_close(RtChan *ch) {
 
 /* ---------------- strings / misc ---------------- */
 
-LangStr rt_str(const char *s) { return (LangStr){ s, (int64_t)strlen(s) }; }
-LangStr rt_str_lit(const char *s) { return rt_str(s); }
+OxlStr rt_str(const char *s) { return (OxlStr){ s, (int64_t)strlen(s) }; }
+OxlStr rt_str_lit(const char *s) { return rt_str(s); }
 
-LangStr rt_strcat(LangStr a, LangStr b) {
+OxlStr rt_strcat(OxlStr a, OxlStr b) {
     char *p = rt_alloc(a.n + b.n + 1);
     memcpy(p, a.p, a.n);
     memcpy(p + a.n, b.p, b.n);
     p[a.n + b.n] = 0;
-    return (LangStr){ p, a.n + b.n };
+    return (OxlStr){ p, a.n + b.n };
 }
 
-int rt_streq(LangStr a, LangStr b) {
+int rt_streq(OxlStr a, OxlStr b) {
     return a.n == b.n && memcmp(a.p, b.p, (size_t)a.n) == 0;
 }
 
-LangStr rt_itoa(int64_t v) {
+OxlStr rt_itoa(int64_t v) {
     char *p = rt_alloc(24);
     snprintf(p, 24, "%lld", (long long)v);
     return rt_str(p);
 }
 
-const char *rt_cstr(LangStr s) {
+const char *rt_cstr(OxlStr s) {
     char *p = rt_alloc(s.n + 1);
     memcpy(p, s.p, s.n);
     p[s.n] = 0;
     return p;
 }
 
-static void wr(LangStr s) { fwrite(s.p, 1, (size_t)s.n, stdout); }
-void rt_print_str(LangStr s) { wr(s); }
-void rt_println_str(LangStr s) { wr(s); wr(rt_str("\n")); fflush(stdout); }
+static void wr(OxlStr s) { fwrite(s.p, 1, (size_t)s.n, stdout); }
+void rt_print_str(OxlStr s) { wr(s); }
+void rt_println_str(OxlStr s) { wr(s); wr(rt_str("\n")); fflush(stdout); }
 void rt_print_i64(int64_t v) { printf("%lld", (long long)v); }
 void rt_println_i64(int64_t v) { printf("%lld\n", (long long)v); fflush(stdout); }
 void rt_print_f64(double v) { printf("%.15g", v); }
@@ -378,46 +378,46 @@ static int g_argc;
 static char **g_argv;
 void rt_set_args(int argc, char **argv) { g_argc = argc; g_argv = argv; }
 int64_t rt_argc(void) { return g_argc; }
-LangStr rt_argv(int64_t i) {
+OxlStr rt_argv(int64_t i) {
     if (i < 0 || i >= g_argc) return rt_str("");
     return rt_str(g_argv[i]);
 }
 
-int64_t rt_len(LangStr s) { return s.n; }
-int64_t rt_byteat(LangStr s, int64_t i) {
+int64_t rt_len(OxlStr s) { return s.n; }
+int64_t rt_byteat(OxlStr s, int64_t i) {
     if (i < 0 || i >= s.n) return -1;
     return (uint8_t)s.p[i];
 }
-LangStr rt_substr(LangStr s, int64_t a, int64_t b) {
+OxlStr rt_substr(OxlStr s, int64_t a, int64_t b) {
     if (a < 0) a = 0;
     if (b > s.n) b = s.n;
     if (a >= b) return rt_str("");
     char *p = rt_alloc(b - a + 1);
     memcpy(p, s.p + a, b - a);
     p[b - a] = 0;
-    return (LangStr){ p, b - a };
+    return (OxlStr){ p, b - a };
 }
-int64_t rt_find(LangStr s, LangStr sub) {
+int64_t rt_find(OxlStr s, OxlStr sub) {
     for (int64_t i = 0; i + sub.n <= s.n; i++)
         if (memcmp(s.p + i, sub.p, (size_t)sub.n) == 0) return i;
     return -1;
 }
-int64_t rt_atoi(LangStr s) { return strtoll(rt_cstr(s), NULL, 10); }
+int64_t rt_atoi(OxlStr s) { return strtoll(rt_cstr(s), NULL, 10); }
 
-double rt_atof(LangStr s) { return strtod(rt_cstr(s), NULL); }
+double rt_atof(OxlStr s) { return strtod(rt_cstr(s), NULL); }
 
-LangStr rt_ftoa(double v) {
+OxlStr rt_ftoa(double v) {
     char *p = rt_alloc(40);
     snprintf(p, 40, "%.15g", v);
     return rt_str(p);
 }
 
 void *rt_mkbuf(int64_t size) { return rt_alloc_own(size); }
-LangStr rt_bufstr(void *buf, int64_t n) {
+OxlStr rt_bufstr(void *buf, int64_t n) {
     char *p = rt_alloc(n + 1);
     memcpy(p, buf, (size_t)n);
     p[n] = 0;
-    return (LangStr){ p, n };
+    return (OxlStr){ p, n };
 }
 void rt_poke8(void *buf, int64_t off, int64_t v) { ((uint8_t *)buf)[off] = (uint8_t)v; }
 void rt_poke16(void *buf, int64_t off, int64_t v) { ((uint16_t *)buf)[off / 2] = htons((uint16_t)v); }
@@ -427,7 +427,7 @@ int64_t rt_htonl(int64_t v) { return htonl((uint32_t)v); }
 
 /* ---------------- file io + process ---------------- */
 
-LangStr rt_readfile(LangStr path) {
+OxlStr rt_readfile(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);
     cp[path.n] = 0;
@@ -440,10 +440,10 @@ LangStr rt_readfile(LangStr path) {
     fread(buf, 1, (size_t)n, f);
     fclose(f);
     buf[n] = 0;
-    return (LangStr){ buf, n };
+    return (OxlStr){ buf, n };
 }
 
-int64_t rt_writefile(LangStr path, LangStr data) {
+int64_t rt_writefile(OxlStr path, OxlStr data) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);
     cp[path.n] = 0;
@@ -481,9 +481,9 @@ int64_t rt_sqlite_exec(void *db, const char *sql) {
     }
     return SQLITE_BUSY;
 }
-LangStr rt_sqlite_query(void *db, const char *sql) {
+OxlStr rt_sqlite_query(void *db, const char *sql) {
     sqlite3_stmt *st = NULL;
-    LangStr out = rt_str("");
+    OxlStr out = rt_str("");
     if (sqlite3_prepare_v2((sqlite3 *)db, sql, -1, &st, NULL) != SQLITE_OK)
         return out;
     while (sqlite3_step(st) == SQLITE_ROW) {
@@ -506,7 +506,7 @@ int main(int argc, char **argv) {
     rt_set_args(argc, argv);
     RtScope base;
     rt_scope_enter(&base);
-    lang_main();
+    oxl_main();
     rt_scope_leave(&base);
     return 0;
 }

@@ -1,5 +1,5 @@
-// lang test runs every fn test_*() and reports ok per function.
-// `lang test examples/smoke_test.lang`
+// oxl test runs every fn test_*() and reports ok per function.
+// `oxl test examples/smoke_test.oxl`
 
 fn add(a: int, b: int) -> int {
     return a + b
@@ -30,5 +30,5 @@ fn test_chan() {
 }
 
 fn main() {
-    println("not run under `lang test`")
+    println("not run under `oxl test`")
 }
