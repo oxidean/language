@@ -690,7 +690,16 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::Void;
                 }
-                "mkchan" => return Ty::Chan,
+                "mkchan" => {
+                    if args.len() > 1 {
+                        self.diags.push(Diag::err(sp, "check", "`mkchan` takes at most one capacity arg"));
+                    }
+                    if let Some(a) = args.first() {
+                        let t = self.expr(a, env);
+                        self.assignable(&Ty::Int, &t, a.span);
+                    }
+                    return Ty::Chan;
+                }
                 "send" => {
                     if args.len() != 2 {
                         self.diags.push(Diag::err(sp, "check", "`send` takes (chan, value)"));

@@ -71,6 +71,9 @@ struct Gen<'a> {
     /// (continue-label, break-label) per enclosing loop
     loop_labels: Vec<(String, String)>,
     hoist_ctr: usize,
+    /// frame struct decls + poll prototypes — before all poll bodies
+    /// (a poll body may spawn a fn whose frame is declared later)
+    frame_head: String,
     /// frame structs + poll drivers, placed before all fn bodies
     frame_out: String,
 }
@@ -115,6 +118,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         label_ctr: 0,
         loop_labels: Vec::new(),
         hoist_ctr: 0,
+        frame_head: String::new(),
         frame_out: String::new(),
     };
     for it in &c.items {
@@ -260,6 +264,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
     g.out = g.out.replace("/*GLOBALS*/", &global_inits);
     let mut final_out = g.out[..body_start].to_string();
     final_out.push_str(&g.trampolines);
+    final_out.push_str(&g.frame_head);
     final_out.push_str(&g.frame_out);
     final_out.push_str(&g.inst_out);
     final_out.push_str(&g.out[body_start..]);
@@ -438,7 +443,7 @@ impl<'a> Gen<'a> {
             );
             if let RetTy::Pair(t) = &f.ret {
                 let _ = writeln!(
-                    self.frame_out,
+                    self.frame_head,
                     "struct o_ret_{} {{ {} val; int64_t err; }};",
                     cname(&mangled), self.cty(&self.ty_of_ref(t))
                 );
@@ -934,7 +939,7 @@ impl<'a> Gen<'a> {
         let a0 = argvs.first().cloned().unwrap_or_default();
         Some(match name {
             "assert" => format!("(({}) ? (void)0 : (rt_trap(3)))", a0),
-            "mkchan" => "rt_mkchan()".into(),
+            "mkchan" => format!("rt_mkchan({})", if argvs.is_empty() { "0LL".into() } else { a0 }),
             "send" => format!("rt_send({})", j(argvs)),
             "recv" => format!("rt_recv({})", a0),
             "sleep" => format!("rt_sleep({})", a0),
@@ -1902,7 +1907,7 @@ impl<'a> Gen<'a> {
             let _ = write!(cases, " case {k}: goto s{k};");
         }
         let ce = cname(ename);
-        let _ = writeln!(self.frame_out,
+        let _ = writeln!(self.frame_head,
             "struct o_frm_{ce} {{ RtScope *cur_scope; int state; RtFrame *child;{res_field}{pfields} {}}};\nint o_poll_{ce}(RtFrame *_f, RtTask *task);\n",
             self.frame_decls.join(" " ) + " " + &self.scope_decls.join(" "));
         let _ = writeln!(self.frame_out,

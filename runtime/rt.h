@@ -102,7 +102,7 @@ void rt_free(void *obj);
  * *_poll variants for frame tasks (READY = completed; PENDING = the
  * task was parked on the chan's wait queue and will be re-enqueued). */
 typedef struct RtChan RtChan;
-RtChan *rt_mkchan(void);
+RtChan *rt_mkchan(int64_t cap);
 void rt_send(RtChan *ch, int64_t v);
 int64_t rt_recv(RtChan *ch);
 int rt_send_poll(RtChan *ch, int64_t v, RtTask *t);

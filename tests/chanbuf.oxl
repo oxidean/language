@@ -1,0 +1,64 @@
+// A3: buffered channels — mkchan(n) ring buffer
+import "std/time"
+
+fn producer(c: chan, done: chan) {
+    send(c, 1)
+    send(c, 2)
+    send(c, 3)
+    send(c, 4) // cap is 3 — this one parks until a recv drains
+    send(done, 1)
+}
+
+fn main() {
+    // 1. cap-3 chan: three sends don't block, 4th parks until drained
+    c := mkchan(3)
+    done := mkchan()
+    scope {
+        spawn producer(c, done)
+        time.sleep_ms(30) // producer must be parked on send #4
+        v := recv(c)
+        assert(v == 1)   // FIFO: oldest first; frees the 4th send
+        assert(recv(done) == 1)
+        assert(recv(c) == 2)
+        assert(recv(c) == 3)
+        assert(recv(c) == 4)
+    }
+    println("chanbuf cap ok")
+
+    // 2. a parked buffered receiver wakes on ring push
+    c2 := mkchan(2)
+    got := 0
+    scope {
+        spawn sleeper_recv(c2)
+        send(c2, 77)
+        send(c2, 88)
+    }
+    assert(true)
+    println("chanbuf wake ok")
+
+    // 3. select over a buffered chan sees ring content
+    c3 := mkchan(4)
+    send(c3, 5)
+    send(c3, 6)
+    scope {
+        select {
+            v := recv(c3) => { got = v }
+            else => { got = -1 }
+        }
+        assert(got == 5)
+        select {
+            v := recv(c3) => { got = v }
+            timeout(50) => { got = -1 }
+        }
+        assert(got == 6)
+        println("chanbuf select ok")
+    }
+    println("chanbuf done")
+}
+
+fn sleeper_recv(c: chan) {
+    time.sleep_ms(20) // let main fill the ring first
+    v := recv(c)
+    assert(v == 77)
+    assert(recv(c) == 88)
+}

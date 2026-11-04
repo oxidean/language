@@ -601,6 +601,10 @@ struct RtSel {
 struct RtChan {
     pthread_mutex_t mu;
     pthread_cond_t cv_send, cv_recv;
+    int64_t *buf;       /* ring storage — NULL when cap==0 */
+    int64_t cap;        /* buffered capacity (mkchan(n)) */
+    int64_t head;       /* ring pop index; tail = (head+count)%cap */
+    int64_t count;      /* ring entries */
     int64_t val;
     int has, closed;
     int trecv;          /* thread receivers inside cv_recv wait */
@@ -608,6 +612,24 @@ struct RtChan {
     SendReq *sendq;     /* parked frame sends */
     SelW *selq;         /* parked select waiters */
 };
+
+static SendReq *chan_pop_send(RtChan *ch); /* defined below */
+
+/* under ch->mu, count>0: pop the ring head, refill the slot from a
+ * parked frame sender (FIFO + the sender's wake), deliver v. */
+static int64_t chan_ring_pop(RtChan *ch, RtTask **wake) {
+    int64_t v = ch->buf[ch->head];
+    ch->head = (ch->head + 1) % ch->cap;
+    ch->count--;
+    SendReq *s = chan_pop_send(ch);
+    if (s) {
+        ch->buf[(ch->head + ch->count) % ch->cap] = s->v;
+        ch->count++;
+        *wake = s->t;
+        free(s);
+    }
+    return v;
+}
 
 /* under ch->mu: hand `v` to the first live select waiter. returns 1 when
  * a waiter claimed the fire (ch->mu released + task woken). */
@@ -661,11 +683,13 @@ static SendReq *chan_pop_send(RtChan *ch) {
     return NULL;
 }
 
-RtChan *rt_mkchan(void) {
+RtChan *rt_mkchan(int64_t cap) {
     RtChan *c = calloc(1, sizeof *c);
     pthread_mutex_init(&c->mu, NULL);
     pthread_cond_init(&c->cv_send, NULL);
     pthread_cond_init(&c->cv_recv, NULL);
+    c->cap = cap < 0 ? 0 : cap;
+    if (c->cap > 0) c->buf = malloc(sizeof(int64_t) * (size_t)c->cap);
     return c;
 }
 
@@ -685,6 +709,13 @@ void rt_send(RtChan *ch, int64_t v) {
             goto done;
         }
         if (sel_fire(ch, v)) goto done; /* sel_fire releases ch->mu */
+        if (ch->count < ch->cap) { /* buffered: drop in the ring */
+            ch->buf[(ch->head + ch->count) % ch->cap] = v;
+            ch->count++;
+            pthread_cond_broadcast(&ch->cv_recv);
+            pthread_mutex_unlock(&ch->mu);
+            goto done;
+        }
         ch->val = v;
         ch->has = 1;
         pthread_cond_broadcast(&ch->cv_recv);
@@ -706,6 +737,13 @@ int64_t rt_recv(RtChan *ch) {
     park_add(me, me ? me->scope : NULL, ch, WK_TRECV);
     for (;;) {
         pthread_mutex_lock(&ch->mu);
+        if (ch->count > 0) { /* buffered: drain oldest, refill from sendq */
+            RtTask *w = NULL;
+            v = chan_ring_pop(ch, &w);
+            pthread_mutex_unlock(&ch->mu);
+            if (w) rt_task_wake(w);
+            goto done;
+        }
         SendReq *r = chan_pop_send(ch); /* parked frame sender delivers */
         if (r) {
             v = r->v;
@@ -737,6 +775,13 @@ done:
  * immediate and the woken paths); PENDING parks on recvq */
 int rt_recv_poll(RtChan *ch, RtTask *t) {
     pthread_mutex_lock(&ch->mu);
+    if (ch->count > 0) { /* buffered: drain oldest, refill from sendq */
+        RtTask *w = NULL;
+        t->chan_res = chan_ring_pop(ch, &w);
+        pthread_mutex_unlock(&ch->mu);
+        if (w) rt_task_wake(w);
+        return RT_READY;
+    }
     SendReq *r = chan_pop_send(ch);
     if (r) {
         t->chan_res = r->v;
@@ -768,6 +813,13 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
         return RT_READY;
     }
     if (sel_fire(ch, v)) return RT_READY; /* sel_fire releases ch->mu */
+    if (ch->count < ch->cap) { /* buffered: drop in the ring */
+        ch->buf[(ch->head + ch->count) % ch->cap] = v;
+        ch->count++;
+        pthread_cond_broadcast(&ch->cv_recv);
+        pthread_mutex_unlock(&ch->mu);
+        return RT_READY;
+    }
     if (ch->closed) {
         pthread_mutex_unlock(&ch->mu);
         return RT_READY; /* send on closed completes silently (v0 rule) */
@@ -867,6 +919,10 @@ int rt_sleep_poll(int64_t secs, RtTask *t) {
 
 /* under ch->mu (all arm chans locked): can this chan deliver now? */
 static int sel_ready(RtChan *ch, int64_t *v, RtTask **wake_me) {
+    if (ch->count > 0) { /* buffered: drain oldest, refill from sendq */
+        *v = chan_ring_pop(ch, wake_me);
+        return 1;
+    }
     if (ch->sendq) {
         SendReq *r = ch->sendq;
         ch->sendq = r->next;

@@ -77,6 +77,10 @@ if timeout 10 "$OXL" run tests/select_cancel.oxl >/dev/null 2>&1; then
     echo "FAIL select_cancel: expected nonzero exit"; exit 1
 fi
 
+echo "== a3 buffered channels =="
+out=$("$OXL" run tests/chanbuf.oxl)
+[ "$(tail -1 <<<"$out")" = "chanbuf done" ] || { echo "FAIL chanbuf: $out"; exit 1; }
+
 echo "== http pilot =="
 work=$(mktemp -d)
 "$OXL" build examples/http-crud-sqlite/main.oxl -o "$work/httpsrv"

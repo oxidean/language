@@ -65,7 +65,9 @@ send(ch, v)             // moves v into the channel; v dead after
 close(ch)
 ```
 
-- Unbuffered rendezvous in v0; `mkchan(n)` buffered form reserved.
+- `mkchan()` unbuffered rendezvous; `mkchan(n)` buffered ring of `n`
+  words — `send` parks only when full, `recv` only when empty, close
+  wakes all waiters (recv then drains the ring, same as before).
 - `send`/`recv` are the only suspend points v0 code can name explicitly.
 - Sending `ref`/`mut` handles or arena references is a compile error
   (ownership.md §arena).
