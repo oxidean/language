@@ -14,7 +14,7 @@ Written in `.oxl` (stdlib convention):
 ```
 m := map_new()
 map_set(m, "key", 42)        // int values (word payloads)
-v := map_get(m, "key")       // -> [int, err]: nil err on miss
+v := map_get(m, "key")       // -> [int, err]: non-nil err on miss
 map_del(m, "key")
 s := set_new(); set_add(s, "x"); set_has(s, "x")
 ```

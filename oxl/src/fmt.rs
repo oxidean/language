@@ -568,7 +568,12 @@ impl<'a> Fmt<'a> {
     fn expr(&mut self, e: &Expr, parent: u8, ind: usize) -> String {
         match &e.kind {
             ExprKind::Int(v) => v.to_string(),
-            ExprKind::Float(v) => format!("{v:?}"),
+            ExprKind::Float(v) => {
+                // Display never uses exponent form (the lexer has none);
+                // keep a `.` so the literal stays a float
+                let s = format!("{v}");
+                if s.contains('.') { s } else { format!("{s}.0") }
+            }
             ExprKind::Str(s) => format!("\"{}\"", str_escape(s)),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::Nil => "nil".into(),

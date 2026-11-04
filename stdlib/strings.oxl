@@ -57,6 +57,11 @@ fn split(s: str, sep: str) -> own StrList {
     head := new(StrList)
     head.v = ""
     head.next = nil
+    if len(sep) == 0 {
+        // find(s, "") is 0 forever — an empty sep never advances
+        head.v = s
+        return head
+    }
     tail := head
     pos := 0
     for pos <= len(s) {

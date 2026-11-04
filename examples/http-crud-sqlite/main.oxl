@@ -32,17 +32,56 @@ fn has_ctl(s: str) -> bool {
     return false
 }
 
+// SQLite stores whatever bytes it is handed as TEXT and jstr copies them
+// into the JSON response verbatim — a lone 0xFF produces output strict
+// clients cannot parse. Structural UTF-8 check: ASCII passes, lead bytes
+// carry their continuation count, continuations must be 0x80-0xBF.
+fn valid_utf8(s: str) -> bool {
+    i := 0
+    for i < len(s) {
+        b := byteat(s, i)
+        if b < 128 {
+            i = i + 1
+            continue
+        }
+        need := 0
+        if b >= 194 && b <= 223 {
+            need = 1
+        } else if b >= 224 && b <= 239 {
+            need = 2
+        } else if b >= 240 && b <= 244 {
+            need = 3
+        } else {
+            return false
+        }
+        i = i + 1
+        for need > 0 {
+            if i >= len(s) {
+                return false
+            }
+            c := byteat(s, i)
+            if c < 128 || c > 191 {
+                return false
+            }
+            i = i + 1
+            need = need - 1
+        }
+    }
+    return true
+}
+
 fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
     status := 404
     body := "oxl http server — try /items\n"
     if path == "/items" {
         if method == "POST" {
             status = 201
-            if has_ctl(reqbody) {
+            if has_ctl(reqbody) || !valid_utf8(reqbody) {
                 // sqlite_query emits newline-delimited rows — a stored
-                // newline would also split one row into two on read.
+                // newline would also split one row into two on read, and
+                // invalid UTF-8 would make the JSON response unparseable.
                 status = 400
-                body = "{\"error\":\"name must not contain control bytes\"}\n"
+                body = "{\"error\":\"name must be valid UTF-8 without control bytes\"}\n"
             } else if sqlite_exec_bind(db, cstr("INSERT INTO items VALUES(?)"), reqbody) != 0 {
                 // ^ request body is bound, never concatenated into SQL
                 status = 500

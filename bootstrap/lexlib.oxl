@@ -159,5 +159,8 @@ fn kind_name(k: int) -> str {
     if k == 5 {
         return "punct"
     }
+    if k == 6 {
+        return "float"
+    }
     return "eof"
 }

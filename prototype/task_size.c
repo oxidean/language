@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sched.h>
 
 #define N_TASKS 2048
 
@@ -45,9 +46,12 @@ static long rss_kb(void) {
     return v;
 }
 
+/* arrived count replaces a fixed-count barrier: a partial pthread_create
+ * run must not leave main waiting on threads that never spawned */
+static volatile int arrived;
 static void *idle(void *arg) {
-    pthread_barrier_t *b = arg;
-    pthread_barrier_wait(b);
+    (void)arg;
+    __sync_fetch_and_add(&arrived, 1);
     for (;;) pause();
     return NULL;
 }
@@ -72,18 +76,16 @@ int main(void) {
     free(tasks);
 
     /* N OS-thread tasks */
-    pthread_barrier_t barrier;
-    pthread_barrier_init(&barrier, NULL, N_TASKS + 1);
     pthread_t *th = malloc(N_TASKS * sizeof(pthread_t));
     before = rss_kb();
     int spawned = N_TASKS;
     for (int i = 0; i < N_TASKS; i++)
-        if (pthread_create(&th[i], &attr, idle, &barrier)) {
+        if (pthread_create(&th[i], &attr, idle, NULL)) {
             fprintf(stderr, "pthread_create failed at %d\n", i);
             spawned = i;
             break;
         }
-    pthread_barrier_wait(&barrier);
+    while (arrived < spawned) sched_yield();
     long th_rss = rss_kb() - before;
     printf("%d thread tasks RSS:       %+ld kB (~%ld B/task)\n",
            spawned, th_rss, spawned ? th_rss * 1024 / spawned : 0);

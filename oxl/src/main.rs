@@ -355,6 +355,9 @@ fn load_mod(
     let krate = parser::parse(&toks, &mut diags);
     if loud {
         diags.report();
+        if diags.has_errors() {
+            return None;
+        }
     }
     // own decl names (externs keep C names) + per-import maps
     let mut renames: std::collections::HashMap<String, String> = Default::default();
@@ -400,6 +403,8 @@ fn load_mod(
                     if let Some((sub, sub_files)) = load_mod(&p, &stem, seen, loud) {
                         items.extend(sub.items);
                         item_files.extend(sub_files);
+                    } else if loud {
+                        return None;
                     }
                 }
                 None if loud => {

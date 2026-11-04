@@ -101,17 +101,19 @@ pub fn lex(src: &str, diags: &mut Diags) -> Vec<Token> {
                             break;
                         }
                         b'\\' if i + 1 < b.len() => {
-                            let e = match b[i + 1] {
-                                b'n' => '\n',
-                                b't' => '\t',
-                                b'r' => '\r',
-                                b'0' => '\0',
-                                b'\\' => '\\',
-                                b'"' => '"',
-                                x => x as char,
+                            // i + 1 is a char boundary: `\` is ASCII —
+                            // decode the escaped char whole so a multi-byte
+                            // literal can't split mid-char into a panic
+                            let x = src[i + 1..].chars().next().unwrap();
+                            let e = match x {
+                                'n' => '\n',
+                                't' => '\t',
+                                'r' => '\r',
+                                '0' => '\0',
+                                other => other, // covers `\\` and `\"`
                             };
                             s.push(e);
-                            i += 2;
+                            i += 1 + x.len_utf8();
                         }
                         _ => {
                             // source is valid UTF-8 — take the full

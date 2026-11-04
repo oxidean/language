@@ -15,6 +15,17 @@ with_timeout() {
     fi
 }
 
+# one run-owned scratch dir: fixed /tmp paths collide between parallel
+# runs (CWE-377), and an EXIT trap guarantees the http pilot's server
+# dies even when a probe fails mid-suite
+scratch=$(mktemp -d)
+srv_pid=""
+cleanup() {
+    if [ -n "$srv_pid" ]; then kill "$srv_pid" 2>/dev/null || true; fi
+    rm -rf "$scratch"
+}
+trap cleanup EXIT
+
 echo "== hello =="
 out=$("$OXL" run examples/hello.oxl)
 [ "$out" = "hello, world" ] || { echo "FAIL hello: $out"; exit 1; }
@@ -36,6 +47,10 @@ echo "== oxl test: stdlib =="
 out=$("$OXL" test tests/stdlib_test.oxl)
 grep -q "test_loops ... ok" <<<"$out" || { echo "FAIL stdlib: $out"; exit 1; }
 
+echo "== oxl test: os =="
+out=$("$OXL" test tests/os_test.oxl)
+grep -q "test_file ... ok" <<<"$out" || { echo "FAIL os: $out"; exit 1; }
+
 echo "== stdmods (json/sync/time) =="
 out=$("$OXL" run tests/stdmods_test.oxl)
 grep -q '"name":"widget"' <<<"$out" || { echo "FAIL stdmods json: $out"; exit 1; }
@@ -46,10 +61,10 @@ echo "== float (d1) =="
 out=$("$OXL" test tests/float_test.oxl)
 grep -q "test_json_float ... ok" <<<"$out" || { echo "FAIL float: $out"; exit 1; }
 # int/float mixing must be a compile error, not silent widening
-cat > /tmp/floatmix.oxl <<'EOF'
+cat > "$scratch/floatmix.oxl" <<'EOF'
 fn main() { x := 1 + 2.5 }
 EOF
-if "$OXL" build /tmp/floatmix.oxl -o /tmp/floatmix 2>/dev/null; then
+if "$OXL" build "$scratch/floatmix.oxl" -o "$scratch/floatmix" 2>/dev/null; then
     echo "FAIL: int+float compiled (should be a type error)"; exit 1
 fi
 
@@ -61,15 +76,15 @@ echo "== match (b2) =="
 out=$("$OXL" run tests/match.oxl)
 [ "$(tail -1 <<<"$out")" = "match ok" ] || { echo "FAIL match: $out"; exit 1; }
 # non-exhaustive match must name the missing variant
-cat > /tmp/matchnex.oxl <<'EOF'
+cat > "$scratch/matchnex.oxl" <<'EOF'
 enum E { A(int), B, }
 fn f(e: E) -> int { return match e { E.A(v) => v } }
 fn main() { }
 EOF
-if "$OXL" build /tmp/matchnex.oxl -o /tmp/matchnex 2>/dev/null; then
+if "$OXL" build "$scratch/matchnex.oxl" -o "$scratch/matchnex" 2>/dev/null; then
     echo "FAIL: non-exhaustive match compiled"; exit 1
 fi
-diag=$("$OXL" build /tmp/matchnex.oxl -o /tmp/matchnex 2>&1 || true)
+diag=$("$OXL" build "$scratch/matchnex.oxl" -o "$scratch/matchnex" 2>&1 || true)
 grep -q "missing B" <<<"$diag" || { echo "FAIL: missing-variant diagnostic: $diag"; exit 1; }
 
 echo "== slices (b3) =="
@@ -89,7 +104,7 @@ out=$("$OXL" run tests/fnval.oxl)
 [ "$(tail -1 <<<"$out")" = "fnval ok" ] || { echo "FAIL fnval: $out"; exit 1; }
 # fn values can't suspend, capture susp, compare, or wrap generics/pairs
 for bad in susp clsusp ctrans gen pair eq; do
-    cat > /tmp/fnv_$bad.oxl <<EOF
+    cat > "$scratch/fnv_$bad.oxl" <<EOF
 $(case $bad in
   susp)   printf 'fn s() { sleep(1) }\nfn main() { f := s }' ;;
   clsusp) printf 'fn main() { f := { |x: int| sleep(1); return x } }' ;;
@@ -99,7 +114,7 @@ $(case $bad in
   eq)     printf 'fn a() {}\nfn main() { f := a; if f == a { println(1) } }' ;;
 esac)
 EOF
-    if "$OXL" build /tmp/fnv_$bad.oxl -o /tmp/fnv_$bad 2>/dev/null; then
+    if "$OXL" build "$scratch/fnv_$bad.oxl" -o "$scratch/fnv_$bad" 2>/dev/null; then
         echo "FAIL: fnval/$bad compiled (should be rejected)"; exit 1
     fi
 done
@@ -114,7 +129,7 @@ out=$("$OXL" run tests/defer_test.oxl)
 # loop defers (2 1 0), the untaken branch registering nothing (7 only)
 [ "$out" = $'3\n2\n1\n9\n2\n1\n0\n7\ndone' ] || { echo "FAIL defer: $out"; exit 1; }
 # trap unwind still drains the task's defer stack before aborting
-cat > /tmp/d5trap.oxl <<'EOF'
+cat > "$scratch/d5trap.oxl" <<'EOF'
 fn dmark(x: int) { println(itoa(x)) }
 fn willtrap() {
     defer dmark(6)
@@ -124,7 +139,7 @@ fn willtrap() {
 }
 fn main() { willtrap() }
 EOF
-trapout=$(with_timeout 10 "$OXL" run /tmp/d5trap.oxl 2>&1 || true)
+trapout=$(with_timeout 10 "$OXL" run "$scratch/d5trap.oxl" 2>&1 || true)
 grep -q "^5$" <<<"$trapout" || { echo "FAIL defer trap drain: $trapout"; exit 1; }
 grep -q "^6$" <<<"$trapout" || { echo "FAIL defer trap drain order: $trapout"; exit 1; }
 
@@ -132,57 +147,57 @@ echo "== methods + interfaces (d3) =="
 out=$("$OXL" run tests/methods.oxl)
 [ "$out" = "methods ok" ] || { echo "FAIL methods: $out"; exit 1; }
 # a method-less type must not satisfy a method interface
-cat > /tmp/d3sat.oxl <<'D3EOF'
+cat > "$scratch/d3sat.oxl" <<'D3EOF'
 interface Writer { write(s: str) -> int }
 struct Bare { n: int }
 fn emit(w: Writer) -> int { return w.write("x") }
 fn main() { emit(Bare{n: 1}) }
 D3EOF
-if "$OXL" build /tmp/d3sat.oxl -o /tmp/d3sat 2>/dev/null; then
+if "$OXL" build "$scratch/d3sat.oxl" -o "$scratch/d3sat" 2>/dev/null; then
     echo "FAIL: unsatisfied iface compiled"; exit 1
 fi
 # methods can't suspend — vtable calls carry no task frame
-cat > /tmp/d3susp.oxl <<'D3EOF'
+cat > "$scratch/d3susp.oxl" <<'D3EOF'
 struct S { n: int }
 fn (s S) wait() { sleep(1) }
 fn main() { s := S{n: 0}; s.wait() }
 D3EOF
-if "$OXL" build /tmp/d3susp.oxl -o /tmp/d3susp 2>/dev/null; then
+if "$OXL" build "$scratch/d3susp.oxl" -o "$scratch/d3susp" 2>/dev/null; then
     echo "FAIL: suspending method compiled"; exit 1
 fi
 
 echo "== move tracking (d2) =="
 # use-after-move must be a compile error naming the binding
-cat > /tmp/d2move.oxl <<'EOF'
+cat > "$scratch/d2move.oxl" <<'EOF'
 struct P { v: int }
 fn take(p: own P) { }
 fn main() { p := new(P); take(p); take(p) }
 EOF
-if "$OXL" build /tmp/d2move.oxl -o /tmp/d2move 2>/dev/null; then
+if "$OXL" build "$scratch/d2move.oxl" -o "$scratch/d2move" 2>/dev/null; then
     echo "FAIL: use-after-move compiled"; exit 1
 fi
-diag=$("$OXL" build /tmp/d2move.oxl -o /tmp/d2move 2>&1 || true)
+diag=$("$OXL" build "$scratch/d2move.oxl" -o "$scratch/d2move" 2>&1 || true)
 grep -q 'use of moved value `p`' <<<"$diag" || { echo "FAIL moved diag: $diag"; exit 1; }
 # the headline bug class — one own cell into two spawned workers
-cat > /tmp/d2spawn.oxl <<'EOF'
+cat > "$scratch/d2spawn.oxl" <<'EOF'
 struct P { v: int }
 fn w(p: own P) { }
 fn main() { p := new(P); spawn w(p); spawn w(p) }
 EOF
-if "$OXL" build /tmp/d2spawn.oxl -o /tmp/d2spawn 2>/dev/null; then
+if "$OXL" build "$scratch/d2spawn.oxl" -o "$scratch/d2spawn" 2>/dev/null; then
     echo "FAIL: double-spawn of own compiled"; exit 1
 fi
 # moved inside a loop body — the next iteration would read a moved value
-cat > /tmp/d2for.oxl <<'EOF'
+cat > "$scratch/d2for.oxl" <<'EOF'
 struct P { v: int }
 fn take(p: own P) { }
 fn main() { p := new(P); for true { take(p) } }
 EOF
-if "$OXL" build /tmp/d2for.oxl -o /tmp/d2for 2>/dev/null; then
+if "$OXL" build "$scratch/d2for.oxl" -o "$scratch/d2for" 2>/dev/null; then
     echo "FAIL: move-in-loop compiled"; exit 1
 fi
 # re-init clears the mark
-cat > /tmp/d2ok.oxl <<'EOF'
+cat > "$scratch/d2ok.oxl" <<'EOF'
 struct P { v: int }
 fn take(p: own P) { }
 fn main() {
@@ -193,16 +208,16 @@ fn main() {
     println("ok")
 }
 EOF
-out=$("$OXL" run /tmp/d2ok.oxl)
+out=$("$OXL" run "$scratch/d2ok.oxl")
 [ "$out" = "ok" ] || { echo "FAIL d2 reinit: $out"; exit 1; }
 # moved in one branch: the join can't prove which path ran — reject the
 # later read unless EVERY path re-initializes the binding
-cat > /tmp/d2branch.oxl <<'EOF'
+cat > "$scratch/d2branch.oxl" <<'EOF'
 struct P { v: int }
 fn take(p: own P) { }
 fn main() { p := new(P); if len("x") > 0 { take(p) }; take(p) }
 EOF
-if "$OXL" build /tmp/d2branch.oxl -o /tmp/d2branch 2>/dev/null; then
+if "$OXL" build "$scratch/d2branch.oxl" -o "$scratch/d2branch" 2>/dev/null; then
     echo "FAIL: one-branch move compiled"; exit 1
 fi
 # shared cells are copy/shareable — same cell to four workers is intended
@@ -236,7 +251,7 @@ done
 
 echo "== bootstrap codegen =="
 # the self-hosted C emitter must produce working binaries
-cgen_dir=$(mktemp -d)
+cgen_dir=$(mktemp -d "$scratch/cgen.XXXXXX")
 for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl; do
     "$OXL" run bootstrap/codegen.oxl -- "$f" > "$cgen_dir/out.c"
     # sqlite only when the emitted C calls it — mirrors emit_and_cc
@@ -318,13 +333,16 @@ send({"jsonrpc":"2.0","method":"exit","params":{}})
 PYEOF
 
 echo "== http pilot =="
-work=$(mktemp -d)
+work=$(mktemp -d "$scratch/http.XXXXXX")
 "$OXL" build examples/http-crud-sqlite/main.oxl -o "$work/httpsrv"
-pkill -f "$work/httpsrv" 2>/dev/null || true
 curl -s -m 1 -o /dev/null localhost:8080/items && { echo "FAIL: :8080 already bound"; exit 1; } || true
 (cd "$work"; ./httpsrv > srv.log 2>&1 & echo $! > srv.pid)
-sleep 1
 srv_pid=$(cat "$work/srv.pid")
+# readiness can lag on slow runners — poll the log instead of a fixed sleep
+for _ in $(seq 1 50); do
+    grep -q "listening" "$work/srv.log" && break
+    sleep 0.2
+done
 grep -q "listening" "$work/srv.log" || { echo "FAIL: server did not bind"; cat "$work/srv.log"; kill $srv_pid 2>/dev/null; exit 1; }
 got=$(curl -s -d widget localhost:8080/items)
 [ "$got" = '{"created":"widget"}' ] || { echo "FAIL post: $got"; kill $srv_pid 2>/dev/null; exit 1; }

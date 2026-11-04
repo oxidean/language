@@ -35,6 +35,7 @@ static void *alloc_in(RtScope *s, int64_t size, int own) {
         h->hscope = NULL;
     } else {
         h = malloc(total);
+        if (!h) { fprintf(stderr, "oxl: out of memory (%lld bytes)\n", (long long)total); abort(); }
         h->arena = 0;
         h->hscope = NULL;
         /* non-own allocs that miss the arena are still scope-lived:
@@ -348,15 +349,26 @@ static void task_release_frame(RtTask *t, int trapped) {
      * through the walk — the final unref is the last drop. */
     if (t->is_frame && !trapped) {
         for (RtScope *x = t->frame->cur_scope;
-             x && x != t->scope; x = x->parent) {
+             x && x != t->scope;) {
             pthread_mutex_lock(&x->mu);
             x->orphan = 1;
             x->cancel = 1;
             int live = x->pending > 0;
-            if (live) task_ref(t);
+            /* live orphans take a temp pending ref so x->mu and the
+             * parked list stay alive through the wake pass — without it
+             * the last child's scope_done can tear x down while
+             * scope_cancel_wake still walks it (rt_trap protocol) */
+            if (live) { task_ref(t); x->pending++; }
+            RtScope *up = x->parent;
             pthread_mutex_unlock(&x->mu);
-            if (live) scope_cancel_wake(x);
-            else scope_teardown(x);
+            if (!live) { scope_teardown(x); x = up; continue; }
+            scope_cancel_wake(x);
+            int drain = 0;
+            pthread_mutex_lock(&x->mu);
+            if (--x->pending <= 0) drain = 1;
+            pthread_mutex_unlock(&x->mu);
+            if (drain) scope_orphan_free(x);
+            x = up;
         }
     }
     task_unref(t);
@@ -1670,9 +1682,10 @@ OxlStr rt_readfile(OxlStr path) {
     if (!f) return rt_str("");
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
+    if (n < 0) { fclose(f); return rt_str(""); }
     fseek(f, 0, SEEK_SET);
     char *buf = rt_alloc(n + 1);
-    fread(buf, 1, (size_t)n, f);
+    n = (long)fread(buf, 1, (size_t)n, f);
     fclose(f);
     buf[n] = 0;
     return (OxlStr){ buf, n };

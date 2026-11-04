@@ -2,15 +2,19 @@ import "std/os"
 
 import "std/testing"
 
+import "std/time"
+
 fn test_args() {
     testing.expect(os.nargs() >= 1, "has args")
     testing.expect(len(os.args(0)) > 0, "argv0 nonempty")
 }
 
 fn test_file() {
-    n := os.writefile_("/tmp/oxl-ostest.txt", "hello os")
+    // unique per run — parallel jobs on one host must not share the path
+    p := "/tmp/oxl-ostest-" + itoa(time.unix_ms()) + ".txt"
+    n := os.writefile_(p, "hello os")
     testing.expect(n == 0, "write ok")
-    testing.expect_streq(os.readfile_("/tmp/oxl-ostest.txt"), "hello os", "read back")
+    testing.expect_streq(os.readfile_(p), "hello os", "read back")
 }
 
 fn main() {}

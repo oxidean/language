@@ -62,7 +62,7 @@ pending count — identical containment to the thread model.
 ```oxl
 ch := mkchan()          // unbuffered, ownership-typed
 send(ch, v)             // moves v into the channel; v dead after
-[v, ok] := recv(ch)     // ok=false when closed+empty
+v := recv(ch)           // blocks; returns the sent word
 close(ch)
 ```
 
@@ -80,6 +80,10 @@ select {
     v := recv(a) => { println(v) }   // bind optional
     recv(b)      => { ... }          // fire-and-discard
     timeout(ms)  => { ... }          // at most one
+}
+
+select {
+    recv(c)      => { ... }
     else         => { ... }          // non-blocking default
 }
 ```
