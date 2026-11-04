@@ -41,6 +41,30 @@ fn c_escape(s: &str) -> String {
     out
 }
 
+/// one declared iface method — sig only; the receiver is the
+/// interface's implicit data ptr
+#[derive(Clone)]
+struct IMeth {
+    name: String,
+    params: Vec<Ty>,
+    ret: crate::check::Ret,
+}
+
+/// how a resolved call emits: a direct `T.m` (optional prepended
+/// receiver) or an iface vtab slot call
+enum CallPlan {
+    Fn { q: String, recv: Option<Expr> },
+    Vt { obj: Expr, w: String, midx: usize, mname: String,
+         params: Vec<Ty>, ret: crate::check::Ret },
+    None,
+}
+
+enum MT {
+    Fn(String),
+    /// (slot index, declared params, declared ret)
+    Vt(usize, Vec<Ty>, crate::check::Ret),
+}
+
 struct Gen<'a> {
     out: String,
     trampolines: String,
@@ -59,6 +83,11 @@ struct Gen<'a> {
     enums: HashMap<String, Vec<String>>,
     /// "E.V" -> payload field types (also mirrored into `structs`)
     enum_fields: HashMap<String, Vec<(String, Ty)>>,
+    /// iface name -> declared methods in order (= vtab slot order)
+    ifaces: HashMap<String, Vec<IMeth>>,
+    /// (iface, impl) pairs materialized at conversion sites — impl is a
+    /// struct/enum name or `iface:{w2}` for iface-to-iface rewraps
+    vtab_uses: std::collections::BTreeSet<(String, String)>,
     fns: HashMap<String, (Vec<Ty>, crate::check::Ret)>,
     ty_params: HashMap<String, Vec<(String, String)>>,
     ast_fns: HashMap<String, &'a Fn>,
@@ -69,6 +98,9 @@ struct Gen<'a> {
     externs: std::collections::HashSet<String>,
     globals: HashMap<String, Ty>,
     cur_ret_pair: bool,
+    /// T of the current fn's `-> T` / `-> [T, err]` — conversion target
+    /// for `return v` values
+    cur_ret_ty: Ty,
     cur_fn: String,
     /// fn-scope defer stack — calls run LIFO at each return / fn end
     defers: Vec<Expr>,
@@ -123,6 +155,8 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         structs: HashMap::new(),
         enums: HashMap::new(),
         enum_fields: HashMap::new(),
+        ifaces: HashMap::new(),
+        vtab_uses: std::collections::BTreeSet::new(),
         fns: HashMap::new(),
         ty_params: HashMap::new(),
         ast_fns: HashMap::new(),
@@ -133,6 +167,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         externs: std::collections::HashSet::new(),
         globals: HashMap::new(),
         cur_ret_pair: false,
+        cur_ret_ty: Ty::Void,
         cur_fn: String::new(),
         defers: Vec::new(),
         test_mode,
@@ -151,10 +186,26 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         frame_out: String::new(),
     };
     // enum names first: `ty_of_ref`/`enum_variant` need them regardless of
-    // declaration order relative to fns and structs
+    // declaration order relative to fns and structs; iface decls likewise —
+    // a param `w: Writer` can appear before the interface item
     for it in &c.items {
-        if let Item::Enum(e) = it {
-            g.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect());
+        match it {
+            Item::Enum(e) => {
+                g.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect());
+            }
+            Item::Interface(i) => {
+                let methods = i.methods.iter().map(|m| IMeth {
+                    name: m.name.clone(),
+                    params: m.params.iter().map(|p| g.ty_of_ref(&p.ty)).collect(),
+                    ret: match &m.ret {
+                        RetTy::Void => crate::check::Ret::Void,
+                        RetTy::One(t) => crate::check::Ret::One(g.ty_of_ref(t)),
+                        RetTy::Pair(t) => crate::check::Ret::Pair(g.ty_of_ref(t)),
+                    },
+                }).collect();
+                g.ifaces.insert(i.name.clone(), methods);
+            }
+            _ => {}
         }
     }
     for it in &c.items {
@@ -184,7 +235,11 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
             }
             Item::Fn(f) | Item::Extern(f) => {
                 g.cur_tyvars = f.ty_params.iter().map(|(t, _)| t.clone()).collect();
-                let params = f.params.iter().map(|p| g.ty_of_ref(&p.ty)).collect();
+                let mut params: Vec<Ty> = Vec::new();
+                if let Some(r) = &f.recv {
+                    params.push(g.ty_of_ref(&r.ty));
+                }
+                params.extend(f.params.iter().map(|p| g.ty_of_ref(&p.ty)));
                 let ret = match &f.ret {
                     RetTy::Void => crate::check::Ret::Void,
                     RetTy::One(t) => crate::check::Ret::One(g.ty_of_ref(t)),
@@ -266,6 +321,17 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         }
     }
 
+    // iface vtab call ret structs for `-> [T, err]` methods
+    for (w, ms) in &g.ifaces {
+        for m in ms {
+            if let crate::check::Ret::Pair(t) = &m.ret {
+                let _ = writeln!(
+                    out, "struct o_vret_{}_{} {{ {} val; int64_t err; }};",
+                    cname(w), cname(&m.name), g.cty(t));
+            }
+        }
+    }
+
     // file-scope globals (initialized in oxl_main prologue)
     for it in &c.items {
         if let Item::Global(gl) = it {
@@ -297,17 +363,30 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
             }
         }
     }
-    // monomorphized instantiations (drain until stable — instantiations
-    // can themselves call generics)
-    while let Some((fname, bind)) = g.insts.pop() {
-        let mangled = inst_name(&fname, &bind);
-        if !g.inst_done.insert(mangled.clone()) {
-            continue;
+    // monomorphized instantiations + vtab-seeded method insts —
+    // co-fixpoint: bodies create conv sites (vtab uses), vtab thunks
+    // need generic method instances
+    loop {
+        let mut progress = false;
+        while let Some((fname, bind)) = g.insts.pop() {
+            let mangled = inst_name(&fname, &bind);
+            if !g.inst_done.insert(mangled.clone()) {
+                continue;
+            }
+            progress = true;
+            if let Some(f) = g.ast_fns.get(&fname).cloned() {
+                g.func_inst(f, &mangled, &bind);
+            }
         }
-        if let Some(f) = g.ast_fns.get(&fname).cloned() {
-            g.func_inst(f, &mangled, &bind);
+        progress |= g.seed_vtab_insts();
+        if !progress {
+            break;
         }
     }
+    // concrete vtabs + receiver-normalizing thunks — after every body
+    // so vtab_uses is final
+    let mut vtab_out = String::new();
+    g.emit_vtabs(&mut vtab_out);
     // B4: zero-env wrappers giving named fns the (void* env, args...)
     // calling convention every fn value shares
     for n in g.fnv_wraps.clone() {
@@ -336,7 +415,8 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
     let mut global_inits = String::new();
     for it in &c.items {
         if let Item::Global(gl) = it {
-            let v = g.expr(&gl.init);
+            let gt = g.globals.get(&gl.name).cloned().unwrap_or(Ty::Unknown);
+            let v = g.conv(&gl.init, &gt);
             let _ = writeln!(global_inits, "    o_g_{} = {v};", cname(&gl.name));
         }
     }
@@ -373,11 +453,18 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
     final_out.push_str(&g.frame_head);
     final_out.push_str(&g.inst_protos);
     final_out.push_str(&g.closure_protos);
+    final_out.push_str(&vtab_out);
     final_out.push_str(&g.inst_out);
     final_out.push_str(&g.frame_out);
     final_out.push_str(&g.out[body_start..]);
     final_out.push_str(&g.closure_bodies);
     final_out
+}
+
+/// params with the method receiver prepended — `fn (r T) m` emits its
+/// C fn with `r` as arg 0
+fn all_params(f: &Fn) -> Vec<&Param> {
+    f.recv.iter().chain(f.params.iter()).collect()
 }
 
 fn inst_name(fname: &str, bind: &[(String, Ty)]) -> String {
@@ -443,6 +530,8 @@ impl<'a> Gen<'a> {
                         Ty::Var(s.to_string())
                     } else if self.enums.contains_key(s) {
                         Ty::Enum(s.to_string())
+                    } else if self.ifaces.contains_key(s) {
+                        Ty::Iface(s.to_string())
                     } else {
                         Ty::Struct(s.to_string())
                     }
@@ -474,6 +563,7 @@ impl<'a> Gen<'a> {
             Ty::Enum(n) => format!("struct o_en_{}", cname(n)),
             Ty::Slice(_) => "RtSlice".into(),
             Ty::Fn(..) => "RtFnv".into(),
+            Ty::Iface(_) => "RtIface".into(),
             Ty::Var(v) => self
                 .subst
                 .get(v)
@@ -504,8 +594,7 @@ impl<'a> Gen<'a> {
         } else {
             (format!("o_f_{}", cname(&f.name)), self.ret_decl(f, true))
         };
-        let params: Vec<String> = f
-            .params
+        let params: Vec<String> = all_params(f)
             .iter()
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
@@ -537,8 +626,7 @@ impl<'a> Gen<'a> {
             return;
         }
         let ret_c = self.ret_decl(f, true);
-        let params: Vec<String> = f
-            .params
+        let params: Vec<String> = all_params(f)
             .iter()
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
@@ -546,9 +634,13 @@ impl<'a> Gen<'a> {
         let _ = writeln!(self.out, "{ret_c} o_f_{}({params}) {{", cname(&f.name));
         self.cur_fn = f.name.clone();
         self.cur_ret_pair = matches!(f.ret, RetTy::Pair(_));
+        self.cur_ret_ty = match &f.ret {
+            RetTy::One(t) | RetTy::Pair(t) => self.ty_of_ref(t),
+            RetTy::Void => Ty::Void,
+        };
         self.defers.clear();
         self.env.push(HashMap::new());
-        for p in &f.params {
+        for p in all_params(f) {
             let t = self.ty_of_ref(&p.ty);
             self.env.last_mut().unwrap().insert(p.name.clone(), t);
         }
@@ -603,8 +695,7 @@ impl<'a> Gen<'a> {
         self.inst_protos.push_str(&proto);
         // body — emitted into the swapped-out self.out (stmt() writes there)
         let ret_c = self.ret_decl_named(f, mangled);
-        let params: Vec<String> = f
-            .params
+        let params: Vec<String> = all_params(f)
             .iter()
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
@@ -612,8 +703,12 @@ impl<'a> Gen<'a> {
         let _ = writeln!(self.out, "{ret_c} o_f_{}({params}) {{", cname(&mangled));
         self.cur_fn = mangled.to_string();
         self.cur_ret_pair = matches!(f.ret, RetTy::Pair(_));
+        self.cur_ret_ty = match &f.ret {
+            RetTy::One(t) | RetTy::Pair(t) => self.ty_of_ref(t),
+            RetTy::Void => Ty::Void,
+        };
         self.env.push(HashMap::new());
-        for p in &f.params {
+        for p in all_params(f) {
             let t = self.ty_of_ref(&p.ty);
             self.env.last_mut().unwrap().insert(p.name.clone(), t);
         }
@@ -632,8 +727,7 @@ impl<'a> Gen<'a> {
 
     fn proto_named(&self, out: &mut String, f: &Fn, name: &str) {
         let ret_c = self.ret_decl_named(f, name);
-        let params: Vec<String> = f
-            .params
+        let params: Vec<String> = all_params(f)
             .iter()
             .map(|p| format!("{} {}", self.pty(&self.ty_of_ref(&p.ty)), p.name))
             .collect();
@@ -710,6 +804,34 @@ impl<'a> Gen<'a> {
                             kind: ExprKind::Ident(obj.to_string()), span: e.span,
                         }), Ty::Enum(_)) {
                             return Ty::Int;
+                        }
+                    }
+                    if self.fns.get(n).is_none() {
+                        // method/iface call — declared sig from the plan
+                        match self.call_plan(f, args) {
+                            CallPlan::Vt { ret, .. } => return match ret {
+                                crate::check::Ret::One(t) | crate::check::Ret::Pair(t) => t,
+                                crate::check::Ret::Void => Ty::Void,
+                            },
+                            CallPlan::Fn { q, recv } => {
+                                if let Some((_, r)) = self.fns.get(&q) {
+                                    let eff: Vec<Expr> = recv.iter().cloned()
+                                        .chain(args.iter().cloned()).collect();
+                                    return match r {
+                                        crate::check::Ret::One(t) | crate::check::Ret::Pair(t) => {
+                                            if let Some(bind) = call_bindings(self, &q, &eff) {
+                                                let m: HashMap<String, Ty> =
+                                                    bind.into_iter().collect();
+                                                crate::check::subst_ty(t, &m)
+                                            } else {
+                                                self.dt(t)
+                                            }
+                                        }
+                                        crate::check::Ret::Void => Ty::Void,
+                                    };
+                                }
+                            }
+                            CallPlan::None => {}
                         }
                     }
                     if let Some((_, r)) = self.fns.get(n) {
@@ -894,7 +1016,7 @@ impl<'a> Gen<'a> {
                     None => self.expr_ty(init),
                 };
                 let ct = self.cty(&t);
-                let v = self.expr(init);
+                let v = self.conv(init, &t);
                 let _ = writeln!(self.out, "    {ct} {name} = {v};");
                 self.env.last_mut().unwrap().insert(name.clone(), t);
             }
@@ -903,22 +1025,47 @@ impl<'a> Gen<'a> {
                     if let ExprKind::Ident(fn_name) = &f.kind {
                         let n = self.tmp();
                         let c = self.expr(call);
-                        let (ret_name, bind) = match call_bindings(self, fn_name, args) {
-                            Some(bind) => (inst_name(fn_name, &bind), Some(bind)),
-                            None => (fn_name.clone(), None),
+                        // ret-struct name + val type by call kind: direct fn
+                        // (o_ret_<name>), instantiated generic (o_ret_<mangled>),
+                        // method (o_ret_<T.m>), iface vtab (o_vret_<W>_<m>)
+                        let (ret_name, vt) = match self.call_plan(f, args) {
+                            CallPlan::Vt { w, mname, ret, .. } => {
+                                let vt = match ret {
+                                    crate::check::Ret::Pair(t) => t,
+                                    _ => Ty::Unknown,
+                                };
+                                (format!("o_vret_{}_{}", cname(&w), cname(&mname)), vt)
+                            }
+                            _ => {
+                                let q = match self.call_plan(f, args) {
+                                    CallPlan::Fn { q, .. } => q,
+                                    _ => fn_name.clone(),
+                                };
+                                let eff: Vec<Expr> = match self.call_plan(f, args) {
+                                    CallPlan::Fn { recv, .. } => recv.iter().cloned()
+                                        .chain(args.iter().cloned()).collect(),
+                                    _ => args.to_vec(),
+                                };
+                                let bind = call_bindings(self, &q, &eff);
+                                let ret_name = match &bind {
+                                    Some(b) => inst_name(&q, b),
+                                    None => q.clone(),
+                                };
+                                let vt = match self.fns.get(&q).map(|x| x.1.clone()) {
+                                    Some(crate::check::Ret::Pair(t)) => match &bind {
+                                        Some(bind) => {
+                                            let m: HashMap<String, Ty> =
+                                                bind.iter().cloned().collect();
+                                            crate::check::subst_ty(&t, &m)
+                                        }
+                                        None => self.dt(&t),
+                                    },
+                                    _ => Ty::Unknown,
+                                };
+                                (format!("o_ret_{}", cname(&ret_name)), vt)
+                            }
                         };
-                        let _ = writeln!(self.out, "    struct o_ret_{} _r{n} = {c};", cname(&ret_name));
-                        let vt = match self.fns.get(fn_name).map(|x| x.1.clone()) {
-                            Some(crate::check::Ret::Pair(t)) => match &bind {
-                                Some(bind) => {
-                                    let m: HashMap<String, Ty> =
-                                        bind.iter().cloned().collect();
-                                    crate::check::subst_ty(&t, &m)
-                                }
-                                None => self.dt(&t),
-                            },
-                            _ => Ty::Unknown,
-                        };
+                        let _ = writeln!(self.out, "    struct {ret_name} _r{n} = {c};");
                         if let Bind::Name(na) = a {
                             let ct = self.cty(&vt);
                             let _ = writeln!(self.out, "    {ct} {na} = _r{n}.val;");
@@ -933,7 +1080,7 @@ impl<'a> Gen<'a> {
             }
             Stmt::Assign { target, val, .. } => {
                 let t = self.expr(target);
-                let v = self.expr(val);
+                let v = self.conv(val, &self.expr_ty(target).clone());
                 let _ = writeln!(self.out, "    {t} = {v};");
             }
             Stmt::Expr(e) => {
@@ -954,10 +1101,25 @@ impl<'a> Gen<'a> {
                     let cf = self.cur_fn.clone();
                     let _ = writeln!(self.out, "    return (struct o_ret_{}){{ {v}, {e} }};", cname(&cf));
                 } else if self.cur_ret_pair && vals.len() == 1 {
+                    // forwarding a call — an iface Pair comes back as
+                    // o_vret_<W>_<m>; copy into this fn's o_ret_<f>
                     let c = self.expr(&vals[0]);
-                    let _ = writeln!(self.out, "    return {c};");
+                    let fwd_vt = matches!(
+                        self.call_plan_ret(&vals[0]),
+                        Some(crate::check::Ret::Pair(_))
+                            if matches!(&vals[0].kind,
+                                ExprKind::Call { f, .. }
+                                    if !matches!(&f.kind, ExprKind::Ident(n) if self.fns.contains_key(n)))
+                    );
+                    if fwd_vt {
+                        let cf = self.cur_fn.clone();
+                        let _ = writeln!(self.out,
+                            "    return (struct o_ret_{}){{ ({c}).val, ({c}).err }};", cname(&cf));
+                    } else {
+                        let _ = writeln!(self.out, "    return {c};");
+                    }
                 } else {
-                    let v = self.expr(&vals[0]);
+                    let v = self.conv(&vals[0], &self.cur_ret_ty.clone());
                     let _ = writeln!(self.out, "    return {v};");
                 }
             }
@@ -1050,7 +1212,10 @@ impl<'a> Gen<'a> {
                 let fv = self.expr(f);
                 let _ = writeln!(self.out, "      a->a0 = {fv};");
                 for (i, arg) in args.iter().enumerate() {
-                    let v = self.expr(arg);
+                    let v = match ps.get(i).cloned() {
+                        Some(pt) => self.conv(arg, &pt),
+                        None => self.expr(arg),
+                    };
                     let _ = writeln!(self.out, "      a->a{} = {v};", i + 1);
                 }
                 let spawn_fn = if blocking { "rt_spawnb" } else { "rt_spawn" };
@@ -1080,8 +1245,12 @@ impl<'a> Gen<'a> {
                     let _ = writeln!(self.out,
                         "    {{ struct o_frm_{} *_t = (struct o_frm_{} *)rt_task_new(o_poll_{}, (int64_t)sizeof(struct o_frm_{}));",
                         cname(&mangled), cname(&mangled), cname(&mangled), cname(&mangled));
+                    let ptys = self.decl_param_tys(fn_name, args);
                     for (i, arg) in args.iter().enumerate() {
-                        let v = self.expr(arg);
+                        let v = match ptys.as_ref().and_then(|p| p.get(i)).cloned() {
+                            Some(pt) => self.conv(arg, &pt),
+                            None => self.expr(arg),
+                        };
                         if let Some(pn) = pnames.get(i) {
                             let _ = writeln!(self.out, "      _t->p_{pn} = {v};");
                         }
@@ -1093,7 +1262,11 @@ impl<'a> Gen<'a> {
                 }
                 let id = self.tmp();
                 // args struct + trampoline at file scope
-                let arg_tys: Vec<Ty> = args.iter().map(|a| self.expr_ty(a)).collect();
+                let dtys = self.decl_param_tys(fn_name, args);
+                let arg_tys: Vec<Ty> = args.iter().enumerate()
+                    .map(|(i, a)| dtys.as_ref().and_then(|p| p.get(i)).cloned()
+                        .unwrap_or_else(|| self.expr_ty(a)))
+                    .collect();
                 let mut tr = format!("struct o_args_{id} {{");
                 for (i, t) in arg_tys.iter().enumerate() {
                     tr.push_str(&format!(" {} a{i};", self.cty(t)));
@@ -1123,7 +1296,10 @@ impl<'a> Gen<'a> {
                 let _ = writeln!(self.out,
                     "    {{ struct o_args_{id}* a = rt_alloc(sizeof(struct o_args_{id}));");
                 for (i, arg) in args.iter().enumerate() {
-                    let v = self.expr(arg);
+                    let v = match dtys.as_ref().and_then(|p| p.get(i)).cloned() {
+                        Some(pt) => self.conv(arg, &pt),
+                        None => self.expr(arg),
+                    };
                     let _ = writeln!(self.out, "      a->a{i} = {v};");
                 }
                 let spawn_fn = if blocking { "rt_spawnb" } else { "rt_spawn" };
@@ -1180,18 +1356,28 @@ impl<'a> Gen<'a> {
             ExprKind::StructLit { name, fields } => {
                 // named variant construction: `ExprKind.Bin{op, l, r}`
                 if let Some((en, _v, i)) = self.enum_variant(name) {
+                    let want = self.enum_fields.get(name).cloned().unwrap_or_default();
                     let init = fields
                         .iter()
-                        .map(|(n, fe)| format!(".f_{n} = {}", self.expr(fe)))
+                        .map(|(n, fe)| {
+                            let wt = want.iter().find(|(wn, _)| wn == n)
+                                .map(|(_, t)| t.clone()).unwrap_or(Ty::Unknown);
+                            format!(".f_{n} = {}", self.conv(fe, &wt))
+                        })
                         .collect::<Vec<_>>()
                         .join(", ");
                     return format!(
                         "(struct o_en_{}){{ .tag = {}, .u.v{} = (struct o_s_{}){{ {} }} }}",
                         cname(&en), i, i, cname(name), init);
                 }
+                let want = self.structs.get(name).cloned().unwrap_or_default();
                 let init = fields
                     .iter()
-                    .map(|(n, fe)| format!(".f_{n} = {}", self.expr(fe)))
+                    .map(|(n, fe)| {
+                        let wt = want.iter().find(|(wn, _)| wn == n)
+                            .map(|(_, t)| t.clone()).unwrap_or(Ty::Unknown);
+                        format!(".f_{n} = {}", self.conv(fe, &wt))
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("(struct o_s_{}){{ {init} }}", cname(&name))
@@ -1235,6 +1421,18 @@ impl<'a> Gen<'a> {
                 } else if matches!(op, BinOp::Eq | BinOp::Ne) && self.dt(&lt) == Ty::Str {
                     let neg = if *op == BinOp::Ne { "!" } else { "" };
                     format!("({neg}rt_streq({lv}, {rv}))")
+                } else if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && (matches!(self.dt(&lt), Ty::Iface(_))
+                        || matches!(self.dt(&self.expr_ty(r)), Ty::Iface(_)))
+                {
+                    // `w == nil` — compare the data ptr
+                    let le = if matches!(self.dt(&lt), Ty::Iface(_)) {
+                        format!("{lv}.data")
+                    } else { lv.clone() };
+                    let re = if matches!(self.dt(&self.expr_ty(r)), Ty::Iface(_)) {
+                        format!("{rv}.data")
+                    } else { rv.clone() };
+                    format!("({le} {cop} (void*){re})")
                 } else {
                     format!("({lv} {cop} {rv})")
                 }
@@ -1619,6 +1817,311 @@ impl<'a> Gen<'a> {
         })
     }
 
+    /// base struct/enum name behind own/ref/mut — what methods key on
+    fn ty_base(&self, t: &Ty) -> Option<String> {
+        match t {
+            Ty::Struct(n) | Ty::Enum(n) => Some(n.clone()),
+            Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => self.ty_base(b),
+            _ => None,
+        }
+    }
+
+    /// bind a generic impl method's ty params against the iface's
+    /// declared param types — vtab slots pin the instantiation
+    fn vtab_bind(&self, fname: &str, m: &IMeth) -> Option<Vec<(String, Ty)>> {
+        let tp = self.ty_params.get(fname)?;
+        let (params, _) = self.fns.get(fname)?;
+        let mut bind = HashMap::new();
+        // params[0] is the receiver; iface decls carry the rest
+        for (want, got) in params.iter().skip(1).zip(m.params.iter()) {
+            bind_generic(want, got, &mut bind);
+        }
+        Some(tp.iter().map(|(t, _)| (t.clone(), bind.get(t).cloned().unwrap_or(Ty::Int))).collect())
+    }
+
+    /// push method instantiations the current vtab_uses need; true if
+    /// anything new was queued (drives the emit fixpoint)
+    fn seed_vtab_insts(&mut self) -> bool {
+        let mut progress = false;
+        for (w, implkey) in self.vtab_uses.clone() {
+            if implkey.starts_with("iface:") {
+                continue;
+            }
+            let ms = self.ifaces.get(&w).cloned().unwrap_or_default();
+            for m in &ms {
+                let fname = format!("{implkey}.{}", m.name);
+                if let Some(bind) = self.vtab_bind(&fname, m) {
+                    let mangled = inst_name(&fname, &bind);
+                    if !self.inst_done.contains(&mangled) {
+                        self.insts.push((fname, bind));
+                        progress = true;
+                    }
+                }
+            }
+        }
+        progress
+    }
+
+    /// D3: concrete vtabs + receiver-normalizing thunks for every
+    /// (iface, impl) pair a conversion site produced. Each thunk is a
+    /// `RET f(void* _d, params...)` shim that adapts the erased data
+    /// ptr to the impl method's receiver and forwards.
+    fn emit_vtabs(&mut self, out: &mut String) {
+        for (w, implkey) in self.vtab_uses.clone() {
+            let ms = self.ifaces.get(&w).cloned().unwrap_or_default();
+            let mut slots = Vec::new();
+            for (i, m) in ms.iter().enumerate() {
+                let tname = format!("o_vtt_{}_{}_{i}", cname(&w), cname(&implkey));
+                let mut psig = String::new();
+                for (k, p) in m.params.iter().enumerate() {
+                    psig += &format!(", {} a{k}", self.cty(p));
+                }
+                let ret_c = match &m.ret {
+                    crate::check::Ret::One(t) => self.cty(t),
+                    crate::check::Ret::Pair(_) =>
+                        format!("struct o_vret_{}_{}", cname(&w), cname(&m.name)),
+                    crate::check::Ret::Void => "void".into(),
+                };
+                let argl: Vec<String> =
+                    (0..m.params.len()).map(|k| format!("a{k}")).collect();
+                let _ = writeln!(out, "static {ret_c} {tname}(void* _d{psig}) {{");
+                if let Some(w2) = implkey.strip_prefix("iface:") {
+                    // iface -> iface rewrap: forward through the source
+                    // pair's vtab slot for the same-named method
+                    let sms = self.ifaces.get(w2).cloned().unwrap_or_default();
+                    let j = sms.iter().position(|mm| mm.name == m.name).unwrap_or(0);
+                    let mut vsig = String::from("void*");
+                    for p in &m.params {
+                        vsig += &format!(", {}", self.cty(p));
+                    }
+                    let callargs = if argl.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {}", argl.join(", "))
+                    };
+                    match &m.ret {
+                        crate::check::Ret::Void => {
+                            let _ = writeln!(out,
+                                "    RtIface *_iv = (RtIface*)_d;
+    ((void (*)({vsig}))_iv->vtab[{j}])(_iv->data{callargs});");
+                        }
+                        crate::check::Ret::One(t) => {
+                            let c = self.cty(t);
+                            let _ = writeln!(out,
+                                "    RtIface *_iv = (RtIface*)_d;
+    return (({c} (*)({vsig}))_iv->vtab[{j}])(_iv->data{callargs});");
+                        }
+                        crate::check::Ret::Pair(_) => {
+                            let src = format!("struct o_vret_{}_{}", cname(w2), cname(&m.name));
+                            let _ = writeln!(out,
+                                "    RtIface *_iv = (RtIface*)_d;
+    {src} _r = (({src} (*)({vsig}))_iv->vtab[{j}])(_iv->data{callargs});
+    return ({ret_c}){{ _r.val, _r.err }};");
+                        }
+                    }
+                } else {
+                    // concrete impl — data is a ptr to the boxed value
+                    // (or the ptr itself for pointer impls)
+                    let fname = format!("{implkey}.{}", m.name);
+                    let cn = if self.enums.contains_key(&implkey) {
+                        format!("struct o_en_{}", cname(&implkey))
+                    } else {
+                        format!("struct o_s_{}", cname(&implkey))
+                    };
+                    let (callee, smap) = match self.vtab_bind(&fname, m) {
+                        Some(bind) => {
+                            let mangled = inst_name(&fname, &bind);
+                            let smap: HashMap<String, Ty> =
+                                bind.iter().cloned().collect();
+                            (format!("o_f_{}", cname(&mangled)), smap)
+                        }
+                        None => (format!("o_f_{}", cname(&fname)), HashMap::new()),
+                    };
+                    let (mps, mret) = self.fns.get(&fname)
+                        .cloned().unwrap_or((Vec::new(), crate::check::Ret::Void));
+                    let rty = mps.first().cloned().unwrap_or(Ty::Unknown);
+                    let rty = if smap.is_empty() { self.dt(&rty) }
+                        else { crate::check::subst_ty(&rty, &smap) };
+                    let recv = match &rty {
+                        Ty::Struct(_) | Ty::Enum(_) => format!("(*({cn}*)_d)"),
+                        _ => format!("(({cn}*)_d)"),
+                    };
+                    let callargs = if argl.is_empty() {
+                        recv.clone()
+                    } else {
+                        format!("{recv}, {}", argl.join(", "))
+                    };
+                    match &mret {
+                        crate::check::Ret::Void => {
+                            let _ = writeln!(out, "    {callee}({callargs});");
+                        }
+                        crate::check::Ret::One(_) => {
+                            let _ = writeln!(out, "    return {callee}({callargs});");
+                        }
+                        crate::check::Ret::Pair(_) => {
+                            let rname = callee.trim_start_matches("o_f_");
+                            let _ = writeln!(out,
+                                "    struct o_ret_{rname} _r = {callee}({callargs});
+    return ({ret_c}){{ _r.val, _r.err }};");
+                        }
+                    }
+                }
+                let _ = writeln!(out, "}}");
+                slots.push(format!("(void*){tname}"));
+            }
+            let _ = writeln!(out,
+                "static void* o_vt_{}_{}[] = {{ {} }};
+",
+                cname(&w), cname(&implkey), slots.join(", "));
+        }
+    }
+
+    /// field type of `name` on struct `t` — field-of-Fn shadows methods
+    fn field_ty(&self, t: &Ty, name: &str) -> Option<Ty> {
+        let sn = match t {
+            Ty::Struct(n) => n,
+            Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
+                Ty::Struct(n) => n,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.structs.get(sn)?.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone())
+    }
+
+    /// resolve a dotted `x.m` callee to the call plan — mirrors the
+    /// checker: direct `T.m` fn, iface vtab slot, or not-a-method
+    fn call_plan(&self, f: &Expr, args: &[Expr]) -> CallPlan {
+        let ExprKind::Ident(name) = &f.kind else { return CallPlan::None };
+        if self.fns.contains_key(name.as_str()) {
+            return CallPlan::Fn { q: name.clone(), recv: None };
+        }
+        if let Some((objp, mname)) = name.rsplit_once('.') {
+            if let Some(oe) = unflatten(objp, f.span) {
+                let ot = self.dt(&self.expr_ty(&oe));
+                if let Some(mt) = self.m_target(&ot, mname) {
+                    return match mt {
+                        MT::Fn(q) => CallPlan::Fn { q, recv: Some(oe) },
+                        MT::Vt(midx, ps, r) => CallPlan::Vt {
+                            obj: oe, w: self.iface_name(&ot).unwrap_or_default(),
+                            midx, mname: mname.to_string(), params: ps, ret: r,
+                        },
+                    };
+                }
+            }
+        } else if let Some(a0) = args.first() {
+            // `m(x, ..)` — bare method call, receiver is args[0] already
+            let t0 = self.dt(&self.expr_ty(a0));
+            if let Some(MT::Fn(q)) = self.m_target(&t0, name) {
+                return CallPlan::Fn { q, recv: None };
+            }
+        }
+        CallPlan::None
+    }
+
+    fn iface_name(&self, t: &Ty) -> Option<String> {
+        match t {
+            Ty::Iface(w) => Some(w.clone()),
+            Ty::Var(v) => self.subst.get(v).and_then(|t| self.iface_name(t)),
+            _ => None,
+        }
+    }
+
+    fn m_target(&self, t: &Ty, m: &str) -> Option<MT> {
+        match t {
+            Ty::Struct(s) | Ty::Enum(s) => {
+                let q = format!("{s}.{m}");
+                if self.fns.contains_key(&q) { Some(MT::Fn(q)) } else { None }
+            }
+            Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => self.m_target(b, m),
+            Ty::Iface(w) => self.ifaces.get(w)?
+                .iter().enumerate()
+                .find(|(_, mm)| mm.name == m)
+                .map(|(i, mm)| MT::Vt(i, mm.params.clone(), mm.ret.clone())),
+            Ty::Var(v) => self.subst.get(v).and_then(|t| self.m_target(t, m)),
+            _ => None,
+        }
+    }
+
+    /// emit the receiver arg adapted to the method's receiver type:
+    /// value wants deref pointers, pointer wants ref values
+    fn adapt_recv(&mut self, e: &Expr, want: &Ty) -> String {
+        let got = self.dt(&self.expr_ty(e));
+        let ev = self.expr(e);
+        match (want, &got) {
+            (Ty::Struct(_) | Ty::Enum(_), Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_)) => {
+                format!("(*{ev})")
+            }
+            (Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_), Ty::Struct(_) | Ty::Enum(_)) => {
+                format!("(&{ev})")
+            }
+            _ => ev,
+        }
+    }
+
+    /// declared Ret of a call expr — for the pair-forward shape check
+    fn call_plan_ret(&self, e: &Expr) -> Option<crate::check::Ret> {
+        let ExprKind::Call { f, args } = &e.kind else { return None };
+        match self.call_plan(f, args) {
+            CallPlan::Vt { ret, .. } => Some(ret),
+            CallPlan::Fn { q, .. } => self.fns.get(&q).map(|(_, r)| r.clone()),
+            CallPlan::None => None,
+        }
+    }
+
+    /// emit `e` coerced to `want` — only iface conversions do anything:
+    /// wrap the impl into a {data, vtab} pair; nil → the empty pair
+    fn conv(&mut self, e: &Expr, want: &Ty) -> String {
+        let got = self.dt(&self.expr_ty(e));
+        let Ty::Iface(w) = self.dt(want) else { return self.expr(e) };
+        match &got {
+            Ty::Err => "(RtIface){ 0, 0 }".into(),
+            Ty::Iface(g) if *g == w => self.expr(e),
+            Ty::Iface(g) => {
+                let g = g.clone();
+                self.iface_wrap(e, &w, &format!("iface:{g}"))
+            }
+            _ => match self.ty_base(&got) {
+                Some(b) => self.iface_wrap(e, &w, &b),
+                None => self.expr(e),
+            },
+        }
+    }
+
+    /// `{data, o_vt_W_S}` — pointer impls hand over directly, values get
+    /// boxed so the data outlives the stack slot (mut receivers write
+    /// through the box)
+    fn iface_wrap(&mut self, e: &Expr, w: &str, implkey: &str) -> String {
+        self.vtab_uses.insert((w.to_string(), implkey.to_string()));
+        let got = self.dt(&self.expr_ty(e));
+        let v = self.expr(e);
+        let vt = format!("o_vt_{}_{}", cname(w), cname(implkey));
+        match got {
+            Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) => {
+                format!("(RtIface){{ (void*)({v}), {vt} }}")
+            }
+            Ty::Iface(_) => format!(
+                "({{ RtIface *_iw = rt_alloc(sizeof(RtIface)); *_iw = ({v});                  (RtIface){{ (void*)_iw, {vt} }}; }})"),
+            _ => format!(
+                "({{ {ct} *_iw = rt_alloc(sizeof({ct})); *_iw = ({v});                  (RtIface){{ (void*)_iw, {vt} }}; }})",
+                ct = self.cty(&got)),
+        }
+    }
+
+    /// declared param types for a call to `name` (generic-substituted),
+    /// incl. the receiver slot for methods — None for builtins/unknown
+    fn decl_param_tys(&self, name: &str, args: &[Expr]) -> Option<Vec<Ty>> {
+        let (params, _) = self.fns.get(name)?;
+        let smap: HashMap<String, Ty> = call_bindings(self, name, args)
+            .map(|b| b.into_iter().collect())
+            .unwrap_or_default();
+        Some(params.iter().map(|p| if smap.is_empty() {
+            self.dt(p)
+        } else {
+            crate::check::subst_ty(p, &smap)
+        }).collect())
+    }
+
     /// `E.V` — enum name + variant index (tag = declaration order)
     fn enum_variant(&self, path: &str) -> Option<(String, String, usize)> {
         let (e, v) = path.rsplit_once('.')?;
@@ -1648,10 +2151,15 @@ impl<'a> Gen<'a> {
             // enum variant construction: `ExprKind.Int(7)`
             if let Some((en, _v, i)) = self.enum_variant(name) {
                 let key = cname(name);
+                let want = self.enum_fields.get(name).cloned().unwrap_or_default();
+                let cargs: Vec<String> = args.iter().enumerate().map(|(i2, a)| {
+                    let wt = want.get(i2).map(|(_, t)| t.clone()).unwrap_or(Ty::Unknown);
+                    self.conv(a, &wt)
+                }).collect();
                 return format!(
                     "(struct o_en_{}){{ .tag = {}, .u.v{} = (struct o_s_{}){{ {} }} }}",
                     cname(&en), i, i, key,
-                    argvs.join(", "));
+                    cargs.join(", "));
             }
             // `e.kind()` — enum tag accessor (deref `own` handles)
             if let Some((obj, "kind")) = name.rsplit_once('.') {
@@ -1668,7 +2176,59 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
-            match name.as_str() {
+            // method dispatch (D3): `x.m(..)` -> `T.m(x)`, `w.m(..)` ->
+            // vtab call through the iface pair, bare `m(x,..)` -> `T.m`.
+            let mut recv_e: Option<Expr> = None;
+            let mut qname = name.clone();
+            if !self.fns.contains_key(name.as_str()) {
+                match self.call_plan(f, args) {
+                    CallPlan::Fn { q, recv } => {
+                        recv_e = recv;
+                        qname = q;
+                    }
+                    CallPlan::Vt { obj, w, midx, mname, params, ret } => {
+                        let ov = self.expr(&obj);
+                        let ret_c = match &ret {
+                            crate::check::Ret::One(t) => self.cty(t),
+                            crate::check::Ret::Pair(_) =>
+                                format!("struct o_vret_{}_{}", cname(&w), cname(&mname)),
+                            crate::check::Ret::Void => "void".into(),
+                        };
+                        let mut sig = String::from("void*");
+                        for p in &params {
+                            sig += &format!(", {}", self.cty(p));
+                        }
+                        let argl = if argvs.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", {}", argvs.join(", "))
+                        };
+                        return format!(
+                            "({{ RtIface _iv = {ov}; (({ret_c} (*)({sig}))_iv.vtab[{midx}])(_iv.data{argl}); }})");
+                    }
+                    CallPlan::None => {
+                        // `x.m()` may be a call through a fn-valued field —
+                        // expr the unflattened field path if it types Fn
+                        if let Some((objp, mname)) = name.rsplit_once('.') {
+                            if let Some(oe) = unflatten(objp, f.span) {
+                                let ot = self.dt(&self.expr_ty(&oe));
+                                if let Some(Ty::Fn(..)) = self.field_ty(&ot, mname) {
+                                    let fe = Expr {
+                                        kind: ExprKind::Field {
+                                            obj: Box::new(oe),
+                                            name: mname.to_string(),
+                                        },
+                                        span: f.span,
+                                    };
+                                    return self.call(&fe, args);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let name = qname.as_str();
+            match name {
                 "print" | "println" => {
                     let t = self.expr_ty(&args[0]);
                     let (sfx, a) = match t {
@@ -1725,7 +2285,10 @@ impl<'a> Gen<'a> {
                     };
                     let ect = self.cty(&el);
                     let sv = if owned { format!("(*{})", argvs[0]) } else { argvs[0].clone() };
-                    let v = argvs.get(1).cloned().unwrap_or_default();
+                    let v = match args.get(1) {
+                        Some(a) => self.conv(a, &el),
+                        None => String::new(),
+                    };
                     return format!(
                         "({{ {ect} _pv = {v}; rt_slice_push({sv}, sizeof({ect}), &_pv); }})");
                 }
@@ -1745,35 +2308,45 @@ impl<'a> Gen<'a> {
                     if let Some(b) = self.builtin_emit(name, &argvs) {
                         return b;
                     }
+                    // the method receiver flows through the same
+                    // machinery as args[0]
+                    let eff_args: Vec<Expr> = recv_e.iter().cloned()
+                        .chain(args.iter().cloned()).collect();
                     let oxl = self.fns.contains_key(name) && !self.externs.contains(name);
                     let callee = if oxl {
-                        if let Some(bind) = call_bindings(self, name, args) {
+                        if let Some(bind) = call_bindings(self, name, &eff_args) {
                             let m = inst_name(name, &bind);
                             if !self.inst_done.contains(&m) {
-                                self.insts.push((name.clone(), bind));
+                                self.insts.push((name.to_string(), bind));
                             }
                             format!("o_f_{}", cname(&m))
                         } else {
-                            format!("o_f_{}", cname(&name))
+                            format!("o_f_{}", cname(name))
                         }
                     } else {
-                        name.clone()
+                        name.to_string()
                     };
                     // str -> cstr coercion + borrow checks for ref/mut params
                     if let Some((params, ret)) = self.fns.get(name).cloned() {
-                        let smap: HashMap<String, Ty> = call_bindings(self, name, args)
+                        let smap: HashMap<String, Ty> = call_bindings(self, name, &eff_args)
                             .map(|b| b.into_iter().collect())
                             .unwrap_or_default();
                         let mut pre = String::new();
                         let mut post = String::new();
                         let mut coerced: Vec<String> = Vec::new();
-                        for (a, pt) in args.iter().zip(params.iter()) {
+                        for (i, (a, pt)) in eff_args.iter().zip(params.iter()).enumerate() {
                             let pt = if smap.is_empty() {
                                 self.dt(pt)
                             } else {
                                 crate::check::subst_ty(pt, &smap)
                             };
-                            let mut v = self.expr(a);
+                            let mut v = if i == 0 && recv_e.is_some() {
+                                self.adapt_recv(a, &pt)
+                            } else if matches!(pt, Ty::Iface(_)) {
+                                self.conv(a, &pt)
+                            } else {
+                                self.expr(a)
+                            };
                             let raw_at = self.expr_ty(a);
                             if pt == Ty::CStr && self.dt(&raw_at) == Ty::Str {
                                 v = format!("rt_cstr({v})");
@@ -2202,6 +2775,7 @@ impl<'a> Gen<'a> {
     fn hoist_fn(&mut self, f: &Fn) -> Fn {
         Fn {
             name: f.name.clone(),
+            recv: f.recv.clone(),
             ty_params: f.ty_params.clone(),
             params: f.params.iter().map(|p| Param {
                 name: p.name.clone(),
@@ -2248,7 +2822,13 @@ impl<'a> Gen<'a> {
             .get(name)
             .map(|af| af.params.iter().map(|p| p.name.clone()).collect())
             .unwrap_or_default();
-        let argvs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+        let ptys = self.decl_param_tys(name, args);
+        let argvs: Vec<String> = args.iter().enumerate()
+            .map(|(i, a)| match ptys.as_ref().and_then(|p| p.get(i)).cloned() {
+                Some(pt) => self.conv(a, &pt),
+                None => self.expr(a),
+            })
+            .collect();
         let k = self.state_ctr;
         self.state_ctr += 1;
         self.state_labels.push(k);

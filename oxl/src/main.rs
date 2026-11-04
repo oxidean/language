@@ -294,6 +294,15 @@ fn qualify_block(
     locals.pop();
 }
 
+/// named base of a receiver type: `own T`/`ref T`/`mut T`/`T` -> "T"
+fn recv_base(t: &ast::TyRef) -> Option<String> {
+    match &t.kind {
+        ast::TyKind::Named(n) => Some(n.clone()),
+        ast::TyKind::Own(i) | ast::TyKind::Ref(i) | ast::TyKind::Mut(i) => recv_base(i),
+        _ => None,
+    }
+}
+
 fn load_crate(path: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> Option<ast::Crate> {
     load_mod(path, "", seen, true)
 }
@@ -330,6 +339,13 @@ fn load_mod(
     let mut aliases: std::collections::HashMap<String, String> = Default::default();
     if !modname.is_empty() {
         for it in &krate.items {
+            // methods key on the receiver type (`T.m`), not the bare name —
+            // two types may share a method name, so `m` can't be a decl key
+            if let ast::Item::Fn(f) = it {
+                if f.recv.is_some() {
+                    continue;
+                }
+            }
             let n = match it {
                 ast::Item::Fn(f) => Some(&f.name),
                 ast::Item::Struct(s) => Some(&s.name),
@@ -390,7 +406,14 @@ fn qualify_item(
 ) {
     match it {
         ast::Item::Fn(f) => {
-            if let Some(n) = renames.get(&f.name) {
+            if let Some(r) = &mut f.recv {
+                qualify_ty(&mut r.ty, renames, aliases);
+                // the decl name is `{receiver type}.{method}` — receiver
+                // base unwraps own/ref/mut to its Named path
+                if let Some(base) = recv_base(&r.ty) {
+                    f.name = format!("{base}.{}", f.name);
+                }
+            } else if let Some(n) = renames.get(&f.name) {
                 f.name = n.clone();
             }
             for p in &mut f.params {
@@ -401,8 +424,12 @@ fn qualify_item(
                 ast::RetTy::Void => {}
             }
             if let Some(b) = &mut f.body {
-                let mut locals: Locals =
-                    vec![f.params.iter().map(|p| p.name.clone()).collect()];
+                let mut scope: std::collections::HashSet<String> =
+                    f.params.iter().map(|p| p.name.clone()).collect();
+                if let Some(r) = &f.recv {
+                    scope.insert(r.name.clone());
+                }
+                let mut locals: Locals = vec![scope];
                 qualify_block(b, renames, aliases, &mut locals);
             }
         }
@@ -437,6 +464,17 @@ fn qualify_item(
         ast::Item::Interface(i) => {
             if let Some(n) = renames.get(&i.name) {
                 i.name = n.clone();
+            }
+            for m in &mut i.methods {
+                for p in &mut m.params {
+                    qualify_ty(&mut p.ty, renames, aliases);
+                }
+                match &mut m.ret {
+                    ast::RetTy::One(t) | ast::RetTy::Pair(t) => {
+                        qualify_ty(t, renames, aliases)
+                    }
+                    ast::RetTy::Void => {}
+                }
             }
         }
         ast::Item::Global(g) => {

@@ -59,6 +59,25 @@ pub fn callee_name(e: &Expr) -> Option<String> {
     }
 }
 
+/// inverse of `callee_name`: "a.b.c" -> Field{Field{a,b},c} — rebuilds
+/// the receiver/method object behind a flattened dotted ident
+pub fn unflatten(path: &str, span: Span) -> Option<Expr> {
+    let mut it = path.split('.');
+    let mut e = Expr {
+        kind: ExprKind::Ident(it.next()?.to_string()),
+        span,
+    };
+    for n in it {
+        e = Expr {
+            kind: ExprKind::Field { obj: Box::new(e), name: n.to_string() },
+            span,
+        };
+    }
+    Some(e)
+}
+
+
+
 /// top-level `let name[: ty] = init` — process-wide state, initialized
 /// in oxl_main prologue (order: before user main runs)
 #[derive(Clone, Debug)]
@@ -75,12 +94,29 @@ pub struct Interface {
     /// constraint surface: ops the type must support. v0: fixed vocab —
     /// "eq" (==), "ordered" (< >), "add" (+)
     pub ops: Vec<String>,
+    /// method decls — a non-empty list makes the interface a *type*:
+    /// `var w Writer` is a fat {data, vtab} pair; satisfaction is
+    /// structural (impl must carry each method)
+    pub methods: Vec<MethodSig>,
+    pub span: Span,
+}
+
+/// `name(p: t, ..) -> t` inside an interface body — no receiver, no body
+#[derive(Clone, Debug)]
+pub struct MethodSig {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: RetTy,
     pub span: Span,
 }
 
 #[derive(Clone, Debug)]
 pub struct Fn {
     pub name: String,
+    /// `fn (r T) m(...)` — receiver; after module qualification `name`
+    /// is the dotted `T.m` form and `params[0]`-ish typing treats the
+    /// receiver as an implicit first argument
+    pub recv: Option<Param>,
     pub ty_params: Vec<(String, String)>, // [(T, constraint)] — "" = any
     pub params: Vec<Param>,
     pub ret: RetTy,

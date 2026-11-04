@@ -136,6 +136,14 @@ typedef struct {
     void *fp;
 } RtFnv;
 
+/* --- interface values (D3): {data, vtable} fat pair, Go-style itab.
+ * vtab[i] is the fn ptr for the interface's i-th method; its signature
+ * is always (void* data, args...) so any impl slots in uniformly */
+typedef struct {
+    void *data;
+    void **vtab;
+} RtIface;
+
 /* --- misc builtins --- */
 void rt_sleep(int64_t secs);
 OxlStr rt_str_lit(const char *s);

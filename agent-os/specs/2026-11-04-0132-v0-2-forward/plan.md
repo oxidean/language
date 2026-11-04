@@ -91,7 +91,7 @@ Small, self-contained.
 today the checker allows passing the same `own` twice. Soundness gap,
 moderate size.
 
-### Task D3: methods + interface dispatch [not started]
+### Task D3: methods + interface dispatch [done]
 
 `items/d3-methods-interfaces.md`. `impl`-style methods and interface-
 typed values. The biggest type-system item; keep shallow (Go-style

@@ -68,8 +68,12 @@ Ordered by what the checker/codegen port actually needs:
    `{ |a: int| ... }` on `RtFnv {env, fp}` pairs, indirect calls and
    `spawn f()`. v0.2 rejects susp/generic/pair-returning fns as values
    and `==` on them — see `docs/semantics/fnvals.md`.
-5. **Methods / `interface` dispatch** — today's `interface` is only an
-   op-constraint vocabulary for generics, not a type.
+5. ~~**Methods / `interface` dispatch**~~ — **done (D3).** `fn (r T) m`
+   receivers, structural `interface` types as `{data, vtab}` pairs,
+   `w.m()` vtab dispatch, method-constraint generics — see
+   `docs/semantics/methods.md`. The bootstrap components remain a
+   documented subset: they don't parse method syntax (same as
+   generics).
 6. ~~**Maps/sets in stdlib**~~ — **done (B6).** `std/collections`:
    FNV-1a `map`/`set` over `[]Bucket` power-of-2 tables, `int` payloads
    (word-sized, covers env ids and counts). Needed `&`/`|`/`^` infix

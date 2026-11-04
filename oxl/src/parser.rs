@@ -123,20 +123,31 @@ impl<'a> Parser<'a> {
             return self.parse_enum().map(Item::Enum);
         }
         if self.eat_kw(Kw::Interface) {
-            // interface Name { eq, ordered, add }
+            // interface Name { eq, ordered, add, m(p: t) -> t, .. }
             let (name, sp) = self.ident()?;
             self.expect_p(P::LBrace, "`{`");
             let mut ops = Vec::new();
+            let mut methods = Vec::new();
             while !self.eat_p(P::RBrace) && !self.at_eof() {
                 if let Tok::Ident(op) = self.cur().tok.clone() {
-                    self.bump();
-                    ops.push(op);
+                    if self.peek().tok == Tok::P(P::LParen) {
+                        // method decl: `m(p: t, ..) -> t`
+                        let msp = self.span();
+                        self.bump();
+                        let params = self.parse_params()?;
+                        let ret = self.parse_ret()?;
+                        methods.push(MethodSig { name: op, params, ret, span: msp });
+                    } else {
+                        self.bump();
+                        ops.push(op);
+                    }
                 } else {
                     self.bump();
                 }
                 self.eat_p(P::Comma);
+                self.eat_p(P::Semi);
             }
-            return Some(Item::Interface(Interface { name, ops, span: sp }));
+            return Some(Item::Interface(Interface { name, ops, methods, span: sp }));
         }
         if self.eat_kw(Kw::Let) {
             let (name, sp) = self.ident()?;
@@ -152,6 +163,11 @@ impl<'a> Parser<'a> {
                 return None;
             }
             let mut f = self.parse_fn_tail()?;
+            if let Some(r) = &f.recv {
+                self.diags.push(Diag::err(r.span, "parse",
+                    "extern fns can't have receivers"));
+                return None;
+            }
             f.body = None;
             self.eat_p(P::Semi);
             return Some(Item::Extern(f));
@@ -256,6 +272,18 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_fn_tail(&mut self) -> Option<Fn> {
+        // `fn (r T) m(..)` — receiver form; `fn (r: T)` also accepted.
+        // `fn name(..)` starts with an ident, methods with `(`.
+        let mut recv = None;
+        if self.cur().tok == Tok::P(P::LParen) {
+            let rsp = self.span();
+            self.bump();
+            let (rname, _) = self.ident()?;
+            self.eat_p(P::Colon);
+            let rty = self.ty()?;
+            self.expect_p(P::RParen, "`)` after receiver");
+            recv = Some(Param { name: rname, ty: rty, span: rsp });
+        }
         let (name, sp) = self.ident()?;
         let mut ty_params = Vec::new();
         // generics: fn f[T any, U ordered](...)
@@ -272,6 +300,13 @@ impl<'a> Parser<'a> {
                 self.eat_p(P::Comma);
             }
         }
+        let params = self.parse_params()?;
+        let ret = self.parse_ret()?;
+        Some(Fn { name, recv, ty_params, params, ret, body: None, span: sp })
+    }
+
+    /// `(p: t, ..)` — shared by fns and interface method sigs
+    fn parse_params(&mut self) -> Option<Vec<Param>> {
         self.expect_p(P::LParen, "`(`");
         let mut params = Vec::new();
         while !self.eat_p(P::RParen) && !self.at_eof() {
@@ -284,6 +319,11 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        Some(params)
+    }
+
+    /// `-> t` / `-> [t, err]` / nothing
+    fn parse_ret(&mut self) -> Option<RetTy> {
         let ret = if self.eat_p(P::Arrow) {
             if self.eat_p(P::LBracket) {
                 let t = self.ty()?;
@@ -305,7 +345,7 @@ impl<'a> Parser<'a> {
         } else {
             RetTy::Void
         };
-        Some(Fn { name, ty_params, params, ret, body: None, span: sp })
+        Some(ret)
     }
 
     fn ty(&mut self) -> Option<TyRef> {
@@ -801,10 +841,10 @@ impl<'a> Parser<'a> {
                         fields.push((fname.clone(), fe));
                         let _ = fsp;
                         if !self.eat_p(P::Comma) {
+                            self.expect_p(P::RBrace, "`}`");
                             break;
                         }
                     }
-                    self.expect_p(P::RBrace, "`}`");
                     return Some(Expr { kind: ExprKind::StructLit { name, fields }, span: sp });
                 }
                 Some(Expr { kind: ExprKind::Ident(name), span: sp })

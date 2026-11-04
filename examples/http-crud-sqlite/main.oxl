@@ -1,6 +1,6 @@
 // HTTP CRUD + SQLite pilot — the v0.0.1 success bar for services.
 // Now built on std/http: the server plumbing lives in stdlib, this file
-// only declares the route.
+// only declares the route handler.
 //
 //   oxl run examples/http-crud-sqlite/main.oxl
 //   curl localhost:8080/items             → list rows
@@ -14,7 +14,9 @@ import "std/strings"
 // mode (THREADSAFE=1) provides the write lock; no per-request open/close
 let db = sqlite_open(cstr("pilot.db"))
 
-fn route(method: str, path: str, reqbody: str) -> str {
+struct App { d: int }
+
+fn (a App) route(method: str, path: str, reqbody: str) -> str {
     body := ""
     if find(path, "/items") == 0 {
         if find(method, "POST") == 0 {
@@ -55,5 +57,5 @@ fn route(method: str, path: str, reqbody: str) -> str {
 }
 
 fn main() {
-    http.serve(8080)
+    http.serve(8080, App{d: 0})
 }

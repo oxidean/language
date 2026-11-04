@@ -98,6 +98,29 @@ out=$("$OXL" run tests/defer_test.oxl)
 [ "$(head -3 <<<"$out")" = $'3\n2\n1' ] || { echo "FAIL defer LIFO: $out"; exit 1; }
 grep -q "^9$" <<<"$out" || { echo "FAIL defer error-return path: $out"; exit 1; }
 
+echo "== methods + interfaces (d3) =="
+out=$("$OXL" run tests/methods.oxl)
+[ "$out" = "methods ok" ] || { echo "FAIL methods: $out"; exit 1; }
+# a method-less type must not satisfy a method interface
+cat > /tmp/d3sat.oxl <<'D3EOF'
+interface Writer { write(s: str) -> int }
+struct Bare { n: int }
+fn emit(w: Writer) -> int { return w.write("x") }
+fn main() { emit(Bare{n: 1}) }
+D3EOF
+if "$OXL" build /tmp/d3sat.oxl -o /tmp/d3sat 2>/dev/null; then
+    echo "FAIL: unsatisfied iface compiled"; exit 1
+fi
+# methods can't suspend — vtable calls carry no task frame
+cat > /tmp/d3susp.oxl <<'D3EOF'
+struct S { n: int }
+fn (s S) wait() { sleep(1) }
+fn main() { s := S{n: 0}; s.wait() }
+D3EOF
+if "$OXL" build /tmp/d3susp.oxl -o /tmp/d3susp 2>/dev/null; then
+    echo "FAIL: suspending method compiled"; exit 1
+fi
+
 echo "== move tracking (d2) =="
 # use-after-move must be a compile error naming the binding
 cat > /tmp/d2move.oxl <<'EOF'

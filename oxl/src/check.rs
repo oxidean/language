@@ -23,6 +23,8 @@ pub enum Ty {
     Var(String), // generic type parameter (instantiated at call sites)
     /// atomic shared cell (mkshared) — copy/shareable, never move-tracked
     Shared,
+    /// interface-typed value — {data, vtab} fat pair (D3)
+    Iface(String),
     Unknown,
 }
 
@@ -49,6 +51,7 @@ impl Ty {
                 if **r == Ty::Void { String::new() } else { format!(" -> {}", r.name()) }),
             Ty::Var(n) => n.clone(),
             Ty::Shared => "shared".into(),
+            Ty::Iface(n) => n.clone(),
             Ty::Unknown => "?".into(),
         }
     }
@@ -70,6 +73,29 @@ struct FnSig {
     ret: Ret,
     is_extern: bool,
     ty_params: Vec<(String, String)>, // [(T, constraint)]
+}
+
+/// one method decl inside an interface — signature only, no receiver
+#[derive(Clone)]
+struct IMethod {
+    name: String,
+    params: Vec<Ty>,
+    ret: Ret,
+}
+
+#[derive(Clone, Default)]
+struct IfaceDef {
+    ops: Vec<String>,
+    methods: Vec<IMethod>,
+}
+
+/// method-call resolution target (see `Checker::method_target`)
+enum MTarget {
+    /// direct call to the qualified `T.m` fn (receiver prepended)
+    Fn(String),
+    /// vtable dispatch — the iface decl's params + ret
+    Vt(Vec<Ty>, Ret),
+    NoMethod,
 }
 
 pub struct Checked {
@@ -143,7 +169,9 @@ pub struct Checker<'a> {
     /// enum name -> [(variant, fields)]; fields f0..fn for positional
     /// payloads. Variant payload structs also live in `structs` as "E.V".
     enums: HashMap<String, Vec<(String, Vec<(String, Ty)>)>>,
-    ifaces: HashMap<String, Vec<String>>,
+    ifaces: HashMap<String, IfaceDef>,
+    /// qualified `T.m` names of method fns — for the susp-method ban
+    method_spans: HashMap<String, Span>,
     cur_ret: Ret,
     calls: HashMap<String, HashSet<String>>, // caller -> callee fn names
     cur_fn: String,
@@ -178,6 +206,7 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
         structs: HashMap::new(),
         enums: HashMap::new(),
         ifaces: HashMap::new(),
+        method_spans: HashMap::new(),
         cur_ret: Ret::Void,
         calls: HashMap::new(),
         cur_fn: String::new(),
@@ -206,6 +235,14 @@ pub fn check(c: &Crate, diags: &mut Diags) -> Checked {
                 "closures may not suspend — spawn/scope/select/recv/send/sleep inside `{ |..| }`".to_string()));
         }
     }
+    // D3: methods can't suspend — vtable/indirect calls don't carry a
+    // task frame. Checked post-hoc since `suspend` needs all bodies.
+    for (m, sp) in &ck.method_spans {
+        if checked.suspend.contains(m) {
+            ck.diags.push(Diag::err(*sp, "check",
+                format!("suspendable method `{m}` — methods may not suspend (v0.2)")));
+        }
+    }
     ck.check_suspend_rules(c, &checked.suspend);
     checked
 }
@@ -222,7 +259,16 @@ impl<'a> Checker<'a> {
                 self.enums.insert(e.name.clone(), Vec::new());
             }
             if let Item::Interface(i) = it {
-                self.ifaces.insert(i.name.clone(), i.ops.clone());
+                // method sigs resolve with an empty ty scope — interfaces
+                // aren't generic
+                let methods = i.methods.iter().map(|m| IMethod {
+                    name: m.name.clone(),
+                    params: m.params.iter().map(|p| self.resolve(&p.ty)).collect(),
+                    ret: self.resolve_ret(&m.ret),
+                }).collect();
+                self.ifaces.insert(i.name.clone(), IfaceDef {
+                    ops: i.ops.clone(), methods,
+                });
             }
         }
         for it in &c.items {
@@ -267,7 +313,25 @@ impl<'a> Checker<'a> {
             match it {
                 Item::Fn(f) | Item::Extern(f) => {
                     self.ty_scope = f.ty_params.iter().map(|(t, _)| t.clone()).collect();
-                    let params: Vec<Ty> = f.params.iter().map(|p| self.resolve(&p.ty)).collect();
+                    let mut params: Vec<Ty> = Vec::new();
+                    if let Some(r) = &f.recv {
+                        let rt = self.resolve(&r.ty);
+                        // the receiver base must be a declared struct/enum —
+                        // `f.name` is already its `T.m` qualification
+                        let base_ok = match &rt {
+                            Ty::Struct(_) | Ty::Enum(_) => true,
+                            Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) =>
+                                matches!(&**b, Ty::Struct(_) | Ty::Enum(_)),
+                            _ => false,
+                        };
+                        if !base_ok {
+                            self.diags.push(Diag::err(r.span, "check",
+                                "method receiver must be a declared struct/enum type (optionally behind own/ref/mut)"));
+                        }
+                        self.method_spans.insert(f.name.clone(), r.span);
+                        params.push(rt);
+                    }
+                    params.extend(f.params.iter().map(|p| self.resolve(&p.ty)));
                     let ret = self.resolve_ret(&f.ret);
                     self.ty_scope.clear();
                     if matches!(ret, Ret::One(Ty::Ref(_) | Ty::Mut(_))) {
@@ -335,6 +399,8 @@ impl<'a> Checker<'a> {
                         Ty::Struct(s.to_string())
                     } else if self.enums.contains_key(s) {
                         Ty::Enum(s.to_string())
+                    } else if self.ifaces.contains_key(s) {
+                        Ty::Iface(s.to_string())
                     } else {
                         self.diags.push(Diag::err(t.span, "check", format!("unknown type `{s}`")));
                         Ty::Unknown
@@ -363,7 +429,13 @@ impl<'a> Checker<'a> {
                 self.cur_ty_params = f.ty_params.clone();
                 self.loop_depth = 0;
                 let mut env = Env::new();
-                for (p, t) in f.params.iter().zip(sig.params.iter()) {
+                let pskip = if let Some(r) = &f.recv {
+                    if let Some(t) = sig.params.first() {
+                        env.set(r.name.clone(), t.clone());
+                    }
+                    1
+                } else { 0 };
+                for (p, t) in f.params.iter().zip(sig.params.iter().skip(pskip)) {
                     env.set(p.name.clone(), t.clone());
                 }
                 if let Some(b) = &f.body {
@@ -399,7 +471,7 @@ impl<'a> Checker<'a> {
                 self.expr(call, env);
                 self.in_let2 = false;
                 // call must produce [T, err]
-                let val_ty = match self.call_ret(call) {
+                let val_ty = match self.call_ret(call, env) {
                     Some(Ret::Pair(t)) => t,
                     _ => {
                         self.diags.push(Diag::err(*span, "check",
@@ -440,7 +512,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Expr(e) => {
-                if let Some(Ret::Pair(_)) = self.call_ret(e) {
+                if let Some(Ret::Pair(_)) = self.call_ret(e, env) {
                     self.diags.push(Diag::err(
                         e.span, "check",
                         "call returns `[T, err]` — bind it with `[v, err] =`",
@@ -502,7 +574,7 @@ impl<'a> Checker<'a> {
                             self.in_let2 = true;
                             self.expr(&vals[0], env);
                             self.in_let2 = false;
-                            if let Some(Ret::Pair(t)) = self.call_ret(&vals[0]) {
+                            if let Some(Ret::Pair(t)) = self.call_ret(&vals[0], env) {
                                 self.assignable(want, &t, vals[0].span);
                             } else {
                                 self.diags.push(Diag::err(*span, "check",
@@ -631,7 +703,7 @@ impl<'a> Checker<'a> {
             "eq" => op == "eq",
             "ordered" => op == "ordered" || op == "eq",
             "add" => op == "add",
-            name => self.ifaces.get(name).map(|ops| ops.iter().any(|o| o == op)).unwrap_or(false),
+            name => self.ifaces.get(name).map(|d| d.ops.iter().any(|o| o == op)).unwrap_or(false),
         };
         if !has {
             self.diags.push(Diag::err(sp, "type",
@@ -640,10 +712,35 @@ impl<'a> Checker<'a> {
     }
 
     /// If `e` is a call to a declared fn, return its return type.
-    fn call_ret(&mut self, e: &Expr) -> Option<Ret> {
-        if let ExprKind::Call { f, .. } = &e.kind {
+    fn call_ret(&mut self, e: &Expr, env: &mut Env) -> Option<Ret> {
+        if let ExprKind::Call { f, args } = &e.kind {
             if let ExprKind::Ident(n) = &f.kind {
-                return self.fns.get(n).map(|s| s.ret.clone());
+                if let Some(s) = self.fns.get(n) {
+                    return Some(s.ret.clone());
+                }
+                // method / iface dispatch — same resolution as `call`
+                if let Some((objp, mname)) = n.rsplit_once('.') {
+                    if let Some(oe) = unflatten(objp, f.span) {
+                        let ot = self.expr(&oe, env);
+                        return match self.method_target(&ot, mname) {
+                            MTarget::Fn(q) => self.fns.get(&q).map(|s| s.ret.clone()),
+                            MTarget::Vt(_, r) => Some(r),
+                            MTarget::NoMethod => None,
+                        };
+                    }
+                } else if !BUILTINS.contains(&n.as_str()) {
+                    if let Some(a0) = args.first() {
+                        // speculative: the caller re-evaluates `e` after
+                        // this — probe marks (e.g. a nested move) must
+                        // not leak into the real check
+                        let moved = env.moved.clone();
+                        let t0 = self.expr(a0, env);
+                        env.moved = moved;
+                        if let MTarget::Fn(q) = self.method_target(&t0, n) {
+                            return self.fns.get(&q).map(|s| s.ret.clone());
+                        }
+                    }
+                }
             }
         }
         None
@@ -673,23 +770,189 @@ impl<'a> Checker<'a> {
     }
 
     /// does `t` satisfy constraint `c` (builtin word or interface name)?
+    /// A method-declaring interface requires the type's method set to
+    /// cover it; ops keep their fixed vocabulary.
     fn satisfies(&self, t: &Ty, c: &str) -> bool {
-        let op_ok = |op: &str| match op {
+        let op_ok = |op: &str, t: &Ty| match op {
             "eq" => matches!(t, Ty::Int | Ty::Bool | Ty::Str | Ty::Chan | Ty::Var(_)),
             "ordered" => matches!(t, Ty::Int | Ty::Var(_)),
             "add" => matches!(t, Ty::Int | Ty::Str | Ty::Var(_)),
             _ => false,
         };
+        // a Var satisfies through its declared constraint only
+        if let Ty::Var(v) = t {
+            if let Some((_, vc)) = self.cur_ty_params.iter().find(|(n, _)| n == v) {
+                if *vc == c { return true; }
+                if self.ifaces.contains_key(vc) && self.ifaces.contains_key(c) {
+                    return self.iface_covers(vc, c);
+                }
+                return self.ifaces.get(c)
+                    .map(|d| d.methods.is_empty() && d.ops.iter().all(|o| op_ok(o, t)))
+                    .unwrap_or(false);
+            }
+        }
+        if let Ty::Iface(h) = t {
+            if self.ifaces.contains_key(c) {
+                return self.iface_covers(h, c);
+            }
+        }
         match c {
             "" | "any" => true,
-            "eq" | "ordered" | "add" => op_ok(c),
-            name => self
-                .ifaces
-                .get(name)
-                .map(|ops| ops.iter().all(|o| op_ok(o)))
+            "eq" | "ordered" | "add" => op_ok(c, t),
+            name => self.ifaces.get(name)
+                .map(|d| {
+                    d.ops.iter().all(|o| op_ok(o, t))
+                        && (d.methods.is_empty()
+                            || self.ty_base(t).map(|b| self.impl_satisfies(&b, name))
+                                .unwrap_or(false))
+                })
                 .unwrap_or(false),
         }
     }
+
+    /// base type name behind own/ref/mut — the name methods key on
+    fn ty_base(&self, t: &Ty) -> Option<String> {
+        match t {
+            Ty::Struct(n) | Ty::Enum(n) => Some(n.clone()),
+            Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => self.ty_base(b),
+            _ => None,
+        }
+    }
+
+    fn ret_eq(a: &Ret, b: &Ret) -> bool {
+        match (a, b) {
+            (Ret::Void, Ret::Void) => true,
+            (Ret::One(x), Ret::One(y)) | (Ret::Pair(x), Ret::Pair(y)) => x == y,
+            _ => false,
+        }
+    }
+
+    /// iface `have` covers everything iface `want` declares
+    fn iface_covers(&self, have: &str, want: &str) -> bool {
+        let (Some(wdef), Some(hdef)) = (self.ifaces.get(want), self.ifaces.get(have)) else {
+            return false;
+        };
+        wdef.ops.iter().all(|o| hdef.ops.contains(o))
+            && wdef.methods.iter().all(|wm| hdef.methods.iter().any(|hm|
+                hm.name == wm.name && hm.params == wm.params
+                    && Self::ret_eq(&hm.ret, &wm.ret)))
+    }
+
+    /// concrete type `tname` carries every method iface `iname` declares —
+    /// `T.m` must exist as a non-generic fn with matching sig behind the
+    /// receiver slot
+    fn impl_satisfies(&self, tname: &str, iname: &str) -> bool {
+        let Some(def) = self.ifaces.get(iname) else { return false };
+        def.methods.iter().all(|m| {
+            let Some(sig) = self.fns.get(&format!("{tname}.{}", m.name)) else {
+                return false;
+            };
+            if sig.is_extern || sig.params.len() != m.params.len() + 1 {
+                return false;
+            }
+            if sig.ty_params.is_empty() {
+                return sig.params[1..] == m.params[..] && Self::ret_eq(&sig.ret, &m.ret);
+            }
+            // generic impl method — the iface sig pins its ty params:
+            // bind declared params onto the iface's, then require every
+            // ty param bound and params+ret equal after subst
+            let mut bind: HashMap<String, Ty> = HashMap::new();
+            for (w, g) in sig.params[1..].iter().zip(m.params.iter()) {
+                self.bind_vars(w, g, &mut bind);
+            }
+            if !sig.ty_params.iter().all(|(t, _)| bind.contains_key(t)) {
+                return false;
+            }
+            sig.params[1..].iter().zip(m.params.iter())
+                .all(|(w, g)| subst_ty(w, &bind) == *g)
+                && match (&sig.ret, &m.ret) {
+                    (Ret::Void, Ret::Void) => true,
+                    (Ret::One(a), Ret::One(b)) | (Ret::Pair(a), Ret::Pair(b)) =>
+                        subst_ty(a, &bind) == *b,
+                    _ => false,
+                }
+        })
+    }
+
+    /// `want`/`got` where `got` is the receiver being adapted:
+    /// value want derefs a pointer arg, pointer want refs a value arg
+    fn recv_adapt_ty(&self, want: &Ty, got: &Ty) -> Ty {
+        match (want, got) {
+            (w @ (Ty::Struct(_) | Ty::Enum(_)), Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b))
+                if self.ty_base(got).as_deref() == Some(w.name().as_str()) => w.clone(),
+            (w @ (Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_)), Ty::Struct(_) | Ty::Enum(_))
+                if self.ty_base(w).as_deref() == Some(got.name().as_str()) => w.clone(),
+            _ => got.clone(),
+        }
+    }
+
+    /// where a method lookup leads: a direct `T.m` fn, a vtable slot's
+    /// declared sig (params + ret — receiver is the implicit data ptr),
+    /// or nowhere
+    fn method_target(&self, t: &Ty, m: &str) -> MTarget {
+        match t {
+            Ty::Struct(s) | Ty::Enum(s) => {
+                let q = format!("{s}.{m}");
+                if self.fns.contains_key(&q) {
+                    MTarget::Fn(q)
+                } else {
+                    MTarget::NoMethod
+                }
+            }
+            Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => self.method_target(b, m),
+            Ty::Iface(w) => self.ifaces.get(w)
+                .and_then(|d| d.methods.iter().find(|mm| mm.name == m))
+                .map(|mm| MTarget::Vt(mm.params.clone(), mm.ret.clone()))
+                .unwrap_or(MTarget::NoMethod),
+            Ty::Var(v) => self.cur_ty_params.iter()
+                .find(|(n, _)| n == v)
+                .and_then(|(_, c)| self.ifaces.get(c))
+                .and_then(|d| d.methods.iter().find(|mm| mm.name == m))
+                .map(|mm| MTarget::Vt(mm.params.clone(), mm.ret.clone()))
+                .unwrap_or(MTarget::NoMethod),
+            _ => MTarget::NoMethod,
+        }
+    }
+
+    /// field type of `name` on a struct(-ish) `t` — for the
+    /// field-vs-method precedence check at call sites
+    fn field_ty(&self, t: &Ty, name: &str) -> Option<Ty> {
+        let sn = match t {
+            Ty::Struct(n) => n,
+            Ty::Own(b) | Ty::Ref(b) | Ty::Mut(b) => match &**b {
+                Ty::Struct(n) => n,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.structs.get(sn)?.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone())
+    }
+
+    /// `w.m(args)` through an iface vtable — the declared sig checks args
+    /// (the receiver is the data ptr, not a visible arg)
+    fn call_iface(&mut self, ps: &[Ty], ret: &Ret, args: &[Expr], sp: Span, env: &mut Env) -> Ty {
+        if args.len() != ps.len() {
+            self.diags.push(Diag::err(sp, "check",
+                format!("method takes {} args, got {}", ps.len(), args.len())));
+        }
+        for (a, want) in args.iter().zip(ps.iter()) {
+            let got = self.expr(a, env);
+            self.assignable(want, &got, a.span);
+            self.move_for(a, want, env);
+        }
+        match ret {
+            Ret::Void => Ty::Void,
+            Ret::One(t) => t.clone(),
+            Ret::Pair(t) => {
+                if !self.in_let2 {
+                    self.diags.push(Diag::err(sp, "check",
+                        "`[T, err]` result must be bound with `[v, err] =` or returned"));
+                }
+                t.clone()
+            }
+        }
+    }
+
 
     fn assignable(&mut self, want: &Ty, got: &Ty, sp: Span) {
         if *want == Ty::Unknown || *got == Ty::Unknown {
@@ -705,12 +968,31 @@ impl<'a> Checker<'a> {
             || (*got == Ty::Err && matches!(want, Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Slice(_) | Ty::Shared))
             || matches!((want, got), (Ty::Ref(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) | (Ty::Mut(w), Ty::Own(g) | Ty::Mut(g)) if **w == **g)
             // an untyped owned cell (mkbuf, own ?) borrows into any ref/mut
-            || (*got == Ty::Own(Box::new(Ty::Unknown)) && matches!(want, Ty::Ref(_) | Ty::Mut(_)));
+            || (*got == Ty::Own(Box::new(Ty::Unknown)) && matches!(want, Ty::Ref(_) | Ty::Mut(_)))
+            // interface-typed want: structural method-set satisfaction,
+            // iface-to-iface coverage, a constrained Var, or nil
+            || self.iface_ok(want, got);
         if !ok {
             self.diags.push(Diag::err(
                 sp, "type",
                 format!("expected `{}`, found `{}`", want.name(), got.name()),
             ));
+        }
+    }
+
+    /// `got` flows into iface `want` — concrete impls need the method
+    /// set, ifaces cover ifaces, constrained Vars forward their
+    /// constraint, nil is the empty pair
+    fn iface_ok(&self, want: &Ty, got: &Ty) -> bool {
+        let Ty::Iface(w) = want else { return false };
+        match got {
+            Ty::Iface(g) => self.iface_covers(g, w),
+            Ty::Var(v) => self.cur_ty_params.iter()
+                .find(|(n, _)| n == v)
+                .map(|(_, c)| c == w || self.iface_covers(c, w))
+                .unwrap_or(false),
+            Ty::Err => true,
+            t => self.ty_base(t).map(|b| self.impl_satisfies(&b, w)).unwrap_or(false),
         }
     }
 
@@ -723,9 +1005,10 @@ impl<'a> Checker<'a> {
             }
         }
     }
-    /// move only when the destination wants ownership (param, field, ret)
+    /// move only when the destination wants ownership (param, field,
+    /// ret) — an iface data ptr takes it too
     fn move_for(&mut self, e: &Expr, want: &Ty, env: &mut Env) {
-        if matches!(want, Ty::Own(_)) {
+        if matches!(want, Ty::Own(_) | Ty::Iface(_)) {
             self.move_own(e, env);
         }
     }
@@ -984,6 +1267,11 @@ impl<'a> Checker<'a> {
                         if matches!(lt, Ty::Fn(..)) || matches!(rt, Ty::Fn(..)) {
                             self.diags.push(Diag::err(e.span, "type",
                                 "fn values aren't comparable (v0.2)"));
+                        } else if (matches!(lt, Ty::Iface(_)) && rt != Ty::Err)
+                            || (matches!(rt, Ty::Iface(_)) && lt != Ty::Err)
+                        {
+                            self.diags.push(Diag::err(e.span, "type",
+                                "iface values aren't comparable except against nil (v0.2)"));
                         } else {
                             self.assignable(&lt, &rt, e.span);
                         }
@@ -1298,10 +1586,75 @@ impl<'a> Checker<'a> {
             if let Some(Ty::Fn(ps, r)) = env.get(name) {
                 return self.call_fnvalue(&ps, &r, args, sp, env);
             }
-            if self.fns.contains_key(name) {
-                self.calls.entry(self.cur_fn.clone()).or_default().insert(name.clone());
+            // method dispatch (D3): `x.m(..)` resolves via the receiver's
+            // type to `T.m` (a fn-typed field `x.m` wins); `w.m(..)` on an
+            // iface or generic constraint vtab-dispatches; a bare `m(x,..)`
+            // that isn't a fn retries as a method on args[0]'s type.
+            let mut recv: Option<Expr> = None;
+            let mut qname = name.clone();
+            if !self.fns.contains_key(name) {
+                if let Some((objp, mname)) = name.rsplit_once('.') {
+                    if let Some(oe) = unflatten(objp, f.span) {
+                        let ot = self.expr(&oe, env);
+                        if ot == Ty::Unknown {
+                            return Ty::Unknown;
+                        }
+                        if let Some(ft) = self.field_ty(&ot, mname) {
+                            return match ft {
+                                Ty::Fn(ps, r) => self.call_fnvalue(&ps, &r, args, sp, env),
+                                _ => {
+                                    self.diags.push(Diag::err(sp, "type",
+                                        format!("`{ot0}.{mname}` is a field of `{ot}`, not callable",
+                                            ot0 = self.ty_base(&ot).unwrap_or_else(|| ot.name()), ot = ot.name())));
+                                    Ty::Unknown
+                                }
+                            };
+                        }
+                        match self.method_target(&ot, mname) {
+                            MTarget::Fn(q) => {
+                                recv = Some(oe);
+                                qname = q;
+                            }
+                            MTarget::Vt(mps, mret) => {
+                                return self.call_iface(&mps, &mret, args, sp, env);
+                            }
+                            MTarget::NoMethod => {
+                                self.diags.push(Diag::err(sp, "type",
+                                    format!("no method `{mname}` on `{}`", ot.name())));
+                                return Ty::Unknown;
+                            }
+                        }
+                    }
+                } else if !BUILTINS.contains(&name.as_str()) {
+                    if let Some(a0) = args.first() {
+                        // `m(x, ..)` — method sugar: receiver is args[0]
+                        // already. Skip builtins: `new(Counter)`'s arg is
+                        // a type name, not an expr — probing it would
+                        // emit a spurious undefined-name diag. The arg
+                        // is re-evaluated in the sig loop below, so its
+                        // move marks must not leak out of the probe.
+                        let moved = env.moved.clone();
+                        let t0 = self.expr(a0, env);
+                        env.moved = moved;
+                        if let MTarget::Fn(q) = self.method_target(&t0, name) {
+                            qname = q;
+                        }
+                    }
+                }
             }
-            match name.as_str() {
+            let args2: Vec<Expr>;
+            let args: &[Expr] = match &recv {
+                Some(r) => {
+                    args2 = std::iter::once(r.clone()).chain(args.iter().cloned()).collect();
+                    &args2
+                }
+                None => args,
+            };
+            let name = qname.as_str();
+            if self.fns.contains_key(name) {
+                self.calls.entry(self.cur_fn.clone()).or_default().insert(name.to_string());
+            }
+            match name {
                 "print" | "println" => {
                     if args.len() != 1 {
                         self.diags.push(Diag::err(sp, "check", format!("`{name}` takes 1 argument")));
@@ -1539,7 +1892,7 @@ impl<'a> Checker<'a> {
                     for a in args {
                         self.expr(a, env);
                     }
-                    return if name == &"writefile" { Ty::Int } else { Ty::Void };
+                    return if name == "writefile" { Ty::Int } else { Ty::Void };
                 }
                 "readfile" => {
                     for a in args {
@@ -1608,10 +1961,23 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            for (a, want) in args.iter().zip(sig.params.iter()) {
+            for (i, (a, want)) in args.iter().zip(sig.params.iter()).enumerate() {
                 let got = self.expr(a, env);
                 // extern fns get the raw C type; ref/mut params emit borrow checks
                 let want = subst_ty(want, &bind);
+                let got = if i == 0 && recv.is_some() {
+                    // receiver slot: `*x`/`&x` adapt — `&` needs an lvalue
+                    if matches!(want, Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_))
+                        && matches!(got, Ty::Struct(_) | Ty::Enum(_))
+                        && !is_lvalue(a)
+                    {
+                        self.diags.push(Diag::err(a.span, "type",
+                            "pointer receiver on an rvalue — bind it first"));
+                    }
+                    self.recv_adapt_ty(&want, &got)
+                } else {
+                    got
+                };
                 self.assignable(&want, &got, a.span);
                 self.move_for(a, &want, env);
             }
@@ -1945,6 +2311,16 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
+    }
+}
+
+/// can `&e` be taken? idents always; field/index chains when their
+/// base is — anything else is an rvalue (`&(f().x)` isn't valid C)
+fn is_lvalue(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_) => true,
+        ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => is_lvalue(obj),
+        _ => false,
     }
 }
 

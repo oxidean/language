@@ -1,10 +1,11 @@
 // std/http — minimal HTTP/1.1 server written in the language over libc
-// sockets. Import with `import "std/http"` and define:
+// sockets. Import with `import "std/http"` and hand `serve` a Handler:
 //
-//   fn route(method: str, path: str, body: str) -> str
-//   fn main() { serve(8080) }
+//   interface Handler { route(method: str, path: str, body: str) -> str }
+//   fn (a App) route(method: str, path: str, body: str) -> str { ... }
+//   fn main() { serve(8080, App{}) }
 //
-// `route` is called per request on the blocking pool; whatever it
+// `h.route` is dispatched per request on the blocking pool; whatever it
 // returns is sent as a text/plain 200 response.
 
 extern fn socket(domain: int, ty: int, proto: int) -> int
@@ -19,12 +20,16 @@ extern fn setsockopt(fd: int, lvl: int, opt: int, v: ref intp, n: int) -> int
 struct sockaddr { a: int, b: int }   // 16 bytes: sockaddr_in fits
 struct intp { v: int }
 
+/// request handler — implement `route` on your app struct and pass it
+/// to `serve`; dispatched per connection on the blocking pool
+interface Handler { route(method: str, path: str, body: str) -> str }
+
 fn http_ok(body: str) -> str {
     return "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: "
         + itoa(len(body)) + "\r\n\r\n" + body
 }
 
-fn handle_conn(fd: int) {
+fn handle_conn(h: Handler, fd: int) {
     buf := mkbuf(4096)
     n := read(fd, buf, 4095)
     if n <= 0 {
@@ -45,14 +50,14 @@ fn handle_conn(fd: int) {
         body = substr(req, hdr_end + 4, len(req))
     }
 
-    resp_body := route(method, path, body)
+    resp_body := h.route(method, path, body)
     resp := http_ok(resp_body)
     write(fd, cstr(resp), len(resp))
     close(fd)
 }
 
-/// listen+serve on port; calls the user-defined route() per request
-fn serve(port: int) {
+/// listen+serve on port; dispatches `h.route` per request
+fn serve(port: int, h: Handler) {
     srv := socket(2, 1, 0)            // AF_INET, SOCK_STREAM
     one := new(intp)
     one.v = 1
@@ -72,7 +77,7 @@ fn serve(port: int) {
         for true {
             cfd := accept(srv, addr, one)
             if cfd >= 0 {
-                spawnBlocking handle_conn(cfd)
+                spawnBlocking handle_conn(h, cfd)
             }
         }
     }
