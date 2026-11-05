@@ -68,16 +68,33 @@ jobs:
           printf '%s\n' "$PR_BODY" > pr-body.txt
           # CodeRabbit owns the release-notes block it injects into the
           # description — exempt that managed section, scan the rest.
-          # An unclosed start marker would make sed delete to EOF and
-          # hide real markers after it: require balanced pairs first.
-          opens=$(grep -c 'This is an auto-generated comment: release notes' pr-body.txt || :)
-          closes=$(grep -c 'end of auto-generated comment: release notes' pr-body.txt || :)
+          # Count only the full HTML markers: a plain-text mention of
+          # the phrase is not a block. Unbalanced pairs still fail —
+          # a stray start marker could hide attribution after it.
+          open_m='<!-- This is an auto-generated comment: release notes by coderabbit.ai -->'
+          close_m='<!-- end of auto-generated comment: release notes by coderabbit.ai -->'
+          opens=$(grep -cF "$open_m" pr-body.txt || :)
+          closes=$(grep -cF "$close_m" pr-body.txt || :)
           if [ "$opens" != "$closes" ]; then
             echo "commit-check: unbalanced CodeRabbit release-notes markers in PR body" >&2
             exit 1
           fi
-          sed -e '/<!-- This is an auto-generated comment: release notes by coderabbit.ai -->/,/<!-- end of auto-generated comment: release notes by coderabbit.ai -->/d' \
-            pr-body.txt > pr-body-clean.txt
+          # ordered, non-nesting extraction: drop each start→end pair
+          # (markers included), keep every other byte — same-line text
+          # around markers and unmatched/out-of-order markers verbatim.
+          awk -v S="$open_m" -v E="$close_m" '
+            { buf = buf $0 "\n" }
+            END {
+              out = ""; rest = buf
+              while ((i = index(rest, S)) > 0) {
+                tail = substr(rest, i + length(S))
+                j = index(tail, E)
+                if (j == 0) break
+                out = out substr(rest, 1, i - 1)
+                rest = substr(tail, j + length(E))
+              }
+              printf "%s", out rest
+            }' pr-body.txt > pr-body-clean.txt
           scripts/commit-check.sh --scan-file pr-body-clean.txt
       - name: lint push range
         if: github.event_name == 'push'
