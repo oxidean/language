@@ -968,7 +968,8 @@ fn json_num(body: &str, key: &str) -> Option<usize> {
 }
 
 /// LSP position (0-based line, 0-based char col) → byte offset.
-/// Cols are chars, not UTF-16 units (v0 — non-BMP text misaligns).
+/// `initialize` doesn't negotiate a position encoding, so cols follow
+/// the LSP default: UTF-16 code units, not chars.
 fn lsp_offset(src: &str, line: usize, col: usize) -> u32 {
     let mut l = 0usize;
     for (i, c) in src.char_indices() {
@@ -980,7 +981,7 @@ fn lsp_offset(src: &str, line: usize, col: usize) -> u32 {
                 if k == col || c2 == '\n' {
                     return off as u32;
                 }
-                k += 1;
+                k += c2.len_utf16();
                 off = i + j + c2.len_utf8();
             }
             return off as u32;
@@ -992,7 +993,7 @@ fn lsp_offset(src: &str, line: usize, col: usize) -> u32 {
     src.len() as u32
 }
 
-/// byte offset → LSP (0-based line, 0-based char col)
+/// byte offset → LSP (0-based line, 0-based UTF-16-unit col)
 fn lsp_line_col(src: &str, off: u32) -> (usize, usize) {
     let (mut l, mut c) = (0usize, 0usize);
     for (i, ch) in src.char_indices() {
@@ -1003,7 +1004,7 @@ fn lsp_line_col(src: &str, off: u32) -> (usize, usize) {
             l += 1;
             c = 0;
         } else {
-            c += 1;
+            c += ch.len_utf16();
         }
     }
     (l, c)

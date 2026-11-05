@@ -54,8 +54,9 @@ fn trim(s: str) -> str {
 
 /// split s on sep; returns an own-linked StrList (nil-terminated)
 fn split(s: str, sep: str) -> own StrList {
+    // head doubles as the first result node — a leading sentinel would
+    // be an owned alloc nothing ever releases
     head := new(StrList)
-    head.v = ""
     head.next = nil
     if len(sep) == 0 {
         // find(s, "") is 0 forever — an empty sep never advances
@@ -67,22 +68,23 @@ fn split(s: str, sep: str) -> own StrList {
     for pos <= len(s) {
         i := find(substr(s, pos, len(s)), sep)
         if i < 0 {
-            tail.next = new(StrList)
-            tail = tail.next
             tail.v = substr(s, pos, len(s))
-            tail.next = nil
             break
         }
-        tail.next = new(StrList)
-        tail = tail.next
         tail.v = substr(s, pos, pos + i)
-        tail.next = nil
         pos = pos + i + len(sep)
+        if pos <= len(s) {
+            tail.next = new(StrList)
+            tail = tail.next
+            tail.next = nil
+        }
     }
-    return head.next
+    return head
 }
 
-/// join a split() list back with sep
+/// join a split() list back with sep — consumes the list handle.
+/// (nodes stay allocated: `own T` can't cross rt_free's `own void`
+/// FFI boundary, so a typed-list destructor isn't expressible in v0)
 fn join(parts: own StrList, sep: str) -> str {
     out := ""
     first := true
