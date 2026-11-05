@@ -171,7 +171,7 @@ fn jescape(s: str) -> str {
             // reader sees is still well-formed UTF-8
             n := utf8_seq_len(s, i)
             if n == 0 {
-                out = out + "\ufffd"
+                out = out + "\\ufffd"
             } else {
                 out = out + substr(s, i, i + n)
                 i = i + n - 1
