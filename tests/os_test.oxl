@@ -10,8 +10,9 @@ fn test_args() {
 }
 
 fn test_file() {
-    // unique per run — parallel jobs on one host must not share the path
-    p := "/tmp/oxl-ostest-" + itoa(time.unix_ms()) + ".txt"
+    // unique per run — parallel jobs on one host must not share the
+    // path. Cwd-relative: /tmp doesn't exist for a native Windows exe
+    p := "oxl-ostest-" + itoa(time.unix_ms()) + ".txt"
     n := os.writefile_(p, "hello os")
     testing.expect(n == 0, "write ok")
     testing.expect_streq(os.readfile_(p), "hello os", "read back")
