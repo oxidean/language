@@ -7,13 +7,14 @@ Execution model: sequential critical path through Phase 0–1, then
 parallel worktree tracks in Phase 2. Every task lands behind the
 `language-principles` standard.
 
-**Status (2026-11-03): Phase 0 + Phase 1 complete; Phase 2 underway.**
+**Status (2026-11-05): complete — v0.0.1 tagged.** Phase 0–2 all done.
 The compiler compiles all `examples/` to native binaries and they run —
-including the HTTP CRUD + SQLite pilot. Implementation language is Rust
-(approved alternative — Zig absent on the dev machine); codegen backend
-is C emit → cc (documented interim, swappable for LLVM behind the
-`interfaces.md` seam); tasks run on interim pool threads pending the
-state-machine transform.
+including the HTTP CRUD + SQLite and GTK pilots. Implementation language
+is Rust (approved alternative — Zig absent on the dev machine); codegen
+backend is C emit → cc (documented interim, swappable for LLVM behind
+the `interfaces.md` seam). Deferred items — including the state-machine
+transform opened under Task 10 — were spec'd and landed under
+`../2026-11-04-0132-v0-2-forward/plan.md`.
 
 ## Task 1: Save spec documentation [done]
 
@@ -77,11 +78,13 @@ libc + sqlite3 exercised by pilots.
 
 ## Phase 2 — Parallel tracks (fan out in separate worktrees)
 
-### Task 10: Coroutine transform production [partial]
+### Task 10: Coroutine transform production [done — via v0.2 A1]
 
 Surface semantics final and working (scope join/cancel, channels,
-suspend set computed in check.rs). Execution is interim pool threads —
-the state-machine transform itself is open (critical path item).
+suspend set computed in check.rs). The state-machine transform opened
+here landed under v0.2 Task A1: suspend-capable fns compile to
+`o_frm_*`/`o_poll_*` stackless frames (~96 B) driven by the executor —
+see `docs/semantics/concurrency.md`.
 
 ### Task 11: Stdlib wave 1 [done]
 
@@ -155,6 +158,6 @@ exiting 0 (now loud abort), parser spinning on unrecoverable items
 (guaranteed-progress skip). `bootstrap/lexer.oxl` — lexer in the
 language — is a pilot too: lexes itself (955 tokens) + runs in CI.
 
-### Task 18: v0.0.1 tag [not started]
+### Task 18: v0.0.1 tag [done]
 
-Gate: both pilots run. Tag the release.
+Gate: both pilots run. Tag the release. (`v0.0.1` tagged.)

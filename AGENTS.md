@@ -1,4 +1,4 @@
-# language
+# oxl
 
 This file is the single source of truth for agent instructions in this repo.
 `CLAUDE.md` is a symlink to this file. Edit only `AGENTS.md`.

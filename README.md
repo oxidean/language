@@ -1,4 +1,4 @@
-# language
+# oxl
 
 A lean, fast language for CLI tools and services — Go-shaped DX on a
 runtime with no tracing GC. Memory safety comes from dynamic
@@ -77,14 +77,19 @@ fn main() {
 }
 ```
 
-Types `int bool str cstr err chan` + user structs; `own T` / `ref T` /
-`mut T` handles with runtime borrow checks; `[v, err]` returns with
-dropped-error-as-compile-error; `extern fn` C FFI; `scope`/`spawn`/`go`
-+ `spawnBlocking` structured concurrency on a worker pool + blocking
-pool (suspend-capable functions compile to stackless state machines,
-see `docs/semantics/concurrency.md`); `break`/`continue`; `interface` op
+Types `int float bool str cstr err chan` + user structs, `enum` tagged
+unions with `match`, slices `[]T`, function values/closures, and methods
+`fn (r T) m`; `own T` / `ref T` / `mut T` handles with runtime borrow
+checks and compile-time move tracking; `[v, err]` returns with
+dropped-error-as-compile-error; `defer`; `extern fn` C FFI;
+`scope`/`spawn`/`go` + `spawnBlocking` structured concurrency on a
+worker pool + blocking pool (suspend-capable functions compile to
+stackless state machines — tasks are ~96 B frames, not threads; see
+`docs/semantics/concurrency.md`); buffered channels `mkchan(n)` and
+`select` multi-channel wait; `break`/`continue`; `interface` op
 constraints; generics `fn f[T ordered](a: T, b: T)` monomorphized per
-call site; `import "std/strings"` modules; top-level `let` globals
+call site; `import "std/strings"` modules with `as` aliases and
+`.{name, ...}` selection; top-level `let` globals
 (process-wide state, initialized before `main`); builtin surface: `print`,
 `itoa`, string ops, `mkbuf`/`poke*`, `argc`/`argv`, `readfile`/
 `writefile`, `exit`, `mkshared`/`sget`/`sset`/`scas`/`sadd`,
@@ -101,8 +106,11 @@ call site; `import "std/strings"` modules; top-level `let` globals
 | `examples/smoke_test.oxl` | `oxl test` scoped test harness |
 | `tests/stdlib_test.oxl` | stdlib + break/continue coverage |
 | `tests/stdmods_test.oxl` | `std/json`, `std/sync`, `std/time` end-to-end |
+| `examples/gui-todo/` | GTK todo app over `extern fn` FFI (see `docs/gui-pilot.md`) |
 | `bootstrap/lexer.oxl` | **self-host**: the language's lexer written in the language |
 | `bootstrap/parser.oxl` | **self-host**: the language's parser written in the language — parses itself, zero skips |
+| `bootstrap/check.oxl` | **self-host**: the typechecker written in the language — checks itself clean |
+| `bootstrap/codegen.oxl` | **self-host**: the C emitter written in the language — compiles itself to byte-identical C |
 
 Try it:
 
