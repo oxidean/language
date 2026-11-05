@@ -68,6 +68,14 @@ jobs:
           printf '%s\n' "$PR_BODY" > pr-body.txt
           # CodeRabbit owns the release-notes block it injects into the
           # description — exempt that managed section, scan the rest.
+          # An unclosed start marker would make sed delete to EOF and
+          # hide real markers after it: require balanced pairs first.
+          opens=$(grep -c 'This is an auto-generated comment: release notes' pr-body.txt || :)
+          closes=$(grep -c 'end of auto-generated comment: release notes' pr-body.txt || :)
+          if [ "$opens" != "$closes" ]; then
+            echo "commit-check: unbalanced CodeRabbit release-notes markers in PR body" >&2
+            exit 1
+          fi
           sed -e '/<!-- This is an auto-generated comment: release notes by coderabbit.ai -->/,/<!-- end of auto-generated comment: release notes by coderabbit.ai -->/d' \
             pr-body.txt > pr-body-clean.txt
           scripts/commit-check.sh --scan-file pr-body-clean.txt
