@@ -139,6 +139,14 @@ fn utf8_seq_len(s: str, i: int) -> int {
         }
         k = k + 1
     }
+    // overlongs: E0 needs A0-BF, F0 needs 90-BF in the second byte —
+    // below those the same scalar fits a shorter sequence
+    if c == 224 && byteat(s, i + 1) < 160 {
+        return 0
+    }
+    if c == 240 && byteat(s, i + 1) < 144 {
+        return 0
+    }
     // ED A0-BF encodes UTF-16 surrogates; F4 90-BF exceeds U+10FFFF
     if c == 237 && byteat(s, i + 1) >= 160 {
         return 0
@@ -284,7 +292,9 @@ fn tojson(j: ref Json) -> str {
         }
         m = m.next
     }
-    return bufstr(buf, b.n)
+    out := bufstr(buf, b.n)
+    rt_free(buf) // mkbuf is manual-free scratch — bufstr copies out
+    return out
 }
 
 // ---------- parse ----------
