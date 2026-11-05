@@ -28,8 +28,9 @@ HTTP CRUD + SQLite pilot. See the roadmap below for what's v0 vs later.
 Requires: Rust (cargo), a C compiler (`cc`), and pthreads. Programs
 that use the sqlite3 shims also need sqlite3 dev headers (`-lsqlite3`
 is linked only when the emitted C calls them). Supported platforms: Linux
-(x86_64) and macOS (aarch64); Windows is not yet supported (the
-runtime is POSIX/pthread — a portability layer is future work).
+(x86_64), macOS (aarch64), and Windows (x86_64, via MinGW gcc or
+LLVM clang — the runtime's `oxl_*` veneer in `runtime/rt.h` maps
+threads/sync to SRWLOCK+CONDITION_VARIABLE and sockets to WinSock2).
 
 ```sh
 cd oxl && cargo build --release && cd ..
@@ -37,10 +38,14 @@ cd oxl && cargo build --release && cd ..
 export PATH="$PWD/oxl/target/release:$PATH"
 ```
 
-`oxl build`/`run` invoke the system `cc` for the final link; set
-`LANG_CC` to override (e.g. `LANG_CC=clang-18`) and `LANG_LDFLAGS`
-to append extra link inputs (FFI shim objects, libraries — see
-`examples/gui-todo/build.sh`). `tests/run.sh` honors the same
+`oxl build`/`run` invoke a C compiler for the final link; set
+`LANG_CC` to override (e.g. `LANG_CC=clang-18`), else the driver
+probes `cc` → `gcc` → `clang` (MSVC's `cl` can't take the emitted C —
+`_Thread_local`, `__sync` builtins). `LANG_LDFLAGS` appends extra link
+inputs (FFI shim objects, libraries — see `examples/gui-todo/build.sh`).
+Programs that touch SQLite link `-lsqlite3`; where no dev package
+exists (stock Windows) `LANG_SQLITE_SRC` points at an amalgamation
+`sqlite3.c` to compile instead. `tests/run.sh` honors the same
 overrides.
 
 ## Using it

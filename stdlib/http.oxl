@@ -8,29 +8,29 @@
 // `h.route` is dispatched per request on the blocking pool; it returns a
 // Resp — the status becomes the response's HTTP status line and the body
 // is sent as text/plain.
-extern fn socket(domain: int, ty: int, proto: int) -> int
+extern fn rt_sock_open(domain: int, ty: int, proto: int) -> int
 
 // SO_REUSEADDR + sockaddr_in layout differ per OS — runtime owns both
 extern fn rt_set_reuseaddr(fd: int) -> int
 
 extern fn rt_bind_any(fd: int, port: int) -> int
 
-extern fn listen(fd: int, backlog: int) -> int
+extern fn rt_sock_listen(fd: int, backlog: int) -> int
 
-extern fn accept(fd: int, addr: mut sockaddr, len: mut intp) -> int
+extern fn rt_sock_accept(fd: int) -> int
 
-extern fn read(fd: int, buf: mut void, n: int) -> int
+extern fn rt_sock_read(fd: int, buf: mut void, n: int) -> int
 
-extern fn write(fd: int, buf: cstr, n: int) -> int
+extern fn rt_sock_write(fd: int, buf: cstr, n: int) -> int
 
-extern fn close(fd: int) -> int
+extern fn rt_sock_close(fd: int) -> int
 
 // explicit release for `own ?` buffers (mkbuf) — scope arenas don't
 // reclaim them, so a per-request scratch must be freed by hand
 extern fn rt_free(p: own void)
 
 // a client that resets mid-write must not kill the process before
-// write() returns EPIPE — runtime wrapper (libc signal can't be
+// rt_sock_write() returns EPIPE — runtime wrapper (libc signal can't be
 // extern'd portably: its real prototype clashes with int args)
 extern fn rt_sigpipe_ignore()
 
@@ -40,10 +40,6 @@ extern fn rt_sigpipe_ignore()
 extern fn rt_scope_new() -> own void
 
 extern fn rt_scope_join_free(s: own void) -> int
-
-struct sockaddr { a: int, b: int } // 16 bytes: sockaddr_in fits
-
-struct intp { v: int }
 
 /// handler result: the HTTP status code plus the text/plain body
 /// ctype selects content-type; empty falls back to text/plain
@@ -125,17 +121,17 @@ let REQ_MS = 30000
 /// early read failure, and handler trap (the runtime drains task
 /// defers on trap unwind, so a trapping route can't leak either)
 fn conn_cleanup(fd: int, inflight: shared) {
-    close(fd)
+    rt_sock_close(fd)
     sadd(inflight, -1)
 }
 
-/// write() may return short — loop until the whole response is on the
+/// rt_sock_write() may return short — loop until the whole response is on the
 /// wire or the conn dies (n <= 0 covers EPIPE + resets). Dropping the
 /// raw return would silently truncate bodies on a partial write.
 fn write_all(fd: int, s: str) {
     off := 0
     for off < len(s) {
-        n := write(fd, cstr(substr(s, off, len(s))), len(s) - off)
+        n := rt_sock_write(fd, cstr(substr(s, off, len(s))), len(s) - off)
         if n <= 0 {
             return
         }
@@ -233,7 +229,7 @@ fn content_length(req: str, hdr_end: int) -> int {
     return v
 }
 
-/// read a full request. One read() is NOT a request — TCP splits
+/// read a full request. One rt_sock_read() is NOT a request — TCP splits
 /// segments anywhere, so >4KiB bodies and split header/body deliveries
 /// (curl's Expect: 100-continue) silently truncate. Accumulate until
 /// the header terminator, then drain exactly Content-Length bytes.
@@ -247,7 +243,7 @@ fn read_request(fd: int) -> ReqRead {
             rt_free(scratch)
             return ReqRead{status: 400, req: "", body: ""}
         }
-        n := read(fd, scratch, 4095)
+        n := rt_sock_read(fd, scratch, 4095)
         if n <= 0 {
             rt_free(scratch)
             return ReqRead{status: 400, req: "", body: ""}
@@ -297,7 +293,7 @@ fn read_request(fd: int) -> ReqRead {
         if want > 4095 {
             want = 4095
         }
-        n := read(fd, scratch, want) // never past cl: bbuf is cl+1
+        n := rt_sock_read(fd, scratch, want) // never past cl: bbuf is cl+1
         if n <= 0 {
             rt_free(bbuf)
             rt_free(scratch)
@@ -323,7 +319,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
     // handler returns instead of accumulating in the serve scope
     scope {
         set_rcvtimo(fd, 10) // slowloris guard: reads give up after 10s
-        set_sndtimo(fd, 10) // a client that stops reading can't pin the conn in write()
+        set_sndtimo(fd, 10) // a client that stops reading can't pin the conn in rt_sock_write()
         rr := read_request(fd)
         if rr.status != 0 {
             resp := http_resp(rr.status, status_text(rr.status) + "\n")
@@ -368,28 +364,47 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
 /// listen+serve on port; dispatches `h.route` per request
 fn serve(port: int, h: Handler) {
     rt_sigpipe_ignore() // reset clients must not kill us on write
-    srv := socket(2, 1, 0) // AF_INET, SOCK_STREAM
-    addr := new(sockaddr)
-    one := new(intp)
-    one.v = 16 // peer-addr buffer size for accept()
-    if rt_set_reuseaddr(srv) != 0 || rt_bind_any(srv, port) != 0 || listen(srv, 64) != 0 {
-        // a failed bind/listen makes every accept return -1 at once:
-        // the serve loop would spin at 100% CPU serving nothing
-        close(srv)
-        println("serve: bind/listen failed on :" + itoa(port))
-        exit(1)
+    // bounded backoff retry on bind: on Windows SO_EXCLUSIVEADDRUSE
+    // keeps the port unavailable while a just-dead process's accepted
+    // sockets finish kernel teardown — a restart during live traffic
+    // would otherwise die on EADDRINUSE though the port frees moments
+    // later. Each attempt recreates the socket (option + bind state
+    // doesn't carry) and the wait ramps to 2s; ~25s total, then give
+    // up — a failed bind/listen makes every accept return -1 at once
+    // and the serve loop would spin at 100% CPU serving nothing.
+    srv := -1
+    delay := 100
+    tries := 0
+    for srv < 0 {
+        cand := rt_sock_open(2, 1, 0) // AF_INET, SOCK_STREAM
+        if cand >= 0 && rt_set_reuseaddr(cand) == 0 && rt_bind_any(cand, port) == 0 && rt_sock_listen(cand, 64) == 0 {
+            srv = cand
+        } else {
+            if cand >= 0 {
+                rt_sock_close(cand)
+            }
+            tries = tries + 1
+            if tries > 15 {
+                println("serve: bind/listen failed on :" + itoa(port))
+                exit(1)
+            }
+            usleep(delay * 1000)
+            if delay < 2000 {
+                delay = delay * 2
+            }
+        }
     }
     println("listening on :" + itoa(port))
 
     inflight := mkshared(0)
     scope {
         for true {
-            cfd := accept(srv, addr, one)
+            cfd := rt_sock_accept(srv)
             if cfd >= 0 {
                 // claim a slot before spawning; sadd returns the OLD count
                 if sadd(inflight, 1) >= MAX_CONN {
                     sadd(inflight, -1)
-                    close(cfd)
+                    rt_sock_close(cfd)
                 } else {
                     spawnBlocking handle_conn(h, cfd, inflight)
                 }

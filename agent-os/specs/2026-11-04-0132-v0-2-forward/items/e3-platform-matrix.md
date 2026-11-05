@@ -29,6 +29,19 @@ Windows next. "Runs on the user's machine" is an adoption blocker.
   if WinSock/portability drags — the matrix decides, not the spec)
 - `LANG_CC` env override documented
 
+## Landed (PR #3)
+
+- CI matrix: ubuntu + macOS + **windows-latest** (per-leg status lives in CI, not here)
+- Portability: `rt.h` `oxl_*` veneer (SRWLOCK + CONDITION_VARIABLE +
+  `_beginthreadex` on Win32, pthread aliases on POSIX — ~190 call
+  sites share one contract, no `rt_windows.c` fork)
+- Win32 shims in `rt.c`: `Sleep`/`FILETIME` time, `GetSystemInfo`,
+  `WSAStartup` under `rt_init()`, DWORD-ms socket timeouts,
+  `rt_sock_*`/`rt_file_readable` so `.oxl` code names no POSIX fd API
+- Driver: `LANG_CC` override (documented) + cc→gcc→clang probe,
+  `-lws2_32`, `.exe` outputs, `LANG_SQLITE_SRC` amalgamation knob
+  (no sqlite dev package on stock Windows)
+
 ## Depends on
 
 - Nothing — CI + shim work. Independent worktree item.

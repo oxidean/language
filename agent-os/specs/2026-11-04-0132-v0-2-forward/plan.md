@@ -122,7 +122,8 @@ structural interfaces, no trait solving).
 `items/d4-shape-generics.md`. Design doc's preferred instantiation
 (gcshape stenciling — share code per memory layout, not per type).
 Full monomorphization works today; this is a compile-time/binary-size
-optimization. Can slip.
+optimization. Slipped per spec: measured 2026-11-05 — 3 generic defs,
+~0 instantiations in-corpus; win is nil at v0 scale (see item doc).
 
 ### Task D5: module qualification [done]
 
@@ -144,8 +145,9 @@ in `.oxl` on the self-hosted parser's AST).
 
 ### Task E3: platform matrix [done]
 
-`items/e3-platform-matrix.md`. CI matrix x86_64+aarch64, macOS, then
-Windows; runtime portability audit (pthreads everywhere today).
+`items/e3-platform-matrix.md`. CI matrix ubuntu+macOS+Windows;
+`oxl_*` veneer maps pthreads→SRWLOCK/CONDITION_VARIABLE/threads and
+POSIX sockets→WinSock2 (PR #3).
 
 ## Track F — Product pilots
 

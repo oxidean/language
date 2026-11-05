@@ -2,7 +2,7 @@
 // for, scope/spawn, channels, extern FFI
 struct Point { x: int, y: int }
 
-extern fn strlen(s: cstr) -> int
+extern fn rt_strlen(s: cstr) -> int
 
 fn fail(b: bool) -> [int, err] {
     if b {
@@ -45,7 +45,7 @@ fn main() {
     }
     println(itoa(i))
 
-    n := strlen("hello")
+    n := rt_strlen("hello")
     println(itoa(n))
 
     ch := mkchan()

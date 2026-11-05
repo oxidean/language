@@ -1,0 +1,3 @@
+# LF everywhere — the lexer, diff-based tests, and generated-C byte
+# comparison assume it; Windows checkouts must not inject CRLF
+* text=auto eol=lf
