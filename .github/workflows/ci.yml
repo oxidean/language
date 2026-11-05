@@ -72,6 +72,10 @@ jobs:
           fi
           # a force-pushed before-SHA can be unreachable from every ref;
           # fetch it best-effort — if it stays unresolvable the script
-          # fails the check rather than silently linting zero commits
-          git fetch --no-tags --depth 1 origin "$PUSH_BEFORE" 2>/dev/null || true
+          # fails the check rather than silently linting zero commits.
+          # Never --depth: a shallow boundary hides PUSH_BEFORE's
+          # ancestry, and rev-list would then lint all of history. The
+          # fetch-depth:0 checkout already has it for normal pushes —
+          # fetch only when absent, without a depth limit.
+          git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null             || git fetch --no-tags origin "$PUSH_BEFORE" 2>/dev/null             || true
           scripts/commit-check.sh --range "$PUSH_BEFORE..$PUSH_AFTER"
