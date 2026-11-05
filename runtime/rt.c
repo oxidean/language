@@ -310,14 +310,15 @@ static void scope_done(RtScope *s) {
     }
 }
 
-/* heap-allocated scope for library code that can't name RtScope's
- * size (stdlib http trap containment). Join with rt_scope_join_free —
- * rt_scope_try semantics: the trap code returns instead of
- * propagating to the parent. */
 /* SIGPIPE must not kill the process before write() returns EPIPE —
  * servers ignore it. Wrapped in rt.c because a libc `signal` extern
  * conflicts with the real prototype (clang -Wint-conversion). */
 void rt_sigpipe_ignore(void) { signal(SIGPIPE, SIG_IGN); }
+
+/* heap-allocated scope for library code that can't name RtScope's
+ * size (stdlib http trap containment). Join with rt_scope_join_free —
+ * rt_scope_try semantics: the trap code returns instead of
+ * propagating to the parent. */
 
 void *rt_scope_new(void) {
     /* rt_alloc into the CURRENT scope, not raw malloc/own: callers wrap
@@ -331,6 +332,8 @@ void *rt_scope_new(void) {
     return s;
 }
 
+/* name kept for the extern surface: the "free" is the parent scope
+ * reaping the dead struct — the join already did the real teardown */
 int64_t rt_scope_join_free(void *sv) {
     return rt_scope_try((RtScope *)sv);
 }
