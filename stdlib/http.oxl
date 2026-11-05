@@ -380,14 +380,18 @@ fn serve(port: int, h: Handler) {
         if cand >= 0 && rt_set_reuseaddr(cand) == 0 && rt_bind_any(cand, port) == 0 && rt_sock_listen(cand, 64) == 0 {
             srv = cand
         } else {
-            if cand >= 0 { rt_sock_close(cand) }
+            if cand >= 0 {
+                rt_sock_close(cand)
+            }
             tries = tries + 1
             if tries > 15 {
                 println("serve: bind/listen failed on :" + itoa(port))
                 exit(1)
             }
             usleep(delay * 1000)
-            if delay < 2000 { delay = delay * 2 }
+            if delay < 2000 {
+                delay = delay * 2
+            }
         }
     }
     println("listening on :" + itoa(port))
