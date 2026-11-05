@@ -1,0 +1,80 @@
+// pair-forward across differing val types: `return f()` where f's
+// pair val ty differs from the caller's — the emitted struct must
+// convert .val (iface rewrap / boxing), not drop it in raw
+
+interface Small { next() -> [int, err] }
+
+interface Big {
+    next() -> [int, err]
+    extra() -> int
+}
+
+struct Seq { i: int }
+
+fn (s mut Seq) next() -> [int, err] {
+    s.i = s.i + 1
+    return s.i, nil
+}
+
+fn (s Seq) extra() -> int {
+    return s.i * 10
+}
+
+fn mkpair() -> [Big, err] {
+    return Seq{i: 41}, nil
+}
+
+// iface -> different iface: vtab layouts differ, needs a rewrap
+fn fwd_iface() -> [Small, err] {
+    return mkpair()
+}
+
+// suspended variant: same forward through a susp callee's frame slot
+fn mkpair_susp() -> [Big, err] {
+    sleep(1)
+    return Seq{i: 9}, nil
+}
+
+fn fwd_susp() -> [Small, err] {
+    return mkpair_susp()
+}
+
+// concrete -> iface: the val must box into an RtIface
+fn mkseq() -> [Seq, err] {
+    return Seq{i: 7}, nil
+}
+
+fn fwd_conc() -> [Small, err] {
+    return mkseq()
+}
+
+// susp scalar forward: `return suspcall()` (retk==1) drives the
+// child's frame and forwards its result
+fn nap() -> int {
+    sleep(1)
+    return 5
+}
+
+fn wake() -> int {
+    return nap()
+}
+
+fn main() {
+    assert(wake() == 5)
+    [v, e] = fwd_iface()
+    assert(e == nil)
+    [n, e2] = v.next()
+    assert(e2 == nil && n == 42)
+
+    [v2, e3] = fwd_susp()
+    assert(e3 == nil)
+    [n2, e4] = v2.next()
+    assert(e4 == nil && n2 == 10)
+
+    [v3, e5] = fwd_conc()
+    assert(e5 == nil)
+    [n3, e6] = v3.next()
+    assert(e6 == nil && n3 == 8)
+
+    println("pairfwd ok")
+}

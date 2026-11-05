@@ -343,7 +343,7 @@ cgen() {  # cgen <src> <name> — emit C via codegen.oxl, compile it
     grep -q 'rt_sqlite_' "$cgen_dir/$2.c" && { def="-DOXL_SQLITE"; lib="-lsqlite3"; }
     "${LANG_CC:-cc}" -O2 -pthread -Iruntime $def "$cgen_dir/$2.c" runtime/rt.c $lib -o "$cgen_dir/$2" || { echo "FAIL codegen cc $1"; exit 1; }
 }
-for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl tests/methods.oxl; do
+for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl tests/methods.oxl tests/pairfwd.oxl; do
     n=$(basename "$f" .oxl)
     cgen "$f" "$n"
     got=$("$cgen_dir/$n")

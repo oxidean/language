@@ -3092,7 +3092,8 @@ fn gs(g: mut G, s: ref parser.Node) {
                 tag := gpairsig(g, vals.v)
                 cur := "o_ret_" + cname(g.cur)
                 if len(tag) > 0 && tag != cur {
-                    wln(g, "    { struct " + tag + " _fw = " + v + "; return (struct " + cur + "){ _fw.val, _fw.err }; }")
+                    cv := gconv_v(g, vals.v, "_fw.val", g.cret)
+                    wln(g, "    { struct " + tag + " _fw = " + v + "; return (struct " + cur + "){ " + cv + ", _fw.err }; }")
                 } else {
                     wln(g, "    return " + v + ";")
                 }
@@ -3666,7 +3667,8 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
                     gfscope_drain(g, 0)
                     gdefers(g)
                     gfsusp_call(g, vals.v, sn, 3, pa, pe)
-                    wln(g, "    fr->result = (struct o_ret_" + cname(g.cur) + "){ fr->" + pa + ", fr->" + pe + " };")
+                    cv2 := gconv_v(g, vals.v, "fr->" + pa, g.cret)
+                    wln(g, "    fr->result = (struct o_ret_" + cname(g.cur) + "){ " + cv2 + ", fr->" + pe + " };")
                     gsusp_ret(g, "RT_READY")
                     return
                 }
@@ -3684,7 +3686,8 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
                     tag := gpairsig(g, vals.v)
                     cur := "o_ret_" + cname(g.cur)
                     if len(tag) > 0 && tag != cur {
-                        wln(g, "    { struct " + tag + " _fw = " + v + "; fr->result = (struct " + cur + "){ _fw.val, _fw.err }; }")
+                        cv3 := gconv_v(g, vals.v, "_fw.val", g.cret)
+                        wln(g, "    { struct " + tag + " _fw = " + v + "; fr->result = (struct " + cur + "){ " + cv3 + ", _fw.err }; }")
                     } else {
                         wln(g, "    fr->result = " + v + ";")
                     }
