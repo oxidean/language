@@ -39,7 +39,7 @@ check_attribution() {
     # AI co-author / bot trailers. A human Co-authored-by is fine; the
     # ban is on AI vendors, bots, and *-ai-* / [bot] addresses.
     if printf '%s\n' "$_msg" | grep -iE '^[[:space:]]*co-?authored-by:' \
-        | grep -qiE 'claude|cursor|copilot|chatgpt|codex|gemini|devin-ai|openai|anthropic|codeium|windsurf|swe-|\[bot\]|[a-z0-9-]*bot@|ai-integration'; then
+        | grep -qiE 'claude|cursor|copilot|chatgpt|codex|gemini|devin-ai|cognition\.ai|devin\.ai[[:space:]>]|openai|anthropic|codeium|windsurf|swe-|\[bot\]|[a-z0-9-]*bot@|ai-integration'; then
         err "AI Co-authored-by trailer"
     fi
     # generator footers: "Generated with <tool>", "Made with: X",
@@ -108,11 +108,21 @@ check_message() {
 case "${1:-}" in
     --file)
         [ -f "${2:-}" ] || { err "--file needs a readable message file"; exit 1; }
-        # COMMIT_EDITMSG carries `#`-comment lines, and `git commit -v`
-        # appends the staged diff below the scissors marker — both must
-        # be stripped before the grammar/attribution checks see it.
-        _cleaned=$(sed -e '/^# ------------------------ >8 ------------------------$/,$d' -e '/^#/d' "$2")
-        check_message "$_cleaned" "subject"
+        # COMMIT_EDITMSG carries comment lines, and `git commit -v`
+        # appends the staged diff below the scissors marker. Grammar
+        # sees the cleaned message (comments + scissors cut, honoring
+        # core.commentChar). Attribution scans everything BEFORE the
+        # scissors line including `#`-lines: `git commit -m` keeps them
+        # in history, so a marker hidden in one must fail here exactly
+        # as it would in CI — while diff content past the marker is not
+        # part of the message and is left alone.
+        _cc=$(git config --get core.commentChar 2>/dev/null || :)
+        case "$_cc" in ''|auto) _cc='#' ;; esac
+        _ccq=$(printf '%s' "$_cc" | sed 's/[^A-Za-z0-9]/\\&/g')
+        _precut=$(sed -e "/^${_ccq} ------------------------ >8 ------------------------\$/,\$d" "$2")
+        _cleaned=$(printf '%s\n' "$_precut" | git stripspace --strip-comments)
+        check_subject "$(printf '%s\n' "$_cleaned" | head -1)" "subject"
+        check_attribution "$_precut"
         ;;
     --message)
         check_message "${2:-}" "subject"
