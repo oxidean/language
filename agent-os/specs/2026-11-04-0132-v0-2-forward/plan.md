@@ -7,9 +7,9 @@ battle. Nothing here is scheduled — milestone-gated, not date-gated.
 **Status (2026-11-05): all items landed except D4 (deferred,
 spec-sanctioned slip). C1 closed out: checker-diagnostic parity is
 verified by the `tests/diag/` differential corpus in `tests/run.sh`.
-C2 is partial: the self-hosted codegen covers every example except the
-http pilot (interface dispatch is not ported yet) and self-compiles
-all four bootstrap components.**
+C2 closed out: the `RtIface`/vtable machinery is ported, the http
+pilot and `tests/methods.oxl` emit and run through the self-hosted
+codegen, and the four-component self-compile chain holds.**
 
 Execution model: Track A (coroutine) is the critical path and gets its
 own focused session. Tracks B→F are parallel-safe worktree items once
@@ -84,7 +84,7 @@ Rust driver falls back to the toolchain exe's ancestors — no self-host
 equivalent), `[parse]`/`[lex]` kinds (self-host tags them `[check]`),
 and a few shared silence cases neither checker catches.
 
-### Task C2: `bootstrap/codegen.oxl` [partial]
+### Task C2: `bootstrap/codegen.oxl` [done]
 
 `items/c2-codegen.md`. Emits C against `runtime/` for every example
 except the http pilot (cc-built, run-compared), and the bootstrap
@@ -92,11 +92,11 @@ chain holds: all four self-host components compiled by the self-hosted
 codegen behave identically to `oxl run`, with codegen's own
 self-compile byte-identical. Verified in `tests/run.sh`.
 
-Remaining: interface-typed values need the `RtIface`/vtable machinery
-ported from `codegen.rs` — iface slots currently emit with the wrong C
-type and `x.m(...)` on an iface has no dispatch path, so the http
-pilot (`Handler` param) and `tests/methods.oxl` are excluded from
-codegen coverage until it lands.
+Closed out in `specs/2026-11-05-c2-iface-codegen/`: the
+`RtIface`/vtable machinery ported — iface boxing, per-impl vtables,
+`x.m()` dispatch, receiver adaptation, pair-return methods,
+generic-method vtab entries, fn monomorphization. The http pilot and
+`tests/methods.oxl` are in codegen coverage.
 
 ## Track D — Type-system depth (parallel-safe)
 

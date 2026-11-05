@@ -24,6 +24,15 @@ fn cname(n: &str) -> String {
     n.replace('.', "_")
 }
 
+/// vtab symbol fragment for an impl key — `iface:W2` rewraps sanitize
+/// to `iface_W2` since ':' is not a C identifier char (.oxl gvtkey)
+fn vtkey(implkey: &str) -> String {
+    match implkey.strip_prefix("iface:") {
+        Some(w2) => format!("iface_{}", cname(w2)),
+        None => cname(implkey),
+    }
+}
+
 fn c_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -1256,27 +1265,31 @@ impl<'a> Gen<'a> {
                 if vals.is_empty() {
                     let _ = writeln!(self.out, "    return;");
                 } else if self.cur_ret_pair && vals.len() == 2 {
-                    let v = self.expr(&vals[0]);
+                    let want = self.cur_ret_ty.clone();
+                    let v = self.conv(&vals[0], &want);
                     let e = self.expr(&vals[1]);
                     let cf = self.cur_fn.clone();
                     let _ = writeln!(self.out, "    return (struct o_ret_{}){{ {v}, {e} }};", cname(&cf));
                 } else if self.cur_ret_pair && vals.len() == 1 {
-                    // forwarding a call — an iface Pair comes back as
-                    // o_vret_<W>_<m>; copy into this fn's o_ret_<f>
-                    let c = self.expr(&vals[0]);
-                    let fwd_vt = matches!(
-                        self.call_plan_ret(&vals[0]),
-                        Some(crate::check::Ret::Pair(_))
-                            if matches!(&vals[0].kind,
-                                ExprKind::Call { f, .. }
-                                    if !matches!(&f.kind, ExprKind::Ident(n) if self.fns.contains_key(n)))
-                    );
-                    if fwd_vt {
+                    // `return paircall()` — eval once into _fw, then
+                    // convert .val into this fn's o_ret_<f> when the
+                    // pair structs differ (iface rewrap / boxing)
+                    if let Some((tag, _)) = self.pair_call_info(&vals[0]) {
+                        let c = self.expr(&vals[0]);
                         let cf = self.cur_fn.clone();
-                        let _ = writeln!(self.out,
-                            "    return (struct o_ret_{}){{ ({c}).val, ({c}).err }};", cname(&cf));
+                        let cur = format!("o_ret_{}", cname(&cf));
+                        if tag != cur {
+                            let want = self.cur_ret_ty.clone();
+                            let cv = self.conv_v(&vals[0], "_fw.val".to_string(), &want);
+                            let _ = writeln!(self.out,
+                                "    {{ struct {tag} _fw = {c}; return (struct {cur}){{ {cv}, _fw.err }}; }}");
+                        } else {
+                            let _ = writeln!(self.out, "    return {c};");
+                        }
                     } else {
-                        let _ = writeln!(self.out, "    return {c};");
+                        let want = self.cur_ret_ty.clone();
+                        let v = self.conv(&vals[0], &want);
+                        let _ = writeln!(self.out, "    return {v};");
                     }
                 } else {
                     let v = self.conv(&vals[0], &self.cur_ret_ty.clone());
@@ -1744,6 +1757,7 @@ impl<'a> Gen<'a> {
         let saved_fslots = std::mem::take(&mut self.fslots);
         let saved_ret_pair = self.cur_ret_pair;
         self.cur_ret_pair = false;
+        let saved_ret_ty = std::mem::replace(&mut self.cur_ret_ty, ret.clone());
         let saved_defers = std::mem::take(&mut self.defers);
         let saved_fn = std::mem::replace(&mut self.cur_fn, format!("o_cl_{id}"));
         let _ = writeln!(self.out, "static {ret_c} o_cl_{id}(struct o_env_{id} *_e{psig}) {{");
@@ -1768,6 +1782,7 @@ impl<'a> Gen<'a> {
         self.in_frame = saved_frame;
         self.fslots = saved_fslots;
         self.cur_ret_pair = saved_ret_pair;
+        self.cur_ret_ty = saved_ret_ty;
         self.defers = saved_defers;
         self.cur_fn = saved_fn;
         // the value: escaping-heap env populated from the enclosing scope
@@ -2047,7 +2062,7 @@ impl<'a> Gen<'a> {
             let ms = self.ifaces.get(&w).cloned().unwrap_or_default();
             let mut slots = Vec::new();
             for (i, m) in ms.iter().enumerate() {
-                let tname = format!("o_vtt_{}_{}_{i}", cname(&w), cname(&implkey));
+                let tname = format!("o_vtt_{}_{}_{i}", cname(&w), vtkey(&implkey));
                 let mut psig = String::new();
                 for (k, p) in m.params.iter().enumerate() {
                     psig += &format!(", {} a{k}", self.cty(p));
@@ -2148,7 +2163,7 @@ impl<'a> Gen<'a> {
             let _ = writeln!(out,
                 "static void* o_vt_{}_{}[] = {{ {} }};
 ",
-                cname(&w), cname(&implkey), slots.join(", "));
+                cname(&w), vtkey(&implkey), slots.join(", "));
         }
     }
 
@@ -2235,6 +2250,43 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// (pair-struct name, val ty) for a [v, err] call — o_vret_<W>_<m>
+    /// for vtab slots, o_ret_<callee|inst> for fns; None otherwise
+    fn pair_call_info(&mut self, e: &Expr) -> Option<(String, Ty)> {
+        let ExprKind::Call { f, args } = &e.kind else { return None };
+        match self.call_plan(f, args) {
+            CallPlan::Vt { w, mname, ret, .. } => match ret {
+                crate::check::Ret::Pair(t) => Some((
+                    format!("o_vret_{}_{}", cname(&w), cname(&mname)),
+                    t,
+                )),
+                _ => None,
+            },
+            CallPlan::Fn { q, recv, .. } => {
+                let t = match self.fns.get(&q).map(|x| x.1.clone()) {
+                    Some(crate::check::Ret::Pair(t)) => t,
+                    _ => return None,
+                };
+                let eff: Vec<Expr> = recv
+                    .iter()
+                    .cloned()
+                    .chain(args.iter().cloned())
+                    .collect();
+                match call_bindings(self, &q, &eff) {
+                    Some(bind) => {
+                        let m: HashMap<String, Ty> = bind.iter().cloned().collect();
+                        Some((
+                            format!("o_ret_{}", cname(&inst_name(&q, &bind))),
+                            crate::check::subst_ty(&t, &m),
+                        ))
+                    }
+                    None => Some((format!("o_ret_{}", cname(&q)), self.dt(&t))),
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// declared Ret of a call expr — for the pair-forward shape check
     fn call_plan_ret(&self, e: &Expr) -> Option<crate::check::Ret> {
         let ExprKind::Call { f, args } = &e.kind else { return None };
@@ -2248,18 +2300,24 @@ impl<'a> Gen<'a> {
     /// emit `e` coerced to `want` — only iface conversions do anything:
     /// wrap the impl into a {data, vtab} pair; nil → the empty pair
     fn conv(&mut self, e: &Expr, want: &Ty) -> String {
+        let v = self.expr(e);
+        self.conv_v(e, v, want)
+    }
+
+    /// conv on an already-emitted `v` — e's ty still decides the wrap
+    fn conv_v(&mut self, e: &Expr, v: String, want: &Ty) -> String {
         let got = self.dt(&self.expr_ty(e));
-        let Ty::Iface(w) = self.dt(want) else { return self.expr(e) };
+        let Ty::Iface(w) = self.dt(want) else { return v };
         match &got {
             Ty::Err => "(RtIface){ 0, 0 }".into(),
-            Ty::Iface(g) if *g == w => self.expr(e),
+            Ty::Iface(g) if *g == w => v,
             Ty::Iface(g) => {
                 let g = g.clone();
-                self.iface_wrap(e, &w, &format!("iface:{g}"))
+                self.iface_wrap_v(e, v, &w, &format!("iface:{g}"))
             }
             _ => match self.ty_base(&got) {
-                Some(b) => self.iface_wrap(e, &w, &b),
-                None => self.expr(e),
+                Some(b) => self.iface_wrap_v(e, v, &w, &b),
+                None => v,
             },
         }
     }
@@ -2268,10 +2326,15 @@ impl<'a> Gen<'a> {
     /// boxed so the data outlives the stack slot (mut receivers write
     /// through the box)
     fn iface_wrap(&mut self, e: &Expr, w: &str, implkey: &str) -> String {
+        let v = self.expr(e);
+        self.iface_wrap_v(e, v, w, implkey)
+    }
+
+    /// iface_wrap on an already-emitted `v` (e only supplies the ty)
+    fn iface_wrap_v(&mut self, e: &Expr, v: String, w: &str, implkey: &str) -> String {
         self.vtab_uses.insert((w.to_string(), implkey.to_string()));
         let got = self.dt(&self.expr_ty(e));
-        let v = self.expr(e);
-        let vt = format!("o_vt_{}_{}", cname(w), cname(implkey));
+        let vt = format!("o_vt_{}_{}", cname(w), vtkey(implkey));
         match got {
             Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) => {
                 format!("(RtIface){{ (void*)({v}), {vt} }}")
@@ -3281,22 +3344,19 @@ impl<'a> Gen<'a> {
                     if let ExprKind::Ident(fn_name) = &f.kind {
                         let n = self.tmp();
                         let c = self.expr(call);
-                        let (ret_name, bind) = match call_bindings(self, fn_name, args) {
-                            Some(bind) => (inst_name(fn_name, &bind), Some(bind)),
-                            None => (fn_name.clone(), None),
+                        // pair-struct name + val ty by call kind — direct
+                        // fn (o_ret_<name|inst>), iface vtab (o_vret_<W>_<m>)
+                        let (tag, vt) = match self.pair_call_info(call) {
+                            Some(pair) => pair,
+                            None => {
+                                let ret_name = match call_bindings(self, fn_name, args) {
+                                    Some(bind) => inst_name(fn_name, &bind),
+                                    None => fn_name.clone(),
+                                };
+                                (format!("o_ret_{}", cname(&ret_name)), Ty::Unknown)
+                            }
                         };
-                        let _ = writeln!(self.out, "    {{ struct o_ret_{} _r{n} = {c};", cname(&ret_name));
-                        let vt = match self.fns.get(fn_name).map(|x| x.1.clone()) {
-                            Some(Ret::Pair(t)) => match &bind {
-                                Some(bind) => {
-                                    let m: HashMap<String, Ty> =
-                                        bind.iter().cloned().collect();
-                                    subst_ty(&t, &m)
-                                }
-                                None => self.dt(&t),
-                            },
-                            _ => Ty::Unknown,
-                        };
+                        let _ = writeln!(self.out, "    {{ struct {tag} _r{n} = {c};");
                         if let Bind::Name(na) = a {
                             let ct = self.cty(&vt);
                             let fd = self.fslot(na, &ct);
@@ -3372,14 +3432,77 @@ impl<'a> Gen<'a> {
                 }
                 self.exit_drained = false;
                 if !vals.is_empty() {
+                    if self.cur_ret_pair && vals.len() == 1 {
+                        if let Some(cn) = self.stmt_susp_call(&vals[0]).map(str::to_string) {
+                            // `return suspPair()` — run the child through
+                            // the frame machinery, convert its .val
+                            if let ExprKind::Call { args, .. } = &vals[0].kind {
+                                if let Some((_, vt)) = self.pair_call_info(&vals[0]) {
+                                    let n = self.tmp();
+                                    let ct = self.cty(&vt);
+                                    let pa = self.fslot(&format!("_pa{n}"), &ct);
+                                    let pe = self.fslot(&format!("_pe{n}"), "int64_t");
+                                    self.fsusp_call(&cn, args,
+                                        FDest::Pair(Some(pa.clone()), Some(pe.clone())));
+                                    let want = self.cur_ret_ty.clone();
+                                    let cv = self.conv_v(&vals[0], format!("fr->{pa}"), &want);
+                                    let cf = self.cur_fn.clone();
+                                    let _ = writeln!(self.out,
+                                        "    fr->result = (struct o_ret_{}){{ {cv}, fr->{pe} }};", cname(&cf));
+                                    self.susp_ret("RT_READY");
+                                    return;
+                                }
+                                // retk==1 susp call — child's scalar
+                                // result lands in a slot, then converts
+                                let n = self.tmp();
+                                let rt = match self.call_plan_ret(&vals[0]) {
+                                    Some(crate::check::Ret::One(t)) => self.cty(&t),
+                                    _ => "int64_t".to_string(),
+                                };
+                                let fd = self.fslot(&format!("_rv{n}"), &rt);
+                                if matches!(cn.as_str(), "recv" | "send" | "sleep" | "msleep") {
+                                    self.fsusp_leaf(&cn, args, FDest::Field(fd.clone()));
+                                } else {
+                                    self.fsusp_call(&cn, args, FDest::Field(fd.clone()));
+                                }
+                                let want = self.cur_ret_ty.clone();
+                                let cv = self.conv_v(&vals[0], format!("fr->{fd}"), &want);
+                                let _ = writeln!(self.out, "    fr->result = {cv};");
+                                self.susp_ret("RT_READY");
+                                return;
+                            }
+                        }
+                    }
                     if self.cur_ret_pair && vals.len() == 2 {
-                        let v = self.expr(&vals[0]);
+                        let want = self.cur_ret_ty.clone();
+                        let v = self.conv(&vals[0], &want);
                         let e = self.expr(&vals[1]);
                         let cf = self.cur_fn.clone();
                         let _ = writeln!(self.out,
                             "    fr->result = (struct o_ret_{}){{ {v}, {e} }};", cname(&cf));
+                    } else if self.cur_ret_pair {
+                        // non-susp `return paircall()` inside a susp fn —
+                        // same _fw rewrap as the stack path
+                        if let Some((tag, _)) = self.pair_call_info(&vals[0]) {
+                            let c = self.expr(&vals[0]);
+                            let cf = self.cur_fn.clone();
+                            let cur = format!("o_ret_{}", cname(&cf));
+                            if tag != cur {
+                                let want = self.cur_ret_ty.clone();
+                                let cv = self.conv_v(&vals[0], "_fw.val".to_string(), &want);
+                                let _ = writeln!(self.out,
+                                    "    {{ struct {tag} _fw = {c}; fr->result = (struct {cur}){{ {cv}, _fw.err }}; }}");
+                            } else {
+                                let _ = writeln!(self.out, "    fr->result = {c};");
+                            }
+                        } else {
+                            let want = self.cur_ret_ty.clone();
+                            let v = self.conv(&vals[0], &want);
+                            let _ = writeln!(self.out, "    fr->result = {v};");
+                        }
                     } else {
-                        let v = self.expr(&vals[0]);
+                        let want = self.cur_ret_ty.clone();
+                        let v = self.conv(&vals[0], &want);
                         let _ = writeln!(self.out, "    fr->result = {v};");
                     }
                 }
