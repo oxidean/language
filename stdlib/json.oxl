@@ -138,6 +138,13 @@ fn utf8_seq_len(s: str, i: int) -> int {
         }
         k = k + 1
     }
+    // ED A0-BF encodes UTF-16 surrogates; F4 90-BF exceeds U+10FFFF
+    if c == 237 && byteat(s, i + 1) >= 160 {
+        return 0
+    }
+    if c == 244 && byteat(s, i + 1) >= 144 {
+        return 0
+    }
     return n
 }
 
@@ -355,8 +362,13 @@ fn jparse_str(p: mut JCur) -> str {
                 out = out + "\\"
             }
             if e == 117 {
-                // \uXXXX — UTF-8 encoded (surrogate pairs are v1 work)
+                // \uXXXX — UTF-8 encoded (surrogate pairs are v1 work;
+                // D800-DFFF is rejected so output never holds CESU-8)
                 cp := hex4(substr(p.src, p.pos + 1, p.pos + 5))
+                if cp >= 55296 && cp <= 57343 {
+                    p.err = 1
+                    return out
+                }
                 if cp < 128 {
                     out = out + utf8_1(cp)
                 } else if cp < 2048 {
