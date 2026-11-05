@@ -30,7 +30,11 @@ The goal: the compiler, written in the language, compiled by itself.
 - `bootstrap/codegen.oxl` — a port of the Rust C emitter, written in
   `.oxl`, consuming the checker's tables over the parser's AST:
   `oxl run bootstrap/codegen.oxl -- file.oxl > out.c`, then
-  `cc -O2 -pthread -Iruntime out.c runtime/rt.c -lsqlite3 -o out`.
+  `cc -O2 -pthread -Iruntime out.c runtime/rt.c -o out`. When `out.c`
+  references `rt_sqlite_*` (sqlite stdlib in use), add `-DOXL_SQLITE`
+  before the sources and `-lsqlite3` after them — `emit_and_cc`
+  detects the same condition and adds both only then, since `-l`
+  must trail the objects that reference it under `--as-needed`.
   Suspension lowers to the same `o_frm_*`/`o_poll_*` state machines the
   Rust emitter produces; `--test` mirrors `oxl test`'s scope-wrapped
   runner. **It compiles itself** — the emitted binary regenerates
