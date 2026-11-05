@@ -42,8 +42,9 @@ Verified in `tests/run.sh`'s `== bootstrap codegen ==` section:
   and run identically to `oxl run`. The gui pilot emits and links when
   gtk4 dev files are present.
 - All four bootstrap components self-compile and behave identically
-  (lexer token counts, parser AST shape, checker diagnostics against
-  the corpus, codegen self-compile byte-identical).
+  (lexer and parser output compared in full against `oxl run`,
+  checker diagnostics against the corpus, codegen self-compile
+  byte-identical).
 
 Remaining gap — interface values: `codegen.oxl` never ported the
 `RtIface`/vtable machinery from `oxl/src/codegen.rs` (type mapping,

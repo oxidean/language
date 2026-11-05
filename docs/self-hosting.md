@@ -123,9 +123,9 @@ Two more gates keep the claim honest:
   checker's diagnostics equal `check.oxl`'s line-for-line and in
   order, after stripping the Rust `file:line:col:` prefix.
 - **All-four self-compile** — each bootstrap component compiled by
-  `codegen.oxl` must behave identically to `oxl run` (lexer token
-  counts, parser AST shape, checker diagnostics on a corpus file);
-  codegen's own self-compile is byte-identical.
+  `codegen.oxl` must produce identical output to `oxl run` (lexer and
+  parser output compared in full, checker diagnostics on a corpus
+  file); codegen's own self-compile is byte-identical.
 
 "The language can parse, typecheck, and compile itself" is tested on
 every push.

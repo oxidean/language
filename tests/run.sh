@@ -305,17 +305,22 @@ echo "== differential diagnostics (c1) =="
 # checker diagnoses (cc or the runtime catches those downstream — that
 # silence is already parity).
 for f in tests/diag/*.oxl; do
-    # both checkers exit nonzero when the file has diags — expected
-    # (build's failure would trip pipefail through the sed) — pin both
-    rust=$("$OXL" build "$f" -o "$scratch/diagbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //' || true)
-    self=$("$OXL" run bootstrap/check.oxl -- "$f" 2>&1 || true)
+    # both checkers must reject every fixture (pipefail carries the
+    # build's nonzero status through the sed) — and their diagnostics
+    # must be identical. A fixture either side accepts is a test bug.
+    if rust=$("$OXL" build "$f" -o "$scratch/diagbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //'); then
+        echo "FAIL diag parity $f: rust checker accepted"; exit 1
+    fi
+    if self=$("$OXL" run bootstrap/check.oxl -- "$f" 2>&1); then
+        echo "FAIL diag parity $f: self checker accepted"; exit 1
+    fi
     if [ "$rust" != "$self" ]; then
         echo "FAIL diag parity $f"
         echo "-- rust --"; printf '%s\n' "$rust"
         echo "-- self --"; printf '%s\n' "$self"
         exit 1
     fi
-    # a corpus file neither side rejects is a test bug, not parity
+    # a corpus file neither side diagnoses is a test bug, not parity
     if [ -z "$rust" ] || [ "$self" = "ok" ]; then
         echo "FAIL diag corpus $f: no diagnostics from either checker"; exit 1
     fi
@@ -373,10 +378,15 @@ for comp in lexer parser check codegen; do
     cgen "bootstrap/$comp.oxl" "self_$comp"
 done
 out=$("$cgen_dir/self_lexer" examples/hello.oxl)
-grep -q "11 tokens" <<<"$out" || { echo "FAIL self lexer: $out"; exit 1; }
-"$cgen_dir/self_parser" examples/features.oxl | python3 -c 'import json,sys
+want=$("$OXL" run bootstrap/lexer.oxl -- examples/hello.oxl)
+[ "$out" = "$want" ] || { echo "FAIL self lexer: $out"; exit 1; }
+grep -q "11 tokens" <<<"$out" || { echo "FAIL self lexer tokens: $out"; exit 1; }
+out=$("$cgen_dir/self_parser" examples/features.oxl)
+want=$("$OXL" run bootstrap/parser.oxl -- examples/features.oxl)
+[ "$out" = "$want" ] || { echo "FAIL self parser"; exit 1; }
+printf '%s' "$out" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
-assert len(d["items"])==6 and not any("skip" in i for i in d["items"]), d' || { echo "FAIL self parser"; exit 1; }
+assert len(d["items"])==6 and not any("skip" in i for i in d["items"]), d' || { echo "FAIL self parser shape"; exit 1; }
 out=$("$cgen_dir/self_check" examples/features.oxl)
 [ "$out" = "ok" ] || { echo "FAIL self check: $out"; exit 1; }
 # deeper chain: the self-compiled checker's diagnostics must equal the

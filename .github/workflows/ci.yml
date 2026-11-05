@@ -75,4 +75,8 @@ jobs:
             echo "new branch push — no commit range to lint"
             exit 0
           fi
+          # a force-pushed before-SHA can be unreachable from every ref;
+          # fetch it best-effort — if it stays unresolvable the script
+          # fails the check rather than silently linting zero commits
+          git fetch --no-tags --depth 1 origin "$PUSH_BEFORE" 2>/dev/null || true
           scripts/commit-check.sh --range "$PUSH_BEFORE..$PUSH_AFTER"

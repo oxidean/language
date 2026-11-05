@@ -1,4 +1,4 @@
 fn main() {
-    c := mkchan(int)
+    c := mkchan(1)
     send(c, "s")
 }

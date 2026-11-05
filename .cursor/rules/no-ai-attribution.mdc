@@ -5,7 +5,7 @@ alwaysApply: true
 
 # No AI attribution (commits and PRs)
 
-Never add AI or tooling attribution to **commits, commit messages, PR titles, PR bodies, or PR descriptions** unless the user explicitly asks for it in the current turn.
+Never add AI or tooling attribution to **commits, commit messages, PR titles, PR bodies, or PR descriptions**. `scripts/commit-check.sh` enforces this unconditionally on every checked surface (hook, CI `commit-lint`); it has no user-request exception, so even an explicitly requested attribution cannot land through a commit or PR — decline such requests rather than bypassing the gate.
 
 ## Forbidden (case-insensitive)
 

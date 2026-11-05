@@ -39,7 +39,7 @@ check_attribution() {
     # AI co-author / bot trailers. A human Co-authored-by is fine; the
     # ban is on AI vendors, bots, and *-ai-* / [bot] addresses.
     if printf '%s\n' "$_msg" | grep -iE '^[[:space:]]*co-?authored-by:' \
-        | grep -qiE 'claude|cursor|copilot|chatgpt|codex|gemini|devin|openai|anthropic|codeium|windsurf|swe-|\[bot\]|[a-z0-9-]*bot@|ai-integration'; then
+        | grep -qiE 'claude|cursor|copilot|chatgpt|codex|gemini|devin-ai|openai|anthropic|codeium|windsurf|swe-|\[bot\]|[a-z0-9-]*bot@|ai-integration'; then
         err "AI Co-authored-by trailer"
     fi
     # generator footers: "Generated with <tool>", "Made with: X",
@@ -108,7 +108,11 @@ check_message() {
 case "${1:-}" in
     --file)
         [ -f "${2:-}" ] || { err "--file needs a readable message file"; exit 1; }
-        check_message "$(cat "$2")" "subject"
+        # COMMIT_EDITMSG carries `#`-comment lines, and `git commit -v`
+        # appends the staged diff below the scissors marker — both must
+        # be stripped before the grammar/attribution checks see it.
+        _cleaned=$(sed -e '/^# ------------------------ >8 ------------------------$/,$d' -e '/^#/d' "$2")
+        check_message "$_cleaned" "subject"
         ;;
     --message)
         check_message "${2:-}" "subject"
@@ -123,7 +127,12 @@ case "${1:-}" in
     --range)
         _range=${2:-}
         [ -n "$_range" ] || { err "--range needs A..B"; exit 1; }
-        for _sha in $(git rev-list "$_range"); do
+        # resolve first: `set -e` does not reach a command substitution
+        # in a `for` word list, so a bad range would silently lint zero
+        # commits (post-force-push before-SHAs go unreachable).
+        _shas=$(git rev-list "$_range") || { err "cannot resolve range $_range"; exit 1; }
+        [ -n "$_shas" ] || { err "empty range $_range"; exit 1; }
+        for _sha in $_shas; do
             _msg=$(git log -1 --format=%B "$_sha")
             _before=$fail
             check_message "$_msg" "commit ${_sha}"
