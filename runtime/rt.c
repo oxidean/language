@@ -1138,7 +1138,14 @@ static void sleep_us(int64_t us) {
     if (us <= 0)
         return;
 #ifdef _WIN32
-    Sleep((DWORD)((us + 999) / 1000));
+    /* Sleep's DWORD arg truncates a 64-bit delay (0xFFFFFFFF reads as
+     * INFINITE) — long sleeps go out in bounded chunks */
+    int64_t ms = (us + 999) / 1000;
+    while (ms > 0) {
+        DWORD chunk = ms > 0x7FFFFFFF ? 0x7FFFFFFF : (DWORD)ms;
+        Sleep(chunk);
+        ms -= chunk;
+    }
 #else
     struct timespec ts = {us / 1000000, (us % 1000000) * 1000};
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
@@ -2235,6 +2242,13 @@ void rt_init(void) {
     WSADATA wd;
     if (WSAStartup(MAKEWORD(2, 2), &wd) != 0)
         fprintf(stderr, "oxl: WSAStartup failed\n");
+    /* the CRT opens the standard streams in text mode: \n expands to
+     * \r\n on write, \r\n collapses on read and Ctrl-Z reads as EOF.
+     * POSIX fds carry bytes verbatim — binary mode keeps oxl stdio
+     * byte-identical across platforms and piped binary I/O intact */
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+    _setmode(_fileno(stdin), _O_BINARY);
 #endif
 }
 

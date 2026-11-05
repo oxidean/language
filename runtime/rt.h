@@ -22,6 +22,8 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <process.h>
+#include <io.h>
+#include <fcntl.h>
 
 typedef SRWLOCK oxl_mutex_t;
 typedef CONDITION_VARIABLE oxl_cond_t;
