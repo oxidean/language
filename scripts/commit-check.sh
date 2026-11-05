@@ -118,8 +118,9 @@ case "${1:-}" in
         # part of the message and is left alone.
         _cc=$(git config --get core.commentChar 2>/dev/null || :)
         case "$_cc" in ''|auto) _cc='#' ;; esac
-        _ccq=$(printf '%s' "$_cc" | sed 's/[^A-Za-z0-9]/\\&/g')
-        _precut=$(sed -e "/^${_ccq} ------------------------ >8 ------------------------\$/,\$d" "$2")
+        _cc=${_cc%"${_cc#?}"}    # one char — Git keeps the first byte
+        _precut=$(awk -v m="$_cc ------------------------ >8 ------------------------" \
+            'index($0, m) == 1 {exit} {print}' "$2")
         _cleaned=$(printf '%s\n' "$_precut" | git stripspace --strip-comments)
         check_subject "$(printf '%s\n' "$_cleaned" | head -1)" "subject"
         check_attribution "$_precut"
