@@ -364,13 +364,31 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
 /// listen+serve on port; dispatches `h.route` per request
 fn serve(port: int, h: Handler) {
     rt_sigpipe_ignore() // reset clients must not kill us on write
-    srv := rt_sock_open(2, 1, 0) // AF_INET, SOCK_STREAM
-    if rt_set_reuseaddr(srv) != 0 || rt_bind_any(srv, port) != 0 || rt_sock_listen(srv, 64) != 0 {
-        // a failed bind/listen makes every accept return -1 at once:
-        // the serve loop would spin at 100% CPU serving nothing
-        rt_sock_close(srv)
-        println("serve: bind/listen failed on :" + itoa(port))
-        exit(1)
+    // bounded backoff retry on bind: on Windows SO_EXCLUSIVEADDRUSE
+    // keeps the port unavailable while a just-dead process's accepted
+    // sockets finish kernel teardown — a restart during live traffic
+    // would otherwise die on EADDRINUSE though the port frees moments
+    // later. Each attempt recreates the socket (option + bind state
+    // doesn't carry) and the wait ramps to 2s; ~25s total, then give
+    // up — a failed bind/listen makes every accept return -1 at once
+    // and the serve loop would spin at 100% CPU serving nothing.
+    srv := -1
+    delay := 100
+    tries := 0
+    for srv < 0 {
+        cand := rt_sock_open(2, 1, 0) // AF_INET, SOCK_STREAM
+        if cand >= 0 && rt_set_reuseaddr(cand) == 0 && rt_bind_any(cand, port) == 0 && rt_sock_listen(cand, 64) == 0 {
+            srv = cand
+        } else {
+            if cand >= 0 { rt_sock_close(cand) }
+            tries = tries + 1
+            if tries > 15 {
+                println("serve: bind/listen failed on :" + itoa(port))
+                exit(1)
+            }
+            usleep(delay * 1000)
+            if delay < 2000 { delay = delay * 2 }
+        }
     }
     println("listening on :" + itoa(port))
 
