@@ -341,7 +341,7 @@ cgen() {  # cgen <src> <name> — emit C via codegen.oxl, compile it
     grep -q 'rt_sqlite_' "$cgen_dir/$2.c" && sq="-DOXL_SQLITE -lsqlite3"
     "${LANG_CC:-cc}" -O2 -pthread -Iruntime $sq "$cgen_dir/$2.c" runtime/rt.c -o "$cgen_dir/$2" || { echo "FAIL codegen cc $1"; exit 1; }
 }
-for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl; do
+for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl tests/methods.oxl; do
     n=$(basename "$f" .oxl)
     cgen "$f" "$n"
     got=$("$cgen_dir/$n")
@@ -358,12 +358,24 @@ want=$("$OXL" run examples/cli/main.oxl -- Jesse)
 "${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/t.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/t" || { echo "FAIL codegen cc --test"; exit 1; }
 out=$("$cgen_dir/t")
 grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL codegen --test: $out"; exit 1; }
-# http pilot is excluded from codegen coverage for now: interface-typed
-# values (the Handler param) need RtIface/vtab emission, which
-# codegen.oxl does not port yet — the emitted C mistypes iface slots.
-# tests/methods.oxl fails for the same reason. The Rust build below
-# still covers runtime behavior; restore this block when iface codegen
-# lands.
+# http pilot through the self-hosted codegen: the Handler param is an
+# iface value, exercising the RtIface/vtab emission end to end
+cgen examples/http-crud-sqlite/main.oxl httpsrv_cgen
+httpwork=$(mktemp -d "$scratch/httpcgen.XXXXXX")
+cp "$cgen_dir/httpsrv_cgen" "$httpwork/"
+curl -s -m 1 -o /dev/null localhost:8080/items && { echo "FAIL: :8080 already bound"; exit 1; } || true
+(cd "$httpwork"; ./httpsrv_cgen > srv.log 2>&1 & echo $! > srv.pid)
+srv_pid=$(cat "$httpwork/srv.pid")
+for _ in $(seq 1 50); do
+    grep -q "listening" "$httpwork/srv.log" && break
+    sleep 0.2
+done
+grep -q "listening" "$httpwork/srv.log" || { echo "FAIL: cgen server did not bind"; cat "$httpwork/srv.log"; kill $srv_pid 2>/dev/null; exit 1; }
+got=$(curl -s -d widget localhost:8080/items)
+[ "$got" = '{"created":"widget"}' ] || { echo "FAIL cgen post: $got"; kill $srv_pid 2>/dev/null; exit 1; }
+got=$(curl -s localhost:8080/items)
+grep -q '"name":"widget"' <<<"$got" || { echo "FAIL cgen get: $got"; kill $srv_pid 2>/dev/null; exit 1; }
+kill $srv_pid 2>/dev/null || true
 # gui pilot via codegen: emit + link against the shim whenever gtk4 dev
 # files exist (same gate as the gui section below — headless compiles,
 # DISPLAY additionally selftests)
