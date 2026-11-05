@@ -43,7 +43,7 @@ Verified in `tests/run.sh`'s `== bootstrap codegen ==` section:
   gtk4 dev files are present.
 - All four bootstrap components self-compile and behave identically
   (lexer and parser output compared in full against `oxl run`,
-  checker diagnostics against the corpus, codegen self-compile
+  checker diagnostics on one corpus file, codegen self-compile
   byte-identical).
 
 Remaining gap — interface values: `codegen.oxl` never ported the
