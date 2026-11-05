@@ -82,9 +82,24 @@ fn status_text(status: int) -> str {
     return "Status"
 }
 
+/// ctype is caller-controlled — a handler that derives it from request
+/// data could inject response headers with CR/LF, so it lands in the
+/// same text/plain fallback as an empty value
+fn has_crlf(s: str) -> bool {
+    i := 0
+    for i < len(s) {
+        b := byteat(s, i)
+        if b == 13 || b == 10 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn http_resp_ct(status: int, body: str, ctype: str) -> str {
     ct := ctype
-    if len(ct) == 0 {
+    if len(ct) == 0 || has_crlf(ct) {
         ct = "text/plain"
     }
     return "HTTP/1.1 " + itoa(status) + " " + status_text(status) + "\r\ncontent-type: " + ct + "\r\ncontent-length: " + itoa(len(body)) + "\r\nconnection: close\r\n\r\n" + body
