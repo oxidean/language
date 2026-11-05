@@ -303,7 +303,11 @@ echo "== differential diagnostics (c1) =="
 # Out of corpus scope by design: parse/lex failures (the [parse]/[lex]
 # kinds don't surface through check.oxl's diag list) and cases neither
 # checker diagnoses (cc or the runtime catches those downstream — that
-# silence is already parity).
+# silence is already parity). The self side runs a prebuilt binary:
+# `oxl run` would recompile check.oxl's C per fixture, and clang's
+# -Wparentheses-equality warnings on the generated code (macOS cc) land
+# in the captured output and break the diff.
+"$OXL" build bootstrap/check.oxl -o "$scratch/selfcheck"     || { echo "FAIL selfcheck build"; exit 1; }
 for f in tests/diag/*.oxl; do
     # both checkers must reject every fixture (pipefail carries the
     # build's nonzero status through the sed) — and their diagnostics
@@ -311,7 +315,7 @@ for f in tests/diag/*.oxl; do
     if rust=$("$OXL" build "$f" -o "$scratch/diagbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //'); then
         echo "FAIL diag parity $f: rust checker accepted"; exit 1
     fi
-    if self=$("$OXL" run bootstrap/check.oxl -- "$f" 2>&1); then
+    if self=$("$scratch/selfcheck" "$f" 2>&1); then
         echo "FAIL diag parity $f: self checker accepted"; exit 1
     fi
     if [ "$rust" != "$self" ]; then
