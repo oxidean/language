@@ -1071,10 +1071,11 @@ fn cmd_lsp() {
             return;
         }
         let body = String::from_utf8_lossy(&body);
-        if body.contains("\"exit\"") {
+        let method = json_str(&body, "method").unwrap_or_default();
+        if method == "exit" {
             return;
         }
-        if body.contains("didOpen") || body.contains("didChange") {
+        if method == "textDocument/didOpen" || method == "textDocument/didChange" {
             if let (Some(uri), Some(text)) = (json_str(&body, "uri"), json_str(&body, "text")) {
                 let p = uri_to_path(&uri);
                 let a = analyze(Path::new(&p), &text);
@@ -1083,26 +1084,26 @@ fn cmd_lsp() {
             }
             continue;
         }
-        if body.contains("didClose") {
+        if method == "textDocument/didClose" {
             if let Some(uri) = json_str(&body, "uri") {
                 docs.remove(&uri);
             }
             continue;
         }
-        let resp = if body.contains("\"initialize\"") {
+        let resp = if method == "initialize" {
             let id = extract_id(&body);
             format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"capabilities\":{{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true}}}}}}")
-        } else if body.contains("\"shutdown\"") {
+        } else if method == "shutdown" {
             let id = extract_id(&body);
             format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":null}}")
-        } else if body.contains("textDocument/hover") || body.contains("textDocument/definition") {
+        } else if method == "textDocument/hover" || method == "textDocument/definition" {
             let id = extract_id(&body);
             let uri = json_str(&body, "uri").unwrap_or_default();
             let (line, col) = (
                 json_num(&body, "line").unwrap_or(0),
                 json_num(&body, "character").unwrap_or(0),
             );
-            let def = body.contains("textDocument/definition");
+            let def = method == "textDocument/definition";
             let file = uri_to_path(&uri);
             let hit = docs.get(&uri).and_then(|(src, a)| {
                 index_at(a, &file, lsp_offset(src, line, col))

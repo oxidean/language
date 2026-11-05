@@ -20,8 +20,8 @@ The parser and LSP checks also invoke `python3`, so have Python 3 on
 - `oxl/` — the compiler: `lexer → parser → check → codegen(C) → cc`
 - `runtime/` — rt.h/rt.c: arenas, ownership checks, scopes, pool executor
 - `stdlib/` — standard library, written in the language itself
-- `bootstrap/` — self-host components (lexer done; parser next)
-- `examples/` — pilot apps (cli, http-crud-sqlite)
+- `bootstrap/` — self-host components (lexer, parser, checker, codegen — see `docs/self-hosting.md`)
+- `examples/` — pilot apps (cli, http-crud-sqlite, gui-todo)
 - `docs/semantics/` — the contracts everything is built against
 - `agent-os/` — product + spec docs (Agent OS planning artifacts)
 
