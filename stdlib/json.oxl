@@ -10,7 +10,7 @@
 // the pilot and config-file cases; floats/unicode escapes are v1 work.
 // explicit release for `own ?` buffers (mkbuf) — scope arenas don't
 // reclaim them, so a temporary scratch must be freed by hand
-extern fn rt_free(p: mut void)
+extern fn rt_free(p: own void)
 
 struct Json {
     kind: int,

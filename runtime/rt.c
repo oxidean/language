@@ -988,8 +988,10 @@ int64_t rt_sget(RtShared *s) {
 }
 
 void rt_sset(RtShared *s, int64_t v) {
-    __sync_lock_test_and_set(&s->val, v);
-    __sync_synchronize();
+    /* seq-cst store: munlock must publish the critical section's writes —
+       lock_test_and_set is acquire-only, so on weak targets a trailing
+       fence can't stop earlier stores sinking past the unlock */
+    __atomic_store_n(&s->val, v, __ATOMIC_SEQ_CST);
 }
 
 /* CAS — returns the value the cell held before */

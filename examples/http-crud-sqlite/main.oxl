@@ -9,8 +9,6 @@ import "std/http"
 
 import "std/json"
 
-import "std/strings"
-
 // one shared connection for the whole process — sqlite's serialized
 // mode (THREADSAFE=1) provides the write lock; no per-request open/close
 let db = sqlite_open(cstr("pilot.db"))
@@ -100,25 +98,33 @@ fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
                 body = "{\"error\":\"query failed\"}\n"
             } else {
                 status = 200
-                // rows arrive as "id|name" lines — reshape into real JSON
+                // rows arrive as "id|name" lines — reshape into real
+                // JSON. Walk the buffer in place: strings.split copies
+                // the remaining suffix at each delimiter — O(n²) on a
+                // large table.
+                qrows := sqlite_query(db, cstr("SELECT rowid, name FROM items"))
                 items := json.jarr()
-                rows := strings.split(sqlite_query(db, cstr("SELECT rowid, name FROM items")), "\n")
-                r := rows
-                for r != nil {
-                    if len(r.v) > 0 {
+                pos := 0
+                for pos < len(qrows) {
+                    e := pos
+                    for e < len(qrows) && byteat(qrows, e) != 10 {
+                        e = e + 1
+                    }
+                    row := substr(qrows, pos, e)
+                    pos = e + 1
+                    if len(row) > 0 {
                         item := json.jobj()
+                        sep := find(row, "|")
                         idstr := ""
-                        nm := r.v
-                        sep := find(r.v, "|")
+                        nm := row
                         if sep >= 0 {
-                            idstr = substr(r.v, 0, sep)
-                            nm = substr(r.v, sep + 1, len(r.v))
+                            idstr = substr(row, 0, sep)
+                            nm = substr(row, sep + 1, len(row))
                         }
                         json.jadd(item, "id", json.jint(atoi(idstr)))
                         json.jadd(item, "name", json.jstr(nm))
                         json.jadd(items, "", item)
                     }
-                    r = r.next
                 }
                 res := json.jobj()
                 json.jadd(res, "items", items)

@@ -42,7 +42,12 @@ Interface | Import | Global`. Expressions/statements per
 `oxl/src/ast.rs` — the AST is deliberately syntactic (no desugaring in
 parser; `x := e` parses to `Stmt::Let { ty: None, .. }`).
 
-## TAST (typechecker output)
+## TAST (typechecker output — target contract)
+
+`check::Checked` today carries only `suspend: Set<FnId>` and the LSP
+`index`; codegen consumes the original `Crate` plus `checked.suspend`.
+The rest of this section is the boundary the backend design expects —
+not yet emitted by the checker:
 
 - Every `Expr` node annotated with `Ty`.
 - `Ty = Int | Bool | Str | CStr | Void | Err | Struct(Id) | Own(Box<Ty>) |
@@ -73,13 +78,15 @@ pool, channels, and the `extern` FFI shim table.
 | `rt_scope_enter/leave(s)` / `rt_scope_join_poll` / `rt_scope_finish` | scope lifecycle; join frees the arena; trapped codes propagate to the joiner |
 | `rt_alloc(size)` / `rt_alloc_own(size)` → `void*` | scope arena (heap fallback, scope-tracked) / always-heap for escaping data |
 | `rt_borrow_read/mut(obj)` / `rt_unborrow(obj)` / `rt_free(obj)` | aliasing checks + explicit release of own blocks |
-| `rt_spawn(fn, arg)` / `rt_spawnb(fn, arg)` / `rt_spawn_task(frame)` | thread tasks (non-susp fns) / blocking pool / frame tasks |
+| `rt_spawn(fn, arg)` / `rt_spawnb(fn, arg)` | thread tasks (non-susp fns) / blocking pool |
+| `rt_spawn_task(fr)` / `rt_spawnb_task(fr)` / `rt_run_root(fr)` | frame tasks: work pool / blocking pool / drive the root frame to completion |
 | `rt_send/recv/close(ch, v)` + `rt_send/recv_poll` | channels: blocking surface for thread tasks, poll surface for frames |
+| `rt_select_poll(chs, n, tmo_ms, has_else, task)` / `rt_select_arm(task)` | select: poll all arms for readiness; clean up a parked wait, returning the winning arm |
 | `rt_trap(code)` | raise trap; the chain up to the task's spawn scope cancels siblings and propagates `err` to the joiner |
 | `oxl_main()` | emitted entry; `main()` lives in rt.c |
 
 ## Error semantics
 
-`[v, err] = f()` lowers to `Ret2{ptr, errno}` — `err` is a small integer
-(0 = nil). `rt_trap` raises a scope-contained trap (unwind to scope
-boundary), NOT an errno.
+`[v, err] = f()` lowers to a per-function `struct o_ret_<fn> { <T>
+val; int64_t err }` — `err` is a small integer (0 = nil). `rt_trap`
+raises a scope-contained trap (unwind to scope boundary), NOT an errno.

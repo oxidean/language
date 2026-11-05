@@ -69,9 +69,11 @@ typedef struct ObjHdr {
 } ObjHdr;                    // 24 bytes on x86_64
 ```
 
-Checks are emitted at every borrow activation and every dereference
-through a handle, and are elided where the typechecker proves safety
-(future optimization pass — v0 emits all checks).
+Checks are emitted at borrow activation and on `ref`/`mut` call
+arguments (`rt_borrow_read`/`rt_borrow_mut`). Ordinary `own`-handle
+dereferences compile to raw C access today — per-dereference dangling
+checks are the target contract, not yet emitted (and elidable wherever
+the typechecker proves safety).
 
 ## Trap behavior
 
