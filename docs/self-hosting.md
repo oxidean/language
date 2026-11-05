@@ -100,8 +100,11 @@ bootstrap/codegen.oxl  (done — emits C, self-compiles byte-identical)
 `oxl` (Rust) is needed to *first-compile* the self-hosted compiler —
 the classic bootstrap chain is closed for the bootstrap subset.
 Programs using generics, interfaces, or methods still emit through
-the Rust pipeline (`codegen.oxl` does not lower them yet); the
-interim C backend stays the codegen target.
+the Rust pipeline (`codegen.oxl` does not lower them yet — no
+`RtIface`/vtable or instantiation machinery is ported), so
+`examples/http-crud-sqlite` (`Handler` iface param) and
+`tests/methods.oxl` stay on the Rust backend; the interim C backend
+stays the codegen target.
 
 ## Keeping the claim honest
 
@@ -111,5 +114,18 @@ interim C backend stays the codegen target.
 and representative sources (asserting `ok`), and the codegen by
 compiling emitted C and diffing program output against `oxl run` —
 plus the chain check: `codegen.oxl` compiled by itself must emit
-byte-identical C for `hello.oxl`. "The language can parse, typecheck,
-and compile itself" is tested on every push.
+byte-identical C for `hello.oxl`.
+
+Two more gates keep the claim honest:
+
+- **Differential diagnostics** — the `tests/diag/` corpus (39 programs
+  that parse in both pipelines but fail checking) asserts the Rust
+  checker's diagnostics equal `check.oxl`'s line-for-line and in
+  order, after stripping the Rust `file:line:col:` prefix.
+- **All-four self-compile** — each bootstrap component compiled by
+  `codegen.oxl` must produce identical output to `oxl run` (lexer and
+  parser output compared in full, checker diagnostics on a corpus
+  file); codegen's own self-compile is byte-identical.
+
+"The language can parse, typecheck, and compile itself" is tested on
+every push.

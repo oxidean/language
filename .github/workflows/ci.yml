@@ -34,3 +34,84 @@ jobs:
 
       - name: run test suite
         run: bash tests/run.sh "$PWD/oxl/target/release/oxl"
+
+  # Commit-message gate (see scripts/commit-check.sh): SemVer-prefix
+  # grammar on subjects + no-AI-attribution scan, on the PR's commit
+  # range and title. Push events lint the pushed range except branch
+  # creation (before = zeros).
+  commit-lint:
+    name: commit-lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: lint commit range (PR)
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: scripts/commit-check.sh --range "$PR_BASE..$PR_HEAD"
+      - name: lint PR title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: scripts/commit-check.sh --pr-title "$PR_TITLE"
+      - name: scan PR body for attribution markers
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n' "$PR_BODY" > pr-body.txt
+          # CodeRabbit owns the release-notes block it injects into the
+          # description — exempt that managed section, scan the rest.
+          # Count only the full HTML markers: a plain-text mention of
+          # the phrase is not a block. Unbalanced pairs still fail —
+          # a stray start marker could hide attribution after it.
+          open_m='<!-- This is an auto-generated comment: release notes by coderabbit.ai -->'
+          close_m='<!-- end of auto-generated comment: release notes by coderabbit.ai -->'
+          opens=$(grep -cF "$open_m" pr-body.txt || :)
+          closes=$(grep -cF "$close_m" pr-body.txt || :)
+          if [ "$opens" != "$closes" ]; then
+            echo "commit-check: unbalanced CodeRabbit release-notes markers in PR body" >&2
+            exit 1
+          fi
+          # ordered, non-nesting extraction: drop each start→end pair
+          # (markers included), keep every other byte — same-line text
+          # around markers and unmatched/out-of-order markers verbatim.
+          awk -v S="$open_m" -v E="$close_m" '
+            { buf = buf $0 "\n" }
+            END {
+              out = ""; rest = buf
+              while ((i = index(rest, S)) > 0) {
+                tail = substr(rest, i + length(S))
+                j = index(tail, E)
+                if (j == 0) break
+                out = out substr(rest, 1, i - 1)
+                rest = substr(tail, j + length(E))
+              }
+              printf "%s", out rest
+            }' pr-body.txt > pr-body-clean.txt
+          scripts/commit-check.sh --scan-file pr-body-clean.txt
+      - name: lint push range
+        if: github.event_name == 'push'
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          if [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "new branch push — no commit range to lint"
+            exit 0
+          fi
+          # a force-pushed before-SHA can be unreachable from every ref;
+          # fetch it best-effort — if it stays unresolvable the script
+          # fails the check rather than silently linting zero commits.
+          # Never --depth: a shallow boundary hides PUSH_BEFORE's
+          # ancestry, and rev-list would then lint all of history. The
+          # fetch-depth:0 checkout already has it for normal pushes —
+          # fetch only when absent, without a depth limit.
+          git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null             || git fetch --no-tags origin "$PUSH_BEFORE" 2>/dev/null             || true
+          scripts/commit-check.sh --range "$PUSH_BEFORE..$PUSH_AFTER"

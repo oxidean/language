@@ -1,0 +1,5 @@
+struct S { v: int }
+
+fn main() {
+    s := S{v: 1, nope: 2}
+}

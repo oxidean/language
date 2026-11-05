@@ -409,7 +409,8 @@ fn load_mod(
                     }
                 }
                 None if loud => {
-                    eprintln!("{}: cannot resolve import `{}`", path.display(), imp.path)
+                    eprintln!("error [check] cannot resolve import `{}` (from `{}`)", imp.path, path.display());
+                    return None;
                 }
                 None => {}
             }

@@ -1,0 +1,7 @@
+fn f() -> [int, err] {
+    return 1, nil
+}
+
+fn main() {
+    f()
+}

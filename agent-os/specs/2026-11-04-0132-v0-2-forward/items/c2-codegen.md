@@ -33,6 +33,27 @@ byte-for-byte-compatible at the ABI level (same struct layouts, same
   bootstrap .oxl files) — bit-identical output not required,
   behavior-identical is
 
+## Status (2026-11-05): partial
+
+Verified in `tests/run.sh`'s `== bootstrap codegen ==` section:
+
+- hello / features / cli / smoke-test plus `tests/match.oxl` and
+  `tests/chanbuf.oxl` emit through `codegen.oxl`, compile with `cc`,
+  and run identically to `oxl run`. The gui pilot emits and links when
+  gtk4 dev files are present.
+- All four bootstrap components self-compile and behave identically
+  (lexer and parser output compared in full against `oxl run`,
+  checker diagnostics on one corpus file, codegen self-compile
+  byte-identical).
+
+Remaining gap — interface values: `codegen.oxl` never ported the
+`RtIface`/vtable machinery from `oxl/src/codegen.rs` (type mapping,
+concrete→iface boxing, per-impl vtables, `x.m()` dispatch, receiver
+adaptation, pair-return iface methods, generic-method vtab entries).
+Interface-typed params/locals emit with the wrong C type, so
+`examples/http-crud-sqlite` (`Handler`) and `tests/methods.oxl` stay
+excluded from codegen coverage until it lands.
+
 ## Depends on
 
 - C1 (checker port — codegen consumes its typed AST + suspend set)

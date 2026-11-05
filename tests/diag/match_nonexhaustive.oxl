@@ -1,0 +1,9 @@
+enum E { A(int), B, }
+
+fn f(e: E) -> int {
+    return match e {
+        E.A(v) => v
+    }
+}
+
+fn main() {}

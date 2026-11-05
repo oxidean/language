@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # tests/run.sh <path-to-oxl-binary> — end-to-end suite run by CI.
 set -euo pipefail
+# trap-path tests abort on purpose; without this each run litters the
+# repo root with core.* dumps (they're gitignored but still junk)
+ulimit -c 0 2>/dev/null || true
 OXL="${1:-oxl}"
 cd "$(dirname "$0")/.."
 # absolutize — subshell gates (gui pilot) invoke $OXL from other dirs
@@ -292,28 +295,111 @@ for f in bootstrap/check.oxl examples/features.oxl tests/match.oxl stdlib/collec
     [ "$out" = "ok" ] || { echo "FAIL checker $f: $out"; exit 1; }
 done
 
+echo "== differential diagnostics (c1) =="
+# tests/diag/ holds files that parse cleanly in both pipelines but fail
+# checking — the Rust checker's diagnostics must equal the self-hosted
+# one's, line for line and in order. The Rust driver prefixes each diag
+# `file:line:col:` (stripped here); check.oxl reports {kind,msg} only.
+# Out of corpus scope by design: parse/lex failures (the [parse]/[lex]
+# kinds don't surface through check.oxl's diag list) and cases neither
+# checker diagnoses (cc or the runtime catches those downstream — that
+# silence is already parity). The self side runs a prebuilt binary:
+# `oxl run` would recompile check.oxl's C per fixture, and clang's
+# -Wparentheses-equality warnings on the generated code (macOS cc) land
+# in the captured output and break the diff.
+"$OXL" build bootstrap/check.oxl -o "$scratch/selfcheck"     || { echo "FAIL selfcheck build"; exit 1; }
+for f in tests/diag/*.oxl; do
+    # both checkers must reject every fixture (pipefail carries the
+    # build's nonzero status through the sed) — and their diagnostics
+    # must be identical. A fixture either side accepts is a test bug.
+    if rust=$("$OXL" build "$f" -o "$scratch/diagbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //'); then
+        echo "FAIL diag parity $f: rust checker accepted"; exit 1
+    fi
+    if self=$("$scratch/selfcheck" "$f" 2>&1); then
+        echo "FAIL diag parity $f: self checker accepted"; exit 1
+    fi
+    if [ "$rust" != "$self" ]; then
+        echo "FAIL diag parity $f"
+        echo "-- rust --"; printf '%s\n' "$rust"
+        echo "-- self --"; printf '%s\n' "$self"
+        exit 1
+    fi
+    # a corpus file neither side diagnoses is a test bug, not parity
+    if [ -z "$rust" ] || [ "$self" = "ok" ]; then
+        echo "FAIL diag corpus $f: no diagnostics from either checker"; exit 1
+    fi
+done
+
 echo "== bootstrap codegen =="
-# the self-hosted C emitter must produce working binaries
+# the self-hosted C emitter must produce working binaries — every
+# example plus representative tests, run-and-compared end to end
 cgen_dir=$(mktemp -d "$scratch/cgen.XXXXXX")
-for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl; do
-    "$OXL" run bootstrap/codegen.oxl -- "$f" > "$cgen_dir/out.c"
+cgen() {  # cgen <src> <name> — emit C via codegen.oxl, compile it
+    "$OXL" run bootstrap/codegen.oxl -- "$1" > "$cgen_dir/$2.c"
     # sqlite only when the emitted C calls it — mirrors emit_and_cc
     sq=""
-    grep -q 'rt_sqlite_' "$cgen_dir/out.c" && sq="-DOXL_SQLITE -lsqlite3"
-    "${LANG_CC:-cc}" -O2 -pthread -Iruntime $sq "$cgen_dir/out.c" runtime/rt.c -o "$cgen_dir/out" || { echo "FAIL codegen cc $f"; exit 1; }
-    got=$("$cgen_dir/out")
+    grep -q 'rt_sqlite_' "$cgen_dir/$2.c" && sq="-DOXL_SQLITE -lsqlite3"
+    "${LANG_CC:-cc}" -O2 -pthread -Iruntime $sq "$cgen_dir/$2.c" runtime/rt.c -o "$cgen_dir/$2" || { echo "FAIL codegen cc $1"; exit 1; }
+}
+for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl; do
+    n=$(basename "$f" .oxl)
+    cgen "$f" "$n"
+    got=$("$cgen_dir/$n")
     want=$("$OXL" run "$f")
     [ "$got" = "$want" ] || { echo "FAIL codegen $f"; exit 1; }
 done
+# cli takes argv — the emitted binary gets them directly (no `--`)
+cgen examples/cli/main.oxl cli
+got=$("$cgen_dir/cli" Jesse)
+want=$("$OXL" run examples/cli/main.oxl -- Jesse)
+[ "$got" = "$want" ] || { echo "FAIL codegen cli: $got"; exit 1; }
 # --test mode: scope-wrapped runner like `oxl test`
 "$OXL" run bootstrap/codegen.oxl -- --test examples/smoke_test.oxl > "$cgen_dir/t.c"
 "${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/t.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/t" || { echo "FAIL codegen cc --test"; exit 1; }
 out=$("$cgen_dir/t")
 grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL codegen --test: $out"; exit 1; }
-# bootstrap chain: codegen compiled by itself emits identical C
-"$OXL" run bootstrap/codegen.oxl -- bootstrap/codegen.oxl > "$cgen_dir/self.c"
-"${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/self.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/self" || { echo "FAIL codegen self-cc"; exit 1; }
-"$cgen_dir/self" examples/hello.oxl > "$cgen_dir/chain.c"
+# http pilot is excluded from codegen coverage for now: interface-typed
+# values (the Handler param) need RtIface/vtab emission, which
+# codegen.oxl does not port yet — the emitted C mistypes iface slots.
+# tests/methods.oxl fails for the same reason. The Rust build below
+# still covers runtime behavior; restore this block when iface codegen
+# lands.
+# gui pilot via codegen: emit + link against the shim whenever gtk4 dev
+# files exist (same gate as the gui section below — headless compiles,
+# DISPLAY additionally selftests)
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists gtk4 2>/dev/null; then
+    "${LANG_CC:-cc}" -O2 $(pkg-config --cflags gtk4) -c examples/gui-todo/gui_shim.c -o "$cgen_dir/gui_shim.o"
+    "$OXL" run bootstrap/codegen.oxl -- examples/gui-todo/todo.oxl > "$cgen_dir/todo.c"
+    "${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/todo.c" runtime/rt.c "$cgen_dir/gui_shim.o" $(pkg-config --libs gtk4) -o "$cgen_dir/todo" || { echo "FAIL codegen cc gui"; exit 1; }
+    if [ -n "${DISPLAY:-}" ]; then
+        out=$(with_timeout 30 "$cgen_dir/todo" --selftest 2>/dev/null)
+        grep -q "selftest rows=2" <<<"$out" || { echo "FAIL codegen gui selftest: $out"; exit 1; }
+    fi
+fi
+# bootstrap chain: all four self-host components compiled by the
+# self-hosted codegen must behave identically to `oxl run`
+for comp in lexer parser check codegen; do
+    cgen "bootstrap/$comp.oxl" "self_$comp"
+done
+out=$("$cgen_dir/self_lexer" examples/hello.oxl)
+want=$("$OXL" run bootstrap/lexer.oxl -- examples/hello.oxl)
+[ "$out" = "$want" ] || { echo "FAIL self lexer: $out"; exit 1; }
+grep -q "11 tokens" <<<"$out" || { echo "FAIL self lexer tokens: $out"; exit 1; }
+out=$("$cgen_dir/self_parser" examples/features.oxl)
+want=$("$OXL" run bootstrap/parser.oxl -- examples/features.oxl)
+[ "$out" = "$want" ] || { echo "FAIL self parser"; exit 1; }
+printf '%s' "$out" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert len(d["items"])==6 and not any("skip" in i for i in d["items"]), d' || { echo "FAIL self parser shape"; exit 1; }
+out=$("$cgen_dir/self_check" examples/features.oxl)
+[ "$out" = "ok" ] || { echo "FAIL self check: $out"; exit 1; }
+# deeper chain: the self-compiled checker's diagnostics must equal the
+# `oxl run` interpretation's on a corpus file — transitively Rust's
+out=$("$cgen_dir/self_check" tests/diag/own_use_moved.oxl || true)
+want=$("$OXL" run bootstrap/check.oxl -- tests/diag/own_use_moved.oxl || true)
+[ "$out" = "$want" ] || { echo "FAIL self check diag: $out vs $want"; exit 1; }
+# codegen self-compile emits byte-identical C to the direct emission
+"$cgen_dir/self_codegen" examples/hello.oxl > "$cgen_dir/chain.c"
 "$OXL" run bootstrap/codegen.oxl -- examples/hello.oxl > "$cgen_dir/direct.c"
 cmp "$cgen_dir/chain.c" "$cgen_dir/direct.c" || { echo "FAIL bootstrap chain"; exit 1; }
 

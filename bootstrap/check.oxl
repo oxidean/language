@@ -3276,7 +3276,7 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             for al != nil {
                 t := expr(ck, al.v, env)
                 tk2 := ck.tyv[t].k
-                if tk2 != k_int() && tk2 != k_bool() && tk2 != k_cstr() && tk2 != k_str() && tk2 != k_own() && tk2 != k_chan() && tk2 != k_unk() {
+                if tk2 != k_int() && tk2 != k_bool() && tk2 != k_cstr() && tk2 != k_str() && tk2 != k_own() && tk2 != k_ref() && tk2 != k_mut() && tk2 != k_chan() && tk2 != k_shared() && tk2 != k_fn() && tk2 != k_unk() {
                     diag(ck, "ffi", "`" + ty_name(ck, t) + "` cannot cross the FFI boundary")
                 }
                 al = al.next
@@ -3569,11 +3569,17 @@ fn stmt(ck: mut Ck, s: ref parser.Node, env: mut Env) {
             }
         }
         parser.Node.For{cond, body} => {
+            // a move inside the body is read moved by the next iteration
+            // unless re-assigned there — flag newly-moved bindings, then
+            // restore the pre-loop state (check.rs: Stmt::For)
+            pre := moved_save(env)
             t := expr(ck, cond, env)
             assignable(ck, t_bool(ck), t)
             ck.loop_depth = ck.loop_depth + 1
             block_node(ck, body, env)
             ck.loop_depth = ck.loop_depth - 1
+            for_moved_check(ck, env, pre)
+            moved_restore(env, pre)
         }
         parser.Node.Break => {
             if ck.loop_depth == 0 {
@@ -4841,7 +4847,7 @@ fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
                     parser.Node.Import{path, alias, names} => {
                         p := resolve_imp(file, path)
                         if len(p) == 0 {
-                            diag(ck, "check", "cannot resolve import `" + path + "`")
+                            diag(ck, "check", "cannot resolve import `" + path + "` (from `" + file + "`)")
                         } else {
                             stem := file_stem(p)
                             if len(alias) > 0 {

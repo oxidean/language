@@ -1,0 +1,10 @@
+interface W { write(s: str) -> int }
+
+struct S { v: int }
+
+fn use(w: W) {}
+
+fn main() {
+    s := S{v: 1}
+    use(s)
+}

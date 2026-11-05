@@ -129,7 +129,8 @@ docs/          design doc, semantics annex, prototype report
 stdlib/        the standard library, written in the language (strings, testing, http, json, sync, time, os)
 bootstrap/     self-host components — lexer, parser, checker, codegen (docs/self-hosting.md)
 examples/      pilot programs (see above)
-tests/         tests/run.sh end-to-end suite (runs in CI)
+tests/         tests/run.sh end-to-end suite + tests/diag/ checker-diagnostic corpus (runs in CI)
+scripts/       commit-check.sh — commit grammar + no-AI-attribution gate
 prototype/     de-risking benchmarks
 agent-os/      product docs, standards, and the milestone plan
 .agents/skills project skills (agentcanon layout — see AGENTS.md)

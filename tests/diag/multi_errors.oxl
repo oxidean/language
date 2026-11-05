@@ -1,0 +1,11 @@
+struct P { v: int }
+
+fn take(p: own P) {}
+
+fn main() {
+    p := new(P)
+    take(p)
+    take(p)
+    x := 1 + 2.5
+    y := undefined_name
+}

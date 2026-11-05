@@ -18,3 +18,9 @@ This file is the single source of truth for agent instructions in this repo.
 - Always commit with the repo's configured git identity (the local
   user's). Never use `-c user.name`/`-c user.email` overrides or an
   agent identity.
+- No AI attribution on commits or PRs: no `Co-authored-by` /
+  `Generated with` / `Made-with` trailers or bot signatures for any AI
+  or tool, and no invisible markers — `.cursor/rules/no-ai-attribution.mdc`.
+- Commit subjects are SemVer-prefixed `type(scope): subject` and PR
+  titles the same — enforced by `scripts/commit-check.sh`
+  (`.githooks/commit-msg` locally, CI `commit-lint` on every PR).

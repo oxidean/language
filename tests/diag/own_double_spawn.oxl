@@ -1,0 +1,9 @@
+struct P { v: int }
+
+fn w(p: own P) {}
+
+fn main() {
+    p := new(P)
+    spawn w(p)
+    spawn w(p)
+}
