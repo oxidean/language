@@ -586,9 +586,12 @@ fn p_arm_body(c: mut PCur) -> own Node {
 // `{ |a: int, b: int| stmts }` — closure (B4); ret inferred from `return`s
 fn p_closure(c: mut PCur) -> own Node {
     next(c) // {
-    eat(c, "|")
+    empty := eat(c, "||")
+    if !empty {
+        eat(c, "|")
+    }
     let ps: own NList = nil
-    for !at(c, "|") && !eof(c) {
+    for !empty && !at(c, "|") && !eof(c) {
         nm := peek(c)
         next(c)
         eat(c, ":")
@@ -597,7 +600,9 @@ fn p_closure(c: mut PCur) -> own Node {
             break
         }
     }
-    eat(c, "|")
+    if !empty {
+        eat(c, "|")
+    }
     let items: own NList = nil
     for !at(c, "}") && !eof(c) {
         items = ncons(p_stmt(c), items)

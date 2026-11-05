@@ -342,8 +342,10 @@ while kill -0 $scale_pid 2>/dev/null; do
 done
 kill "$scale_dog" 2>/dev/null || true
 wait "$scale_dog" 2>/dev/null || true
-wait $scale_pid
-[ "$(tail -1 "$scratch/scale.out")" = "done" ] || { echo "FAIL scale: $(cat "$scratch/scale.out")"; exit 1; }
+scale_rc=0
+wait $scale_pid || scale_rc=$?
+[ "$scale_rc" -eq 0 ] && [ "$(tail -1 "$scratch/scale.out")" = "done" ] || {
+    echo "FAIL scale: rc=$scale_rc: $(cat "$scratch/scale.out")"; exit 1; }
 [ -n "$rss" ] && [ "$rss" -gt 0 ] || { echo "FAIL scale: no RSS sample"; exit 1; }
 [ "$rss" -lt 5120 ] || { echo "FAIL scale: ${rss}kB RSS at 10k parked (spec < 5120kB)"; exit 1; }
 echo "  10k parked tasks RSS: ${rss}kB"

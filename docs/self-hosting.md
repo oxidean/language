@@ -97,10 +97,11 @@ bootstrap/check.oxl    (done — typechecks .oxl, self-checks clean)
 bootstrap/codegen.oxl  (done — emits C, self-compiles byte-identical)
 ```
 
-`oxl` (Rust) is now only needed to *first-compile* the self-hosted
-compiler — the classic bootstrap chain is closed. The interim C
-backend stays the codegen target; the state-machine transform lands
-independently of self-hosting.
+`oxl` (Rust) is needed to *first-compile* the self-hosted compiler —
+the classic bootstrap chain is closed for the bootstrap subset.
+Programs using generics, interfaces, or methods still emit through
+the Rust pipeline (`codegen.oxl` does not lower them yet); the
+interim C backend stays the codegen target.
 
 ## Keeping the claim honest
 

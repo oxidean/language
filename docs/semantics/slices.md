@@ -68,8 +68,8 @@ Bounds may be omitted: `s[:b]`, `s[a:]`, `s[:]`. The invariant
 - Ordinary (non-`own`) slices keep arena backing: escaping one past its
   scope is unsafe for the same reason escaping any arena allocation is.
   The checker rejects `[]T` at the `return` and `spawn` boundaries
-  (pass `own []T` instead); a general intra-scope escape check still
-  lands with the `own`-move tracking work (D2).
+  (pass `own []T` instead); a general intra-scope escape check
+  remains open work beyond the D2 `own`-move tracking.
 - `nil` assigns to `[]T` and produces the empty header
   `{ nil, 0, 0, 0 }`.
 
