@@ -111,16 +111,25 @@ case "${1:-}" in
         # COMMIT_EDITMSG carries comment lines, and `git commit -v`
         # appends the staged diff below the scissors marker. Grammar
         # sees the cleaned message (comments + scissors cut, honoring
-        # core.commentChar). Attribution scans everything BEFORE the
+        # core.commentString/commentChar). Attribution scans everything BEFORE the
         # scissors line including `#`-lines: `git commit -m` keeps them
         # in history, so a marker hidden in one must fail here exactly
         # as it would in CI — while diff content past the marker is not
         # part of the message and is left alone.
-        _cc=$(git config --get core.commentChar 2>/dev/null || :)
-        case "$_cc" in ''|auto) _cc='#' ;; esac
-        _cc=${_cc%"${_cc#?}"}    # one char — Git keeps the first byte
-        _precut=$(awk -v m="$_cc ------------------------ >8 ------------------------" \
-            'index($0, m) == 1 {exit} {print}' "$2")
+        # commentString (Git >= 2.45) wins over commentChar and may be
+        # multi-char; commentChar itself keeps only its first byte,
+        # empty|auto means '#'.
+        _cc=$(git config --get core.commentString 2>/dev/null || :)
+        if [ -z "$_cc" ]; then
+            _cc=$(git config --get core.commentChar 2>/dev/null || :)
+            case "$_cc" in ''|auto) _cc='#' ;; *) _cc=${_cc%"${_cc#?}"} ;; esac
+        fi
+        # the scissors line is the whole line "<cs> ---- >8 ----": a line
+        # merely starting with it is message text, not a cut. The marker
+        # goes via ENVIRON — `awk -v` would mangle a backslash comment
+        # string through its escape processing.
+        _precut=$(MARKER="$_cc ------------------------ >8 ------------------------" \
+            awk 'BEGIN{m=ENVIRON["MARKER"]} $0 == m {exit} {print}' "$2")
         _cleaned=$(printf '%s\n' "$_precut" | git stripspace --strip-comments)
         check_subject "$(printf '%s\n' "$_cleaned" | head -1)" "subject"
         check_attribution "$_precut"
