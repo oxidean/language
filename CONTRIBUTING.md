@@ -36,7 +36,7 @@ The parser and LSP checks also invoke `python3`, so have Python 3 on
   invisible markers. Human co-authors and `Signed-off-by` are fine.
   Policy: `.cursor/rules/no-ai-attribution.mdc`.
 - Enforcement is `scripts/commit-check.sh`: CI `commit-lint` checks the
-  PR range and title on every pull request. To get the same
+  PR range, title, and body on every pull request (the CodeRabbit-owned release-notes block in the body is exempt). To get the same
   check locally on each commit:
 
   ```sh
