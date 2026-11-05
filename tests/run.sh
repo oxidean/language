@@ -34,7 +34,10 @@ fi
 rss_kb() {
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
-            powershell.exe -NoProfile -Command                 "(Get-Process -Id $1 -ErrorAction SilentlyContinue).WorkingSet64"                 2>/dev/null | tr -d '\r' | awk 'NF{printf "%d", $1/1024}' ;;
+            # git-bash tracks native children by msys pid (not the winpid)
+            # and exposes their WorkingSet in /proc — no powershell hop
+            # (powershell.exe is not on the msys PATH anyway)
+            awk '/VmRSS/{printf "%d", $2}' "/proc/$1/status" 2>/dev/null ;;
         *) ps -o rss= -p "$1" 2>/dev/null | tr -d ' ' ;;
     esac
 }
