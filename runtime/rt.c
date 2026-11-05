@@ -2135,7 +2135,14 @@ void rt_exit(int64_t code) { exit((int)code); }
  * on BSD-derived systems), so they can't be spelled in oxl source */
 int64_t rt_set_reuseaddr(int64_t fd) {
     int one = 1;
+#ifdef _WIN32
+    /* SO_REUSEADDR means something different — and dangerous — on
+     * Windows: another process may bind the same port and steal the
+     * traffic. The exclusive flag is the safe spelling there. */
+    return setsockopt((oxl_sock_t)fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&one, sizeof one);
+#else
     return setsockopt((oxl_sock_t)fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
+#endif
 }
 
 int64_t rt_bind_any(int64_t fd, int64_t port) {
