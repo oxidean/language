@@ -33,7 +33,7 @@ byte-for-byte-compatible at the ABI level (same struct layouts, same
   bootstrap .oxl files) — bit-identical output not required,
   behavior-identical is
 
-## Status (2026-11-05): partial
+## Status (2026-11-05): done
 
 Verified in `tests/run.sh`'s `== bootstrap codegen ==` section:
 
@@ -46,13 +46,13 @@ Verified in `tests/run.sh`'s `== bootstrap codegen ==` section:
   checker diagnostics on one corpus file, codegen self-compile
   byte-identical).
 
-Remaining gap — interface values: `codegen.oxl` never ported the
-`RtIface`/vtable machinery from `oxl/src/codegen.rs` (type mapping,
-concrete→iface boxing, per-impl vtables, `x.m()` dispatch, receiver
-adaptation, pair-return iface methods, generic-method vtab entries).
-Interface-typed params/locals emit with the wrong C type, so
-`examples/http-crud-sqlite` (`Handler`) and `tests/methods.oxl` stay
-excluded from codegen coverage until it lands.
+Interface values closed out (2026-11-05): the `RtIface`/vtable
+machinery is ported — type mapping, concrete→iface boxing, per-impl
+vtables, `x.m()` dispatch, receiver adaptation, pair-return iface
+methods, generic-method vtab entries, and monomorphization for generic
+fns. `tests/methods.oxl` and the http pilot (`Handler` param) are back
+in `tests/run.sh` codegen coverage, emitting + running identically to
+`oxl run`.
 
 ## Depends on
 
