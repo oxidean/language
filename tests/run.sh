@@ -244,6 +244,21 @@ fi
 out=$("$OXL" run tests/stdmods_test.oxl)
 grep -q "^4000$" <<<"$out" || { echo "FAIL d2 shared workers: $out"; exit 1; }
 
+echo "== d5 module qualification =="
+out=$("$OXL" run tests/d5_qual.oxl)
+[ "$(tail -1 <<<"$out")" = "d5 qual ok" ] || { echo "FAIL d5 qual: $out"; exit 1; }
+# an imported name with no qualifier and no selective flatten must not
+# resolve — silent shadowing was the bug d5 exists to kill
+cat > "$scratch/d5unqual.oxl" <<'EOF'
+import "std/strings"
+fn main() { println(trim(" x ")) }
+EOF
+if "$OXL" build "$scratch/d5unqual.oxl" -o "$scratch/d5unqual" 2>/dev/null; then
+    echo "FAIL: unqualified import call compiled"; exit 1
+fi
+diag=$("$OXL" build "$scratch/d5unqual.oxl" -o "$scratch/d5unqual" 2>&1 || true)
+grep -q "undefined \`trim\`" <<<"$diag" || { echo "FAIL unqual diag: $diag"; exit 1; }
+
 echo "== bootstrap lexer =="
 out=$("$OXL" run bootstrap/lexer.oxl -- examples/hello.oxl)
 grep -q "11 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }
@@ -295,16 +310,25 @@ grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL codegen --test: $out"; exit
 cmp "$cgen_dir/chain.c" "$cgen_dir/direct.c" || { echo "FAIL bootstrap chain"; exit 1; }
 
 echo "== a1 coroutine scale =="
-# 2k frame tasks parked on recv, then two drain rounds — a thread-per-task
-# executor cannot do this within pool limits; frames must
-out=$("$OXL" run tests/conc_scale.oxl -- 2000 2 50)
-[ "$out" = "done" ] || { echo "FAIL scale: $out"; exit 1; }
+# spec bar: 10k spawned tasks parked on recv under 5 MB RSS — measure
+# VmRSS during the parked window instead of trusting a "done" exit
+"$OXL" build tests/conc_scale.oxl -o "$scratch/conc_scale" || {
+    echo "FAIL conc_scale: compile failed"; exit 1; }
+"$scratch/conc_scale" 10000 1 2000 > "$scratch/scale.out" 2>&1 &
+scale_pid=$!
+sleep 1
+rss=$(awk '/VmRSS/{print $2}' "/proc/$scale_pid/status" 2>/dev/null || echo 0)
+wait $scale_pid
+[ "$(tail -1 "$scratch/scale.out")" = "done" ] || { echo "FAIL scale: $(cat "$scratch/scale.out")"; exit 1; }
+[ -n "$rss" ] && [ "$rss" -gt 0 ] || { echo "FAIL scale: no VmRSS sample"; exit 1; }
+[ "$rss" -lt 5120 ] || { echo "FAIL scale: ${rss}kB RSS at 10k parked (spec < 5120kB)"; exit 1; }
+echo "  10k parked tasks RSS: ${rss}kB"
 out=$("$OXL" run tests/conc_ping.oxl -- 5000)
 grep -q "bounces=5000" <<<"$out" || { echo "FAIL ping: $out"; exit 1; }
 
 echo "== a2 select =="
 out=$("$OXL" run tests/select_fair.oxl)
-[ "$(tail -1 <<<"$out")" = "select fair ok a=${out##*=}" ] || { echo "FAIL select_fair: $out"; exit 1; }
+grep -qE "^select fair ok a=[0-9]+$" <<<"$(tail -1 <<<"$out")" || { echo "FAIL select_fair: $out"; exit 1; }
 out=$("$OXL" run tests/select.oxl)
 [ "$(tail -1 <<<"$out")" = "select done" ] || { echo "FAIL select: $out"; exit 1; }
 # parked select must unwedge on sibling trap — exits nonzero, not a hang.

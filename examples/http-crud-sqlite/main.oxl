@@ -10,7 +10,10 @@ import "std/http"
 import "std/json"
 
 // one shared connection for the whole process — sqlite's serialized
-// mode (THREADSAFE=1) provides the write lock; no per-request open/close
+// mode (THREADSAFE=1) provides the write lock; no per-request open/close.
+// Written once here before serve() spawns handlers and read-only after,
+// so it stays a plain global rather than Shared<T> — the shared-cell
+// rule covers cross-thread mutation, not process-wide constants.
 let db = sqlite_open(cstr("pilot.db"))
 
 struct App { d: int }

@@ -17,7 +17,8 @@ scope {
 - `go f(args)` — identical to `spawn`; both spellings accepted (Go
   familiarity). v0 implements both as the same AST node.
 - `spawnPinned f(args)` — reserved: task bound to the OS thread it was
-  spawned on (GUI/main-thread work). Parsed in v0, executor support later.
+  spawned on (GUI/main-thread work). Not yet parsed in v0 (the call
+  resolves as an ordinary undefined ident); executor support later.
 
 ## Suspendability
 

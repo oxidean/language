@@ -105,6 +105,20 @@ fn conn_cleanup(fd: int, inflight: shared) {
     sadd(inflight, -1)
 }
 
+/// write() may return short — loop until the whole response is on the
+/// wire or the conn dies (n <= 0 covers EPIPE + resets). Dropping the
+/// raw return would silently truncate bodies on a partial write.
+fn write_all(fd: int, s: str) {
+    off := 0
+    for off < len(s) {
+        n := write(fd, cstr(substr(s, off, len(s))), len(s) - off)
+        if n <= 0 {
+            return
+        }
+        off = off + n
+    }
+}
+
 /// runs one request through the handler and writes the response.
 /// Spawned inside the conn's try-scope — a trap in here marks only
 /// that scope, so serve's shared scope and every sibling connection
@@ -112,7 +126,7 @@ fn conn_cleanup(fd: int, inflight: shared) {
 fn route_serve(h: Handler, method: str, path: str, body: str, fd: int) {
     r := h.route(method, path, body)
     resp := http_resp(r.status, r.body)
-    write(fd, cstr(resp), len(resp))
+    write_all(fd, resp)
 }
 
 /// lowercase copy for case-insensitive header lookup — header names
@@ -288,7 +302,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
         rr := read_request(fd)
         if rr.status != 0 {
             resp := http_resp(rr.status, status_text(rr.status) + "\n")
-            write(fd, cstr(resp), len(resp))
+            write_all(fd, resp)
         } else {
             // "METHOD PATH HTTP/1.x" — split on the first two spaces; a
             // line missing either (or opening with one) is malformed —
@@ -302,7 +316,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
             }
             if sp1 <= 0 || sp2 <= 0 {
                 resp := http_resp(400, "malformed request line\n")
-                write(fd, cstr(resp), len(resp))
+                write_all(fd, resp)
             } else {
                 path := substr(rest, 0, sp2)
                 method := substr(rr.req, 0, sp1)
@@ -315,7 +329,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
                 spawnBlocking route_serve(h, method, path, rr.body, fd)
                 if rt_scope_join_free(rsc) != 0 {
                     resp := http_resp(500, "handler trapped\n")
-                    write(fd, cstr(resp), len(resp))
+                    write_all(fd, resp)
                 }
             }
         }

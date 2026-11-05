@@ -30,8 +30,13 @@ Semantics (Go-shaped, deliberately):
   several are ready (no starvation by ordering).
 - No `else` and no ready arm → suspend until an arm is ready (the
   suspend point A1's transform already knows how to compile).
-- `timeout(ms)` arm = recv on a runtime-created timer channel — keeps
-  `select` to "pick among channel ops" with no special timer syntax.
+- `timeout(ms)` arm — spec'd as recv on a runtime-created timer channel;
+  shipped v0.2 arms a detached timer pthread per wait instead (no timer
+  syntax either way — `select` stays "pick among channel ops" from the
+  language side). The detached thread holds a task ref and races the
+  park-claim like a losing arm; a timer *channel* remains the intended
+  mechanism once channels can carry a deadline, since per-wait OS
+  threads undercut A1's per-task-cost story at scale.
 - Inside a `scope`, sibling-cancel propagates: a cancelled scope
   unblocks `select` with the scope trap (same as `recv` today).
 

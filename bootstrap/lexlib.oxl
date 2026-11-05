@@ -3,7 +3,7 @@
 // bootstrap/parser.oxl (AST → JSON). See docs/self-hosting.md.
 import "std/strings"
 
-// token kinds (ints — no enums yet)
+// token kinds (ints — the compact encoding the emit table indexes)
 fn k_ident() -> int {
     return 1
 }

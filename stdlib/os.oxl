@@ -1,5 +1,7 @@
 // std/os — process environment + file I/O, thin honest wrappers over
 // the file/process builtins (argv/argc, readfile/writefile, exit).
+// Named fns, not bare builtins, so user code can shadow builtins safely
+// (same rationale as std/time and std/sync).
 
 /// process args (index 0 is the program name)
 fn args(i: int) -> str {
