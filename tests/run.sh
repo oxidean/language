@@ -1,0 +1,489 @@
+#!/usr/bin/env bash
+# tests/run.sh <path-to-oxl-binary> — end-to-end suite run by CI.
+set -euo pipefail
+OXL="${1:-oxl}"
+cd "$(dirname "$0")/.."
+# absolutize — subshell gates (gui pilot) invoke $OXL from other dirs
+case "$OXL" in /*) ;; *) OXL="$PWD/$OXL";; esac
+
+# GNU timeout doesn't exist on stock macOS; fall back to gtimeout
+# (brew coreutils), else a bash watchdog that kills the child at the
+# deadline — a hang must never run unbounded.
+with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then timeout "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
+    else
+        local secs=$1; shift
+        "$@" & local pid=$!
+        # watchdog redirects away from the caller's capture pipe: inside
+        # out=$(with_timeout ..) the subshell would inherit that pipe, and
+        # a killed dog can orphan its sleep child still holding it open —
+        # the $() then hangs past the deadline it was enforcing
+        ( sleep "$secs"; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & local dog=$!
+        local rc=0
+        wait "$pid" 2>/dev/null || rc=$?
+        if kill -0 "$dog" 2>/dev/null; then
+            kill "$dog" 2>/dev/null; wait "$dog" 2>/dev/null
+        else
+            rc=124 # watchdog fired — same sentinel as GNU timeout
+        fi
+        return "$rc"
+    fi
+}
+
+# one run-owned scratch dir: fixed /tmp paths collide between parallel
+# runs (CWE-377), and an EXIT trap guarantees the http pilot's server
+# dies even when a probe fails mid-suite
+scratch=$(mktemp -d)
+srv_pid=""
+cleanup() {
+    if [ -n "$srv_pid" ]; then kill "$srv_pid" 2>/dev/null || true; fi
+    rm -rf "$scratch"
+}
+trap cleanup EXIT
+
+echo "== hello =="
+out=$("$OXL" run examples/hello.oxl)
+[ "$out" = "hello, world" ] || { echo "FAIL hello: $out"; exit 1; }
+
+echo "== features =="
+out=$("$OXL" run examples/features.oxl)
+[ "$(tail -1 <<<"$out")" = "done" ] || { echo "FAIL features"; exit 1; }
+
+echo "== cli pilot =="
+out=$("$OXL" run examples/cli/main.oxl -- Jesse)
+grep -q "hello, Jesse" <<<"$out" || { echo "FAIL cli"; exit 1; }
+
+echo "== oxl test: smoke =="
+out=$("$OXL" test examples/smoke_test.oxl)
+printf '%s\n' "$out" >&2
+grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL smoke: $out"; exit 1; }
+
+echo "== oxl test: stdlib =="
+out=$("$OXL" test tests/stdlib_test.oxl)
+grep -q "test_loops ... ok" <<<"$out" || { echo "FAIL stdlib: $out"; exit 1; }
+
+echo "== oxl test: os =="
+out=$("$OXL" test tests/os_test.oxl)
+grep -q "test_file ... ok" <<<"$out" || { echo "FAIL os: $out"; exit 1; }
+
+echo "== stdmods (json/sync/time) =="
+out=$("$OXL" run tests/stdmods_test.oxl)
+grep -q '"name":"widget"' <<<"$out" || { echo "FAIL stdmods json: $out"; exit 1; }
+grep -q "^4000$" <<<"$out" || { echo "FAIL stdmods sync counter: $out"; exit 1; }
+[ "$(tail -1 <<<"$out")" = "done" ] || { echo "FAIL stdmods time: $out"; exit 1; }
+
+echo "== float (d1) =="
+out=$("$OXL" test tests/float_test.oxl)
+grep -q "test_json_float ... ok" <<<"$out" || { echo "FAIL float: $out"; exit 1; }
+# int/float mixing must be a compile error, not silent widening
+cat > "$scratch/floatmix.oxl" <<'EOF'
+fn main() { x := 1 + 2.5 }
+EOF
+if "$OXL" build "$scratch/floatmix.oxl" -o "$scratch/floatmix" 2>/dev/null; then
+    echo "FAIL: int+float compiled (should be a type error)"; exit 1
+fi
+
+echo "== enum (b1) =="
+out=$("$OXL" run tests/enum_test.oxl)
+[ "$(tail -1 <<<"$out")" = "enum fns ok" ] || { echo "FAIL enum: $out"; exit 1; }
+
+echo "== match (b2) =="
+out=$("$OXL" run tests/match.oxl)
+[ "$(tail -1 <<<"$out")" = "match ok" ] || { echo "FAIL match: $out"; exit 1; }
+# non-exhaustive match must name the missing variant
+cat > "$scratch/matchnex.oxl" <<'EOF'
+enum E { A(int), B, }
+fn f(e: E) -> int { return match e { E.A(v) => v } }
+fn main() { }
+EOF
+if "$OXL" build "$scratch/matchnex.oxl" -o "$scratch/matchnex" 2>/dev/null; then
+    echo "FAIL: non-exhaustive match compiled"; exit 1
+fi
+diag=$("$OXL" build "$scratch/matchnex.oxl" -o "$scratch/matchnex" 2>&1 || true)
+grep -q "missing B" <<<"$diag" || { echo "FAIL: missing-variant diagnostic: $diag"; exit 1; }
+
+echo "== slices (b3) =="
+out=$("$OXL" run tests/slices.oxl)
+[ "$(tail -1 <<<"$out")" = "slices ok" ] || { echo "FAIL slices: $out"; exit 1; }
+# out-of-range index must trap, not corrupt — build first so a compile
+# break can't pass as a runtime trap
+"$OXL" build tests/slice_oob.oxl -o "$scratch/slice_oob" || { echo "FAIL: slice_oob did not compile"; exit 1; }
+if "$scratch/slice_oob" >/dev/null 2>&1; then
+    echo "FAIL slice_oob: expected nonzero exit"; exit 1
+fi
+# inverted view range must trap, not corrupt
+"$OXL" build tests/slice_range.oxl -o "$scratch/slice_range" || { echo "FAIL: slice_range did not compile"; exit 1; }
+if "$scratch/slice_range" >/dev/null 2>&1; then
+    echo "FAIL slice_range: expected nonzero exit"; exit 1
+fi
+
+echo "== fn values (b4) =="
+out=$("$OXL" run tests/fnval.oxl)
+[ "$(tail -1 <<<"$out")" = "fnval ok" ] || { echo "FAIL fnval: $out"; exit 1; }
+# fn values can't suspend, capture susp, compare, or wrap generics/pairs
+for bad in susp clsusp ctrans gen pair eq; do
+    cat > "$scratch/fnv_$bad.oxl" <<EOF
+$(case $bad in
+  susp)   printf 'fn s() { sleep(1) }\nfn main() { f := s }' ;;
+  clsusp) printf 'fn main() { f := { |x: int| sleep(1); return x } }' ;;
+  ctrans) printf 'fn w() { sleep(1) }\nfn main() { f := { |x: int| w(); return x } }' ;;
+  gen)    printf 'fn id[T any](x: T) -> T { return x }\nfn main() { f := id[int] }' ;;
+  pair)   printf 'fn p() -> [int, err] { return 1, nil }\nfn main() { f := p }' ;;
+  eq)     printf 'fn a() {}\nfn main() { f := a; if f == a { println(1) } }' ;;
+esac)
+EOF
+    if "$OXL" build "$scratch/fnv_$bad.oxl" -o "$scratch/fnv_$bad" 2>/dev/null; then
+        echo "FAIL: fnval/$bad compiled (should be rejected)"; exit 1
+    fi
+done
+
+echo "== collections (b6) =="
+out=$("$OXL" run tests/collections_test.oxl)
+[ "$(tail -1 <<<"$out")" = "collections ok" ] || { echo "FAIL collections: $out"; exit 1; }
+
+echo "== defer (b5) =="
+out=$("$OXL" run tests/defer_order.oxl)
+grep -q "defer order ok" <<<"$out" || { echo "FAIL defer order: $out"; exit 1; }
+out=$("$OXL" run tests/defer_test.oxl)
+# fixed sequence: LIFO drain (3 2 1), error-path defer (9), per-iteration
+# loop defers (2 1 0), the untaken branch registering nothing (7 only)
+[ "$out" = $'3\n2\n1\n9\n2\n1\n0\n7\ndone' ] || { echo "FAIL defer: $out"; exit 1; }
+# trap unwind still drains the task's defer stack before aborting
+cat > "$scratch/d5trap.oxl" <<'EOF'
+fn dmark(x: int) { println(itoa(x)) }
+fn willtrap() {
+    defer dmark(6)
+    defer dmark(5)
+    s := mkslice(int, 2)
+    println(s[9])
+}
+fn main() { willtrap() }
+EOF
+"$OXL" build "$scratch/d5trap.oxl" -o "$scratch/d5trap" || { echo "FAIL: d5trap did not compile"; exit 1; }
+trapout=$(with_timeout 10 "$scratch/d5trap" 2>&1 || true)
+grep -q "^5$" <<<"$trapout" || { echo "FAIL defer trap drain: $trapout"; exit 1; }
+grep -q "^6$" <<<"$trapout" || { echo "FAIL defer trap drain order: $trapout"; exit 1; }
+
+echo "== methods + interfaces (d3) =="
+out=$("$OXL" run tests/methods.oxl)
+[ "$out" = "methods ok" ] || { echo "FAIL methods: $out"; exit 1; }
+# a method-less type must not satisfy a method interface
+cat > "$scratch/d3sat.oxl" <<'D3EOF'
+interface Writer { write(s: str) -> int }
+struct Bare { n: int }
+fn emit(w: Writer) -> int { return w.write("x") }
+fn main() { emit(Bare{n: 1}) }
+D3EOF
+if "$OXL" build "$scratch/d3sat.oxl" -o "$scratch/d3sat" 2>/dev/null; then
+    echo "FAIL: unsatisfied iface compiled"; exit 1
+fi
+# methods can't suspend — vtable calls carry no task frame
+cat > "$scratch/d3susp.oxl" <<'D3EOF'
+struct S { n: int }
+fn (s S) wait() { sleep(1) }
+fn main() { s := S{n: 0}; s.wait() }
+D3EOF
+if "$OXL" build "$scratch/d3susp.oxl" -o "$scratch/d3susp" 2>/dev/null; then
+    echo "FAIL: suspending method compiled"; exit 1
+fi
+
+echo "== move tracking (d2) =="
+# use-after-move must be a compile error naming the binding
+cat > "$scratch/d2move.oxl" <<'EOF'
+struct P { v: int }
+fn take(p: own P) { }
+fn main() { p := new(P); take(p); take(p) }
+EOF
+if "$OXL" build "$scratch/d2move.oxl" -o "$scratch/d2move" 2>/dev/null; then
+    echo "FAIL: use-after-move compiled"; exit 1
+fi
+diag=$("$OXL" build "$scratch/d2move.oxl" -o "$scratch/d2move" 2>&1 || true)
+grep -q 'use of moved value `p`' <<<"$diag" || { echo "FAIL moved diag: $diag"; exit 1; }
+# the headline bug class — one own cell into two spawned workers
+cat > "$scratch/d2spawn.oxl" <<'EOF'
+struct P { v: int }
+fn w(p: own P) { }
+fn main() { p := new(P); spawn w(p); spawn w(p) }
+EOF
+if "$OXL" build "$scratch/d2spawn.oxl" -o "$scratch/d2spawn" 2>/dev/null; then
+    echo "FAIL: double-spawn of own compiled"; exit 1
+fi
+# moved inside a loop body — the next iteration would read a moved value
+cat > "$scratch/d2for.oxl" <<'EOF'
+struct P { v: int }
+fn take(p: own P) { }
+fn main() { p := new(P); for true { take(p) } }
+EOF
+if "$OXL" build "$scratch/d2for.oxl" -o "$scratch/d2for" 2>/dev/null; then
+    echo "FAIL: move-in-loop compiled"; exit 1
+fi
+# re-init clears the mark
+cat > "$scratch/d2ok.oxl" <<'EOF'
+struct P { v: int }
+fn take(p: own P) { }
+fn main() {
+    p := new(P)
+    take(p)
+    p = new(P)
+    take(p)
+    println("ok")
+}
+EOF
+out=$("$OXL" run "$scratch/d2ok.oxl")
+[ "$out" = "ok" ] || { echo "FAIL d2 reinit: $out"; exit 1; }
+# moved in one branch: the join can't prove which path ran — reject the
+# later read unless EVERY path re-initializes the binding
+cat > "$scratch/d2branch.oxl" <<'EOF'
+struct P { v: int }
+fn take(p: own P) { }
+fn main() { p := new(P); if len("x") > 0 { take(p) }; take(p) }
+EOF
+if "$OXL" build "$scratch/d2branch.oxl" -o "$scratch/d2branch" 2>/dev/null; then
+    echo "FAIL: one-branch move compiled"; exit 1
+fi
+# shared cells are copy/shareable — same cell to four workers is intended
+out=$("$OXL" run tests/stdmods_test.oxl)
+grep -q "^4000$" <<<"$out" || { echo "FAIL d2 shared workers: $out"; exit 1; }
+
+echo "== d5 module qualification =="
+out=$("$OXL" run tests/d5_qual.oxl)
+[ "$(tail -1 <<<"$out")" = "d5 qual ok" ] || { echo "FAIL d5 qual: $out"; exit 1; }
+# an imported name with no qualifier and no selective flatten must not
+# resolve — silent shadowing was the bug d5 exists to kill
+cat > "$scratch/d5unqual.oxl" <<'EOF'
+import "std/strings"
+fn main() { println(trim(" x ")) }
+EOF
+if "$OXL" build "$scratch/d5unqual.oxl" -o "$scratch/d5unqual" 2>/dev/null; then
+    echo "FAIL: unqualified import call compiled"; exit 1
+fi
+diag=$("$OXL" build "$scratch/d5unqual.oxl" -o "$scratch/d5unqual" 2>&1 || true)
+# an unresolved import emits "undefined `trim`" too — without it the
+# probe tests nothing. Fail on resolution diags so the check really
+# exercises qualification, not import fallback.
+if grep -q "cannot resolve import" <<<"$diag"; then
+    echo "FAIL unqual probe: stdlib unresolved: $diag"; exit 1
+fi
+grep -q "undefined \`trim\`" <<<"$diag" || { echo "FAIL unqual diag: $diag"; exit 1; }
+
+echo "== bootstrap lexer =="
+out=$("$OXL" run bootstrap/lexer.oxl -- examples/hello.oxl)
+grep -q "11 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }
+
+echo "== bootstrap parser =="
+out=$("$OXL" run bootstrap/parser.oxl -- examples/features.oxl)
+python3 - "$out" <<'PY' || { echo "FAIL parser"; exit 1; }
+import json,sys
+d=json.loads(sys.argv[1])
+assert len(d['items'])==6 and not any('skip' in i for i in d['items']), d
+PY
+out=$("$OXL" run bootstrap/parser.oxl -- bootstrap/parser.oxl)
+python3 - "$out" <<'PY' || { echo "FAIL parser self-parse"; exit 1; }
+import json,sys
+d=json.loads(sys.argv[1])
+assert len(d['items'])>20 and not any('skip' in i for i in d['items']), d
+PY
+
+echo "== bootstrap checker =="
+# the self-hosted typechecker must check itself and representative sources
+for f in bootstrap/check.oxl examples/features.oxl tests/match.oxl stdlib/collections.oxl; do
+    out=$("$OXL" run bootstrap/check.oxl -- "$f")
+    [ "$out" = "ok" ] || { echo "FAIL checker $f: $out"; exit 1; }
+done
+
+echo "== bootstrap codegen =="
+# the self-hosted C emitter must produce working binaries
+cgen_dir=$(mktemp -d "$scratch/cgen.XXXXXX")
+for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl; do
+    "$OXL" run bootstrap/codegen.oxl -- "$f" > "$cgen_dir/out.c"
+    # sqlite only when the emitted C calls it — mirrors emit_and_cc
+    sq=""
+    grep -q 'rt_sqlite_' "$cgen_dir/out.c" && sq="-DOXL_SQLITE -lsqlite3"
+    "${LANG_CC:-cc}" -O2 -pthread -Iruntime $sq "$cgen_dir/out.c" runtime/rt.c -o "$cgen_dir/out" || { echo "FAIL codegen cc $f"; exit 1; }
+    got=$("$cgen_dir/out")
+    want=$("$OXL" run "$f")
+    [ "$got" = "$want" ] || { echo "FAIL codegen $f"; exit 1; }
+done
+# --test mode: scope-wrapped runner like `oxl test`
+"$OXL" run bootstrap/codegen.oxl -- --test examples/smoke_test.oxl > "$cgen_dir/t.c"
+"${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/t.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/t" || { echo "FAIL codegen cc --test"; exit 1; }
+out=$("$cgen_dir/t")
+grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL codegen --test: $out"; exit 1; }
+# bootstrap chain: codegen compiled by itself emits identical C
+"$OXL" run bootstrap/codegen.oxl -- bootstrap/codegen.oxl > "$cgen_dir/self.c"
+"${LANG_CC:-cc}" -O2 -pthread -Iruntime "$cgen_dir/self.c" runtime/rt.c -lsqlite3 -o "$cgen_dir/self" || { echo "FAIL codegen self-cc"; exit 1; }
+"$cgen_dir/self" examples/hello.oxl > "$cgen_dir/chain.c"
+"$OXL" run bootstrap/codegen.oxl -- examples/hello.oxl > "$cgen_dir/direct.c"
+cmp "$cgen_dir/chain.c" "$cgen_dir/direct.c" || { echo "FAIL bootstrap chain"; exit 1; }
+
+echo "== a1 coroutine scale =="
+# spec bar: 10k spawned tasks parked on recv under 5 MB RSS — measure
+# peak RSS during the parked window instead of trusting a "done" exit
+"$OXL" build tests/conc_scale.oxl -o "$scratch/conc_scale" || {
+    echo "FAIL conc_scale: compile failed"; exit 1; }
+"$scratch/conc_scale" 10000 1 2500 > "$scratch/scale.out" 2>&1 &
+scale_pid=$!
+# watchdog: a wedged channel/task regression must not hang the whole
+# suite — kill the measured binary at the deadline; the "done" check
+# below then reports the failure instead of blocking forever
+( sleep 120; kill -KILL $scale_pid 2>/dev/null;   echo "watchdog: killed after 120s" >> "$scratch/scale.out" ) >/dev/null 2>&1 &
+scale_dog=$!
+# peak matters, not a point sample: poll RSS until exit and take the
+# max. `ps -o rss=` is the portable form (/proc is Linux-only).
+# The process can exit between kill -0 and ps — under pipefail a failed
+# ps makes the substitution nonzero and `set -e` would abort the suite
+# before `wait` can report the real result; `|| true` pins it.
+rss=0
+while kill -0 $scale_pid 2>/dev/null; do
+    r=$(ps -o rss= -p $scale_pid 2>/dev/null | tr -d ' ' || true)
+    [ -n "$r" ] && [ "$r" -gt "$rss" ] && rss=$r
+    sleep 0.2
+done
+kill "$scale_dog" 2>/dev/null || true
+wait "$scale_dog" 2>/dev/null || true
+scale_rc=0
+wait $scale_pid || scale_rc=$?
+[ "$scale_rc" -eq 0 ] && [ "$(tail -1 "$scratch/scale.out")" = "done" ] || {
+    echo "FAIL scale: rc=$scale_rc: $(cat "$scratch/scale.out")"; exit 1; }
+[ -n "$rss" ] && [ "$rss" -gt 0 ] || { echo "FAIL scale: no RSS sample"; exit 1; }
+[ "$rss" -lt 5120 ] || { echo "FAIL scale: ${rss}kB RSS at 10k parked (spec < 5120kB)"; exit 1; }
+echo "  10k parked tasks RSS: ${rss}kB"
+out=$("$OXL" run tests/conc_ping.oxl -- 5000)
+grep -q "bounces=5000" <<<"$out" || { echo "FAIL ping: $out"; exit 1; }
+
+echo "== a2 select =="
+out=$("$OXL" run tests/select_fair.oxl)
+grep -qE "^select fair ok a=[0-9]+$" <<<"$(tail -1 <<<"$out")" || { echo "FAIL select_fair: $out"; exit 1; }
+out=$("$OXL" run tests/select.oxl)
+[ "$(tail -1 <<<"$out")" = "select done" ] || { echo "FAIL select: $out"; exit 1; }
+# parked select must unwedge on sibling trap — exits nonzero, not a hang.
+# 124 = with_timeout expiry = the hang this test exists to catch. Build
+# first so a compile error fails the check instead of passing as a
+# non-124 nonzero exit.
+"$OXL" build tests/select_cancel.oxl -o "$scratch/select_cancel" || {
+    echo "FAIL select_cancel: compile failed"; exit 1; }
+rc=0
+with_timeout 10 "$scratch/select_cancel" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
+    echo "FAIL select_cancel: expected trap exit, got rc=$rc"; exit 1
+fi
+
+# orphan drain: a frame task returning inside an open scope orphans it;
+# its teardown must not lock the joined scope's destroyed mutex. Build
+# first so a compile error fails the check, and run the binary directly —
+# under `oxl run` the watchdog would kill only the driver while the child
+# keeps the capture pipe and $( ) hangs past the deadline.
+"$OXL" build tests/orphan_join.oxl -o "$scratch/orphan_join" || {
+    echo "FAIL orphan_join: compile failed"; exit 1; }
+rc=0
+out=$(with_timeout 30 "$scratch/orphan_join") || rc=$?
+# marker alone isn't enough: a crash/time-out after the print must fail
+[ "$rc" -eq 0 ] && [ "$(tail -1 <<<"$out")" = "orphan-join ok" ] || { echo "FAIL orphan_join: rc=$rc: $out"; exit 1; }
+
+# joiner lost-wakeup: a trap's descendant cancel temp-holds a scope
+# whose owner is parked joining it; if the temp drop is the pending->0
+# transition it must still wake the joiner. Build first so a compile
+# error fails instead of passing as a non-124 nonzero.
+"$OXL" build tests/cancel_join.oxl -o "$scratch/cancel_join" || {
+    echo "FAIL cancel_join: compile failed"; exit 1; }
+rc=0
+with_timeout 25 "$scratch/cancel_join" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
+    echo "FAIL cancel_join: expected trap exit, got rc=$rc"; exit 1
+fi
+
+# scope-exit join: break/continue/return inside a loop-nested scope must
+# drain its children — a bare goto orphaned them. Build + run the binary
+# directly like orphan_join: detached children would hold the capture
+# pipe open past the deadline under `oxl run`.
+"$OXL" build tests/scope_exit.oxl -o "$scratch/scope_exit" || {
+    echo "FAIL scope_exit: compile failed"; exit 1; }
+rc=0
+out=$(with_timeout 30 "$scratch/scope_exit") || rc=$?
+[ "$rc" -eq 0 ] && [ "$(tail -1 <<<"$out")" = "scope-exit ok" ] || { echo "FAIL scope_exit: rc=$rc: $out"; exit 1; }
+
+echo "== a3 buffered channels =="
+out=$("$OXL" run tests/chanbuf.oxl)
+[ "$(tail -1 <<<"$out")" = "chanbuf done" ] || { echo "FAIL chanbuf: $out"; exit 1; }
+out=$("$OXL" run tests/chanbuf_close.oxl)
+[ "$(tail -1 <<<"$out")" = "chanbuf close ok" ] || { echo "FAIL chanbuf_close: $out"; exit 1; }
+
+echo "== fmt check =="
+# the whole .oxl corpus must be canonically formatted
+if ! "$OXL" fmt --check $(find stdlib bootstrap tests examples -name '*.oxl' | sort); then
+    echo "FAIL fmt: run \`oxl fmt -w\` on the corpus"; exit 1
+fi
+
+
+echo "== lsp hover/definition =="
+python3 - "$OXL" <<'PYEOF'
+import json, subprocess, sys, os
+oxl = sys.argv[1]
+p = subprocess.Popen([oxl, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+def send(m):
+    b = json.dumps(m).encode()
+    p.stdin.write(b"Content-Length: %d\r\n\r\n" % len(b) + b); p.stdin.flush()
+def recv():
+    h = {}
+    while True:
+        l = p.stdout.readline().decode().strip()
+        if not l: break
+        k, v = l.split(":", 1); h[k.strip()] = v.strip()
+    return json.loads(p.stdout.read(int(h["Content-Length"])).decode())
+uri = "file://" + os.path.abspath("bootstrap/parser.oxl")
+src = open("bootstrap/parser.oxl").read()
+send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}); recv()
+send({"jsonrpc":"2.0","method":"initialized","params":{}})
+send({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"oxl","version":1,"text":src}}}); recv()
+lines = src.split("\n")
+i = next(i for i,l in enumerate(lines) if "lexlib.lex(src)" in l)
+col = lines[i].index("lexlib.lex") + 7
+pos = {"textDocument":{"uri":uri},"position":{"line":i,"character":col}}
+send({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":pos})
+h = recv(); assert "fn lexlib.lex(src: str)" in json.dumps(h), h
+send({"jsonrpc":"2.0","id":3,"method":"textDocument/definition","params":pos})
+d = recv(); assert d["result"]["uri"].endswith("bootstrap/lexlib.oxl"), d
+send({"jsonrpc":"2.0","method":"exit","params":{}})
+PYEOF
+
+echo "== http pilot =="
+work=$(mktemp -d "$scratch/http.XXXXXX")
+"$OXL" build examples/http-crud-sqlite/main.oxl -o "$work/httpsrv"
+curl -s -m 1 -o /dev/null localhost:8080/items && { echo "FAIL: :8080 already bound"; exit 1; } || true
+(cd "$work"; ./httpsrv > srv.log 2>&1 & echo $! > srv.pid)
+srv_pid=$(cat "$work/srv.pid")
+# readiness can lag on slow runners — poll the log instead of a fixed sleep
+for _ in $(seq 1 50); do
+    grep -q "listening" "$work/srv.log" && break
+    sleep 0.2
+done
+grep -q "listening" "$work/srv.log" || { echo "FAIL: server did not bind"; cat "$work/srv.log"; kill $srv_pid 2>/dev/null; exit 1; }
+got=$(curl -s -d widget localhost:8080/items)
+[ "$got" = '{"created":"widget"}' ] || { echo "FAIL post: $got"; kill $srv_pid 2>/dev/null; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' -d widget localhost:8080/items)
+[ "$code" = "201" ] || { echo "FAIL post status: $code"; kill $srv_pid 2>/dev/null; exit 1; }
+# newline in a name would split one stored row into two items on read —
+# the server must reject it with a 400 rather than corrupt the list
+code=$(curl -s -o /dev/null -w '%{http_code}' -d $'bad\nname' localhost:8080/items)
+[ "$code" = "400" ] || { echo "FAIL newline status: $code"; kill $srv_pid 2>/dev/null; exit 1; }
+got=$(curl -s localhost:8080/items)
+grep -q '"name":"widget"' <<<"$got" || { echo "FAIL get: $got"; kill $srv_pid 2>/dev/null; exit 1; }
+kill $srv_pid 2>/dev/null || true
+
+echo "== gui pilot =="
+# GTK4 FFI pilot: build whenever gtk4 dev files exist; run the
+# signal-path selftest only when a display is available (CI macOS /
+# headless runners build but don't launch)
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists gtk4 2>/dev/null; then
+    (cd examples/gui-todo && OXL="$OXL" ./build.sh >/dev/null)
+    if [ -n "${DISPLAY:-}" ]; then
+        out=$(with_timeout 30 examples/gui-todo/todo --selftest 2>/dev/null)
+        grep -q "selftest rows=2" <<<"$out" || { echo "FAIL gui selftest: $out"; exit 1; }
+        grep -q "gui done" <<<"$out" || { echo "FAIL gui run: $out"; exit 1; }
+    fi
+else
+    echo "  (skipped: gtk4 not installed)"
+fi
+
+echo "ALL TESTS PASSED"

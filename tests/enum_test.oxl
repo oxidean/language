@@ -1,0 +1,52 @@
+// B1: enum tagged unions — positional, named, and unit payloads
+struct Expr { v: int }
+
+enum ExprKind {
+    Int(int),
+    Str(str),
+    Bin { op: str, l: own Expr, r: own Expr },
+    Nil,
+}
+
+fn main() {
+    // positional construction
+    i := ExprKind.Int(7)
+    s := ExprKind.Str("hi")
+
+    // named-payload construction
+    l := new(Expr)
+    l.v = 1
+    r := new(Expr)
+    r.v = 2
+    b := ExprKind.Bin{op: "+", l: l, r: r}
+
+    // unit variant
+    n := ExprKind.Nil
+
+    // kind() tag accessor — tags are declaration order
+    assert(i.kind() == 0)
+    assert(s.kind() == 1)
+    assert(b.kind() == 2)
+    assert(n.kind() == 3)
+    println("enum tags ok")
+
+    // as-cast payload extraction
+    iv := i as ExprKind.Int
+    assert(iv.f0 == 7)
+    sv := s as ExprKind.Str
+    assert(sv.f0 == "hi")
+    bv := b as ExprKind.Bin
+    assert(bv.op == "+")
+    assert(bv.l.v == 1)
+    assert(bv.r.v == 2)
+    println("enum payloads ok")
+
+    // enum values move through fns + own boxing (recursive payload type)
+    k := tag_of(b)
+    assert(k == 2)
+    println("enum fns ok")
+}
+
+fn tag_of(e: ExprKind) -> int {
+    return e.kind()
+}

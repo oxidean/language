@@ -1,0 +1,124 @@
+// gui-todo — GTK4 todo list via C FFI (spec F1 pilot).
+//
+// All GTK access goes through gui_shim.c: widgets are opaque int
+// handles (the socket-fd idiom), and `gui_connect` passes OXL fn
+// values to GTK as {env, fp} pairs — closures carry their own context
+// (the delete handler captures lb + row directly, so removal needs no
+// global registry).
+//
+// Build: ./build.sh   (needs pkg-config gtk4)
+// Run:   ./todo            interactive (needs a display)
+//        ./todo --selftest drives real GTK signals through the
+//                           trampolines, asserts row counts, auto-quits
+extern fn gui_init()
+
+extern fn gui_window_new(title: cstr, w: int, h: int) -> int
+
+extern fn gui_window_set_child(win: int, child: int)
+
+extern fn gui_window_present(win: int)
+
+extern fn gui_run() -> int
+
+extern fn gui_quit_after(ms: int)
+
+extern fn gui_box_new(vertical: int, spacing: int) -> int
+
+extern fn gui_box_append(box: int, child: int)
+
+extern fn gui_entry_new() -> int
+
+extern fn gui_entry_text(entry: int) -> cstr
+
+extern fn gui_entry_set_text(entry: int, t: cstr)
+
+extern fn gui_button_new(label: cstr) -> int
+
+extern fn gui_label_new(text: str) -> int
+
+extern fn gui_listbox_new() -> int
+
+extern fn gui_listbox_append(lb: int, row: int)
+
+extern fn gui_listbox_remove(lb: int, row: int)
+
+extern fn gui_listbox_rows(lb: int) -> int
+
+extern fn gui_scrolled_new(child: int) -> int
+
+extern fn gui_connect(obj: int, sig: cstr, cb: fn(int))
+
+extern fn gui_emit(obj: int, sig: cstr)
+
+// one todo row: [label] [x] — the delete closure captures lb + row
+// by value, so each row carries its own removal context
+fn add_row(lb: int, text: str) -> int {
+    row := gui_box_new(0, 8)
+    gui_box_append(row, gui_label_new(text))
+    del := gui_button_new("x")
+    gui_connect(del, "clicked", { |w: int| gui_listbox_remove(lb, row) })
+    gui_box_append(row, del)
+    gui_listbox_append(lb, row)
+    return del
+}
+
+fn main() {
+    selftest := argc() > 1 && argv(1) == "--selftest"
+    gui_init()
+
+    win := gui_window_new("oxl todo", 360, 420)
+    root := gui_box_new(1, 8)
+    entry := gui_entry_new()
+    add := gui_button_new("add")
+    lb := gui_listbox_new()
+
+    // add = click button or press enter in the entry
+    on_add := { |w: int|
+        t := gui_entry_text(entry)
+        st := str(t)
+        if len(st) > 0 {
+            add_row(lb, st)
+            gui_entry_set_text(entry, "")
+        }
+    }
+    gui_connect(add, "clicked", on_add)
+    gui_connect(entry, "activate", on_add)
+
+    gui_box_append(root, entry)
+    gui_box_append(root, add)
+    gui_box_append(root, gui_scrolled_new(lb))
+    gui_window_set_child(win, root)
+    gui_window_present(win)
+
+    if selftest {
+        // adds go through the real signal path: GTK "clicked" → C
+        // trampoline → OXL closure → GTK mutation
+        gui_entry_set_text(entry, "one")
+        gui_emit(add, "clicked")
+        gui_entry_set_text(entry, "two")
+        gui_emit(add, "clicked")
+        assert(gui_listbox_rows(lb) == 2)
+        // delete likewise: a row's own "x" button removes it
+        d := add_row(lb, "doomed")
+        assert(gui_listbox_rows(lb) == 3)
+        gui_emit(d, "clicked")
+        assert(gui_listbox_rows(lb) == 2)
+        // churn: each iteration heap-copies a cb, runs a closure, and
+        // must free both on row destroy — a leak grows ~48B+/cycle
+        churn := 400
+        if argc() > 2 {
+            churn = atoi(argv(2))
+        }
+        i := 0
+        for i < churn {
+            dd := add_row(lb, "churn")
+            gui_emit(dd, "clicked")
+            i = i + 1
+        }
+        assert(gui_listbox_rows(lb) == 2)
+        println("selftest rows=" + itoa(gui_listbox_rows(lb)))
+        gui_quit_after(150)
+    }
+    gui_run()
+    println("gui done")
+}

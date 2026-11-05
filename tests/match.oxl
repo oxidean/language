@@ -1,0 +1,108 @@
+enum ExprKind {
+    Int(int),
+    Str(str),
+    Bin { op: str, l: own Box, r: own Box },
+    Nil,
+}
+
+struct Box { v: int }
+
+fn kind_of(e: ExprKind) -> int {
+    return match e {
+        ExprKind.Int(v) => v
+        ExprKind.Str(s) => 100
+        ExprKind.Bin{op, l, r} => 7
+        ExprKind.Nil => 0
+    }
+}
+
+fn eval(e: ExprKind) -> int {
+    return match e {
+        ExprKind.Int(v) => v
+        ExprKind.Str(_) => 0
+        _ => -1
+    }
+}
+
+fn lits() -> int {
+    x := match 7 {
+        3 => 1
+        7 => 2
+        _ => 3
+    }
+    y := match "hi" {
+        "lo" => 1
+        "hi" => 2
+        _ => 3
+    }
+    z := match true {
+        false => 1
+        true => 2
+    }
+    return x * 100 + y * 10 + z
+}
+
+fn blocks(e: ExprKind) -> int {
+    out := 0
+    match e {
+        ExprKind.Int(v) => {
+            out = v + 1
+        }
+        ExprKind.Bin{op, l, r} => {
+            out = l.v + r.v
+        }
+        _ => {
+            out = -9
+        }
+    }
+    return out
+}
+
+fn binds(e: ExprKind) -> int {
+    match e {
+        ExprKind.Int(v) => println(itoa(v))
+        _ => println("other")
+    }
+    return 0
+}
+
+fn main() {
+    l := new(Box)
+    l.v = 10
+    r := new(Box)
+    r.v = 20
+    bin := ExprKind.Bin{op: "+", l: l, r: r}
+
+    assert(kind_of(ExprKind.Int(42)) == 42)
+    assert(kind_of(ExprKind.Str("x")) == 100)
+    assert(kind_of(bin) == 7)
+    assert(kind_of(ExprKind.Nil) == 0)
+
+    assert(eval(ExprKind.Int(5)) == 5)
+    assert(eval(bin) == -1)
+
+    assert(lits() == 222) // x=2, y=2, z=2
+
+    assert(blocks(ExprKind.Int(4)) == 5)
+    assert(blocks(bin) == 30)
+    assert(blocks(ExprKind.Nil) == -9)
+
+    binds(ExprKind.Int(77))
+
+    // expression position + own scrutinee
+    let on: own ExprKind = new(ExprKind.Str("s"))
+    v := match on {
+        ExprKind.Str(s) => 1
+        _ => 0
+    }
+    assert(v == 1)
+
+    // bare bind pattern
+    w := match bin {
+        ExprKind.Int(v) => v
+        n => 99
+    }
+    assert(w == 99)
+
+    print("match ok")
+}

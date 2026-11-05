@@ -1,0 +1,34 @@
+// A1 ping-pong regression bench: one ponger task, N rendezvous
+// round-trips through the scheduler.
+//
+//   oxl run tests/conc_ping.oxl -- [bounces]
+import "std/time"
+
+fn ponger(ca: chan, cb: chan, n: int) {
+    i := 0
+    for i < n {
+        v := recv(ca)
+        send(cb, v + 1)
+        i = i + 1
+    }
+}
+
+fn main() {
+    n := 20000
+    if argc() >= 2 {
+        n = atoi(argv(1))
+    }
+    ca := mkchan()
+    cb := mkchan()
+    t0 := time.unix_ms()
+    scope {
+        spawn ponger(ca, cb, n)
+        i := 0
+        for i < n {
+            send(ca, i)
+            v := recv(cb)
+            i = i + 1
+        }
+    }
+    println("bounces=" + itoa(n) + " ms=" + itoa(time.unix_ms() - t0))
+}

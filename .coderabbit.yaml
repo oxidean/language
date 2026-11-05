@@ -1,0 +1,10 @@
+# CodeRabbit configuration — see https://docs.coderabbit.ai/reference/configuration
+reviews:
+  profile: chill
+  auto_approvals:
+    enabled: true
+  pre_merge_checks:
+    docstrings:
+      # This is a bootstrap-stage compiler repo; we do not gate merges on
+      # docstring coverage. Doc comments stay welcome but unmeasured.
+      mode: off

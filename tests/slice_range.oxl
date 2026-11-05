@@ -1,0 +1,6 @@
+// B3 negative: inverted view range must trap (nonzero exit)
+fn main() {
+    s := mkslice(int, 4)
+    v := s[3:1] // lo > hi is invalid
+    println(len(v))
+}

@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest (not macos-15): explicit macos-15 jobs on this repo
+        # sat queued ~15min and were cancelled without a runner (empty
+        # runner_name, zero steps); macos-latest schedules and passes.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # PR code runs here; don't leave a token in git config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: system deps (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 libsqlite3-dev
+
+      - name: build compiler
+        run: cargo build --release --manifest-path oxl/Cargo.toml
+
+      - name: run test suite
+        run: bash tests/run.sh "$PWD/oxl/target/release/oxl"

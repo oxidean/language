@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # build/test steps run dep code; publish uses github.token directly
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build oxl
+        run: cargo build --release --manifest-path oxl/Cargo.toml
+      - name: test suite (gate)
+        run: bash tests/run.sh ./oxl/target/release/oxl
+      - name: package toolchain
+        run: |
+          mkdir -p dist/oxl-toolchain
+          cp oxl/target/release/oxl dist/oxl-toolchain/
+          cp -r stdlib examples dist/oxl-toolchain/
+          # gui_shim.c includes ../../runtime/rt.h — ship the header at
+          # the same relative spot so the packaged example still builds
+          mkdir -p dist/oxl-toolchain/runtime
+          cp runtime/rt.h dist/oxl-toolchain/runtime/
+          cp LICENSE dist/oxl-toolchain/
+          # the repo README documents building from oxl/ and other paths
+          # the archive doesn't ship — give it release-specific steps
+          cat > dist/oxl-toolchain/README.md <<'EOF'
+          # oxl toolchain
+
+          The `oxl` compiler plus `stdlib/` library sources and `examples/` pilots.
+
+          ```sh
+          ./oxl run examples/hello.oxl    # compile + run (needs cc on PATH)
+          ./oxl build examples/http-crud-sqlite/main.oxl   # sqlite pilots also need libsqlite3-dev
+          ```
+
+          `import "std/x"` resolves against `stdlib/` next to the binary.
+          EOF
+          cd dist && tar czf oxl-toolchain-linux-x86_64.tar.gz oxl-toolchain
+      - name: github release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/oxl-toolchain-linux-x86_64.tar.gz
+          generate_release_notes: true

@@ -1,0 +1,197 @@
+// bootstrap/lexlib.oxl — the lexer as a library (no main).
+// Shared by bootstrap/lexer.oxl (token dump) and
+// bootstrap/parser.oxl (AST → JSON). See docs/self-hosting.md.
+import "std/strings"
+
+// token kinds (ints — the compact encoding the emit table indexes)
+fn k_ident() -> int {
+    return 1
+}
+
+fn k_kw() -> int {
+    return 2
+}
+
+fn k_int() -> int {
+    return 3
+}
+
+fn k_str() -> int {
+    return 4
+}
+
+fn k_punct() -> int {
+    return 5
+}
+
+fn k_float() -> int {
+    return 6
+}
+
+fn k_eof() -> int {
+    return 0
+}
+
+fn k_err() -> int {
+    return 7
+}
+
+struct Tok { kind: int, text: str, ln: int, next: own Tok }
+
+fn is_alpha(c: int) -> bool {
+    return c >= 97 && c <= 122 || c >= 65 && c <= 90 || c == 95
+}
+
+fn is_digit(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn is_space(c: int) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13
+}
+
+fn is_kw(w: str) -> bool {
+    return w == "fn" || w == "struct" || w == "extern" || w == "return" || w == "if" || w == "else" || w == "for" || w == "let" || w == "scope" || w == "spawn" || w == "go" || w == "own" || w == "ref" || w == "mut" || w == "unsafe" || w == "nil" || w == "true" || w == "false" || w == "import" || w == "chan" || w == "break" || w == "continue" || w == "interface" || w == "spawnBlocking"
+}
+
+fn push(tail: own Tok, kind: int, text: str, ln: int) -> own Tok {
+    tail.next = new(Tok)
+    tail = tail.next
+    tail.kind = kind
+    tail.text = text
+    tail.ln = ln
+    tail.next = nil
+    return tail
+}
+
+fn lex(src: str) -> own Tok {
+    head := new(Tok)
+    head.kind = 0
+    head.text = ""
+    head.ln = 0
+    head.next = nil
+    tail := head
+    i := 0
+    ln := 1
+    for i < len(src) {
+        c := byteat(src, i)
+        if is_space(c) {
+            if c == 10 {
+                ln = ln + 1
+            }
+            i = i + 1
+            continue
+        }
+        if c == 47 && byteat(src, i + 1) == 47 { // // comment
+            for i < len(src) && byteat(src, i) != 10 {
+                i = i + 1
+            }
+            continue
+        }
+        if c == 47 && byteat(src, i + 1) == 42 { // /* ... */ comment
+            i = i + 2
+            for i + 1 < len(src) && !(byteat(src, i) == 42 && byteat(src, i + 1) == 47) {
+                if byteat(src, i) == 10 {
+                    ln = ln + 1
+                }
+                i = i + 1
+            }
+            // unterminated comments end the scan without walking past
+            // the source — same clamp as the Rust lexer — but surface
+            // as an err token so the parser/checker fail instead of
+            // silently parsing a truncated stream
+            if i + 1 >= len(src) {
+                tail = push(tail, k_err(), "unterminated block comment", ln)
+                i = len(src)
+            } else {
+                i = i + 2
+            }
+            continue
+        }
+        if is_alpha(c) {
+            a := i
+            for i < len(src) && (is_alpha(byteat(src, i)) || is_digit(byteat(src, i))) {
+                i = i + 1
+            }
+            w := substr(src, a, i)
+            k := k_ident()
+            if is_kw(w) {
+                k = k_kw()
+            }
+            tail = push(tail, k, w, ln)
+            continue
+        }
+        if is_digit(c) {
+            a := i
+            for i < len(src) && is_digit(byteat(src, i)) {
+                i = i + 1
+            }
+            // float: <digits>.<digits> — `.` must be followed by a digit
+            // so field/index access like `x.0`/`a.b` stays punct
+            if byteat(src, i) == 46 && is_digit(byteat(src, i + 1)) {
+                i = i + 1
+                for i < len(src) && is_digit(byteat(src, i)) {
+                    i = i + 1
+                }
+                tail = push(tail, k_float(), substr(src, a, i), ln)
+                continue
+            }
+            tail = push(tail, k_int(), substr(src, a, i), ln)
+            continue
+        }
+        if c == 34 { // "..."
+            a := i + 1
+            i = i + 1
+            for i < len(src) && byteat(src, i) != 34 {
+                if byteat(src, i) == 92 {
+                    i = i + 1
+                } // escape
+                i = i + 1
+            }
+            if i >= len(src) {
+                tail = push(tail, k_err(), "unterminated string", ln)
+            } else {
+                tail = push(tail, k_str(), substr(src, a, i), ln)
+                i = i + 1
+            }
+            continue
+        }
+        // two-char punct first (:= == != <= >= && || ->)
+        n := byteat(src, i + 1)
+        if c == 58 && n == 61 || c == 61 && n == 61 || c == 33 && n == 61 || c == 60 && n == 61 || c == 62 && n == 61 || c == 38 && n == 38 || c == 124 && n == 124 || c == 45 && n == 62 {
+            tail = push(tail, k_punct(), substr(src, i, i + 2), ln)
+            i = i + 2
+            continue
+        }
+        // single-char punct
+        tail = push(tail, k_punct(), substr(src, i, i + 1), ln)
+        i = i + 1
+    }
+    tail = push(tail, k_eof(), "", ln)
+    return head.next
+}
+
+fn kind_name(k: int) -> str {
+    if k == 1 {
+        return "ident"
+    }
+    if k == 2 {
+        return "kw"
+    }
+    if k == 3 {
+        return "int"
+    }
+    if k == 4 {
+        return "str"
+    }
+    if k == 5 {
+        return "punct"
+    }
+    if k == 6 {
+        return "float"
+    }
+    if k == 7 {
+        return "err"
+    }
+    return "eof"
+}

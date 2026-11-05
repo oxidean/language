@@ -1,0 +1,41 @@
+import "std/json"
+
+import "std/sync"
+
+import "std/time"
+
+fn main() {
+    o := json.jobj()
+    json.jadd(o, "name", json.jstr("widget"))
+    json.jadd(o, "id", json.jint(7))
+    a := json.jarr()
+    json.jadd(a, "", json.jint(1))
+    json.jadd(a, "", json.jbool(true))
+    json.jadd(o, "tags", a)
+    println(json.tojson(o))
+
+    p := json.jparse("{\"n\":42,\"s\":\"hi\"}")
+    println(itoa(json.jget(p, "n").i))
+    println(json.jget(p, "s").s)
+
+    c := sync.counter()
+    scope {
+        spawn worker(c)
+        spawn worker(c)
+        spawn worker(c)
+        spawn worker(c)
+    }
+    println(itoa(sync.cval(c)))
+
+    println(itoa(time.unix_ms()))
+    time.sleep_ms(1)
+    println("done")
+}
+
+fn worker(c: shared) {
+    i := 0
+    for i < 1000 {
+        sync.cinc(c)
+        i = i + 1
+    }
+}

@@ -1,0 +1,79 @@
+// B4: function values + closures
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn sub(a: int, b: int) -> int {
+    return a - b
+}
+
+fn zero() -> int {
+    return 42
+}
+
+fn apply(f: fn(int, int) -> int, x: int, y: int) -> int {
+    return f(x, y)
+}
+
+fn pick(which: int) -> fn(int, int) -> int {
+    if which == 0 {
+        return add
+    }
+    return sub
+}
+
+fn main() {
+    // named fn value + indirect call
+    f := add
+    assert(f(2, 3) == 5)
+    // reassignment
+    f = sub
+    assert(f(10, 4) == 6)
+    // fn value as arg
+    assert(apply(add, 3, 4) == 7)
+    assert(apply(sub, 3, 4) == -1)
+    // fn value as return + immediate call
+    assert(pick(0)(1, 2) == 3)
+    assert(pick(1)(10, 2) == 8)
+    // zero-arg fn value
+    z := zero
+    assert(z() == 42)
+    // fn values in a slice
+    ops := mkslice(fn(int, int) -> int, 2)
+    ops[0] = add
+    ops[1] = sub
+    assert(ops[0](5, 5) == 10)
+    assert(ops[1](5, 5) == 0)
+    // closure: capture by value
+    n := 100
+    addn := { |x: int| return x + n }
+    assert(addn(5) == 105)
+    // copy capture: mutating n later does not change the closure
+    n = 200
+    assert(addn(5) == 105)
+    // closure captures multiple vars
+    a := 7
+    b := 8
+    ab := { |x: int| return x + a + b }
+    assert(ab(1) == 16)
+    // closure passed as a fn value
+    assert(apply({ |x: int, y: int| return x * y }, 6, 7) == 42)
+    // closure with inferred return through if/else
+    neg := { |x: int|
+        if x > 0 {
+            return 0 - x
+        }
+        return x
+    }
+    assert(neg(9) == -9)
+    assert(neg(-3) == -3)
+    // closure capturing a fn value
+    base := add
+    via := { |x: int, y: int| return base(x, y) * 2 }
+    assert(via(3, 4) == 14)
+    // closure stored + invoked later
+    stash := mkslice(fn(int) -> int, 1)
+    stash[0] = addn
+    assert(stash[0](5) == 105)
+    println("fnval ok")
+}

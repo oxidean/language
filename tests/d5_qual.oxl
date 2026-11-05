@@ -1,0 +1,17 @@
+// d5 module qualification: namespaces, `as` alias, selective flatten,
+// and two modules exporting the same name coexisting
+import "d5a"
+
+import "d5b"
+
+import "std/strings" as s
+
+import "std/strings".{trim}
+
+fn main() {
+    assert(d5a.f() == 1)
+    assert(d5b.f() == 2)
+    assert(s.trim("  x  ") == "x")
+    assert(trim("  y  ") == "y")
+    println("d5 qual ok")
+}

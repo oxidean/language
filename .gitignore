@@ -1,0 +1,12 @@
+target/
+a.out
+out.c
+pilot.db*
+*.o
+srv.pid
+srv.log
+/core
+/core.[0-9]*
+/rt.c
+/rt.h
+examples/gui-todo/todo

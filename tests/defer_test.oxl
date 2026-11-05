@@ -1,0 +1,44 @@
+import "std/testing"
+
+fn dmark(x: int) {
+    println(itoa(x))
+}
+
+fn lifo() -> int {
+    defer dmark(1)
+    defer dmark(2)
+    defer dmark(3)
+    return 0
+}
+
+fn errpath() -> [int, err] {
+    defer dmark(9)
+    if true {
+        return 0, nil
+    }
+    return 0, nil
+}
+
+fn loopdef() {
+    // per-iteration registration, captured by value: drains 2 1 0
+    i := 0
+    for i < 3 {
+        defer dmark(i)
+        i = i + 1
+    }
+}
+
+fn untaken(c: int) {
+    if c > 100 {
+        defer dmark(99)
+    }
+    defer dmark(7)
+}
+
+fn main() {
+    i := lifo()
+    [v, e] = errpath()
+    loopdef()
+    untaken(0)
+    println("done")
+}

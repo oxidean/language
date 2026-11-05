@@ -1,0 +1,55 @@
+// simple CLI pilot: greets by name, counts args — exercises argv,
+// string ops, [v, err], and the toolchain end to end.
+//
+//   oxl run examples/cli/main.oxl -- Jesse 3
+//   → "hello, Jesse" / 0 / 1 / 2
+fn greet(name: str) -> str {
+    return "hello, " + name
+}
+
+fn parse_count(s: str) -> [int, err] {
+    if len(s) == 0 {
+        return 0, 1
+    }
+    // digits only — atoi stops at the first non-digit, so "2oops"
+    // would silently pass as 2 without this check
+    i := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if c < 48 || c > 57 {
+            return 0, 2
+        }
+        i = i + 1
+    }
+    // beyond int32 digit-count an atoi overflow silently clamps
+    if len(s) > 9 {
+        return 0, 2
+    }
+    n := atoi(s)
+    if n <= 0 {
+        return 0, 2
+    }
+    return n, nil
+}
+
+fn main() {
+    n := argc()
+    if n < 2 {
+        println("usage: cli <name> [count]")
+        exit(2)
+    }
+    println(greet(argv(1)))
+
+    if n >= 3 {
+        [c, err] = parse_count(argv(2))
+        if err != nil {
+            println("bad count arg")
+            exit(2)
+        }
+        i := 0
+        for i < c {
+            println(itoa(i))
+            i = i + 1
+        }
+    }
+}

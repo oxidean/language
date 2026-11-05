@@ -1,0 +1,403 @@
+// std/http — minimal HTTP/1.1 server written in the language over libc
+// sockets. Import with `import "std/http"` and hand `serve` a Handler:
+//
+//   interface Handler { route(method: str, path: str, body: str) -> Resp }
+//   fn (a App) route(method: str, path: str, body: str) -> Resp { ... }
+//   fn main() { serve(8080, App{}) }
+//
+// `h.route` is dispatched per request on the blocking pool; it returns a
+// Resp — the status becomes the response's HTTP status line and the body
+// is sent as text/plain.
+extern fn socket(domain: int, ty: int, proto: int) -> int
+
+// SO_REUSEADDR + sockaddr_in layout differ per OS — runtime owns both
+extern fn rt_set_reuseaddr(fd: int) -> int
+
+extern fn rt_bind_any(fd: int, port: int) -> int
+
+extern fn listen(fd: int, backlog: int) -> int
+
+extern fn accept(fd: int, addr: mut sockaddr, len: mut intp) -> int
+
+extern fn read(fd: int, buf: mut void, n: int) -> int
+
+extern fn write(fd: int, buf: cstr, n: int) -> int
+
+extern fn close(fd: int) -> int
+
+// explicit release for `own ?` buffers (mkbuf) — scope arenas don't
+// reclaim them, so a per-request scratch must be freed by hand
+extern fn rt_free(p: own void)
+
+// a client that resets mid-write must not kill the process before
+// write() returns EPIPE — runtime wrapper (libc signal can't be
+// extern'd portably: its real prototype clashes with int args)
+extern fn rt_sigpipe_ignore()
+
+// heap try-scope for per-conn trap containment — the runtime's
+// documented contract (rt_scope_try): join returns the trap code
+// instead of propagating it to the parent scope
+extern fn rt_scope_new() -> own void
+
+extern fn rt_scope_join_free(s: own void) -> int
+
+struct sockaddr { a: int, b: int } // 16 bytes: sockaddr_in fits
+
+struct intp { v: int }
+
+/// handler result: the HTTP status code plus the text/plain body
+/// ctype selects content-type; empty falls back to text/plain
+struct Resp { status: int, body: str, ctype: str }
+
+/// read_request result — status 0 ok · 400 malformed/never-terminated ·
+/// 413 body over cap; on non-0 the caller writes the status and returns
+struct ReqRead { status: int, req: str, body: str }
+
+/// request handler — implement `route` on your app struct and pass it
+/// to `serve`; dispatched per connection on the blocking pool
+interface Handler { route(method: str, path: str, body: str) -> Resp }
+
+fn status_text(status: int) -> str {
+    if status == 200 {
+        return "OK"
+    }
+    if status == 201 {
+        return "Created"
+    }
+    if status == 400 {
+        return "Bad Request"
+    }
+    if status == 413 {
+        return "Payload Too Large"
+    }
+    if status == 404 {
+        return "Not Found"
+    }
+    if status == 405 {
+        return "Method Not Allowed"
+    }
+    if status == 500 {
+        return "Internal Server Error"
+    }
+    return "Status"
+}
+
+/// ctype is caller-controlled — a handler that derives it from request
+/// data could inject response headers with CR/LF, so it lands in the
+/// same text/plain fallback as an empty value
+fn has_crlf(s: str) -> bool {
+    i := 0
+    for i < len(s) {
+        b := byteat(s, i)
+        if b == 13 || b == 10 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn http_resp_ct(status: int, body: str, ctype: str) -> str {
+    ct := ctype
+    if len(ct) == 0 || has_crlf(ct) {
+        ct = "text/plain"
+    }
+    return "HTTP/1.1 " + itoa(status) + " " + status_text(status) + "\r\ncontent-type: " + ct + "\r\ncontent-length: " + itoa(len(body)) + "\r\nconnection: close\r\n\r\n" + body
+}
+
+fn http_resp(status: int, body: str) -> str {
+    return http_resp_ct(status, body, "")
+}
+
+/// in-flight connection cap — accept()s past it are closed at once so
+/// a flood can't pile up unbounded blocking-pool threads
+let MAX_CONN = 64
+
+/// request body cap — bigger uploads get a 413 instead of a read loop
+let MAX_BODY = 1048576
+
+/// whole-request budget (ms) — set_rcvtimo caps each read at 10s, but a
+/// client feeding a byte every 9s would hold the conn forever without
+/// a fixed deadline measured from request start
+let REQ_MS = 30000
+
+/// release the conn slot and the fd on EVERY exit — normal return,
+/// early read failure, and handler trap (the runtime drains task
+/// defers on trap unwind, so a trapping route can't leak either)
+fn conn_cleanup(fd: int, inflight: shared) {
+    close(fd)
+    sadd(inflight, -1)
+}
+
+/// write() may return short — loop until the whole response is on the
+/// wire or the conn dies (n <= 0 covers EPIPE + resets). Dropping the
+/// raw return would silently truncate bodies on a partial write.
+fn write_all(fd: int, s: str) {
+    off := 0
+    for off < len(s) {
+        n := write(fd, cstr(substr(s, off, len(s))), len(s) - off)
+        if n <= 0 {
+            return
+        }
+        off = off + n
+    }
+}
+
+/// runs one request through the handler and writes the response.
+/// Spawned inside the conn's try-scope — a trap in here marks only
+/// that scope, so serve's shared scope and every sibling connection
+/// survive a bad handler
+fn route_serve(h: Handler, method: str, path: str, body: str, fd: int) {
+    r := h.route(method, path, body)
+    resp := http_resp_ct(r.status, r.body, r.ctype)
+    write_all(fd, resp)
+}
+
+/// lowercase copy for case-insensitive header lookup — header names
+/// are case-insensitive but find() is byte-exact
+fn lwr(s: str) -> str {
+    buf := mkbuf(len(s) + 1)
+    i := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if c >= 65 && c <= 90 {
+            c = c + 32
+        }
+        poke8(buf, i, c)
+        i = i + 1
+    }
+    out := bufstr(buf, len(s))
+    rt_free(buf)
+    return out
+}
+
+/// index of needle in s at or after `from`, -1 when absent — find()
+/// takes no offset, and substr()-copying the remaining block per match
+/// allocates ~16KiB x N on repeated headers (request-smuggling inputs
+/// are exactly the many-match case)
+fn find_from(s: str, needle: str, from: int) -> int {
+    last := len(s) - len(needle)
+    i := from
+    for i <= last {
+        j := 0
+        for j < len(needle) && byteat(s, i + j) == byteat(needle, j) {
+            j = j + 1
+        }
+        if j == len(needle) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// Content-Length value from a header block; -1 = malformed or
+/// conflicting duplicates, 0 = absent. Matches only at header-line
+/// starts so a request-target or x-content-length lookalike can't
+/// inject a length, and every occurrence must carry the same trimmed
+/// value — a disagreement is a smuggling attempt, not a pick-one (CWE-444)
+fn content_length(req: str, hdr_end: int) -> int {
+    hdrs := lwr(substr(req, 0, hdr_end))
+    v := 0
+    seen := false
+    i := find_from(hdrs, "\r\ncontent-length:", 0)
+    for i >= 0 {
+        j := i + 17
+        for j < len(hdrs) && (byteat(hdrs, j) == 32 || byteat(hdrs, j) == 9) {
+            j = j + 1
+        }
+        w := 0
+        nd := 0
+        for j < len(hdrs) && byteat(hdrs, j) >= 48 && byteat(hdrs, j) <= 57 {
+            w = w * 10 + (byteat(hdrs, j) - 48)
+            if w > MAX_BODY {
+                return w // past the cap — the caller answers 413
+            }
+            nd = nd + 1
+            j = j + 1
+        }
+        for j < len(hdrs) && (byteat(hdrs, j) == 32 || byteat(hdrs, j) == 9) {
+            j = j + 1
+        }
+        // value must end the line (or the header block): "12x" is malformed
+        if nd == 0 || j < len(hdrs) && byteat(hdrs, j) != 13 {
+            return -1
+        }
+        if seen && w != v {
+            return -1 // conflicting duplicates — refuse to pick one
+        }
+        v = w
+        seen = true
+        i = find_from(hdrs, "\r\ncontent-length:", j)
+    }
+    return v
+}
+
+/// read a full request. One read() is NOT a request — TCP splits
+/// segments anywhere, so >4KiB bodies and split header/body deliveries
+/// (curl's Expect: 100-continue) silently truncate. Accumulate until
+/// the header terminator, then drain exactly Content-Length bytes.
+fn read_request(fd: int) -> ReqRead {
+    scratch := mkbuf(4096)
+    req := ""
+    hdr_end := -1
+    deadline := now_ms() + REQ_MS
+    for hdr_end < 0 && len(req) <= 16384 {
+        if now_ms() > deadline {
+            rt_free(scratch)
+            return ReqRead{status: 400, req: "", body: ""}
+        }
+        n := read(fd, scratch, 4095)
+        if n <= 0 {
+            rt_free(scratch)
+            return ReqRead{status: 400, req: "", body: ""}
+        }
+        req = req + bufstr(scratch, n)
+        hdr_end = find(req, "\r\n\r\n")
+    }
+    if hdr_end < 0 {
+        rt_free(scratch) // headers never terminated inside the 16KiB cap
+        return ReqRead{status: 400, req: "", body: ""}
+    }
+    cl := content_length(req, hdr_end)
+    if cl < 0 {
+        rt_free(scratch)
+        return ReqRead{status: 400, req: "", body: ""}
+    }
+    // no chunked decoding: a TE body has no length to drain, so the
+    // chunk bytes stay on the wire and desync the next request — refuse
+    if find_from(lwr(substr(req, 0, hdr_end)), "\r\ntransfer-encoding:", 0) >= 0 {
+        rt_free(scratch)
+        return ReqRead{status: 400, req: "", body: ""}
+    }
+    if cl > MAX_BODY {
+        rt_free(scratch)
+        return ReqRead{status: 413, req: "", body: ""}
+    }
+    // copy the already-arrived tail, then drain into a sized buffer —
+    // `req + chunk` accumulation would go quadratic on large bodies
+    tail := substr(req, hdr_end + 4, len(req))
+    have := len(tail)
+    if have > cl {
+        have = cl // pipelined bytes past the length are dropped
+    }
+    bbuf := mkbuf(cl + 1)
+    i := 0
+    for i < have {
+        poke8(bbuf, i, byteat(tail, i))
+        i = i + 1
+    }
+    for have < cl {
+        if now_ms() > deadline {
+            rt_free(bbuf)
+            rt_free(scratch)
+            return ReqRead{status: 400, req: "", body: ""}
+        }
+        want := cl - have
+        if want > 4095 {
+            want = 4095
+        }
+        n := read(fd, scratch, want) // never past cl: bbuf is cl+1
+        if n <= 0 {
+            rt_free(bbuf)
+            rt_free(scratch)
+            return ReqRead{status: 400, req: "", body: ""}
+        }
+        chunk := bufstr(scratch, n)
+        j := 0
+        for j < n {
+            poke8(bbuf, have + j, byteat(chunk, j))
+            j = j + 1
+        }
+        have = have + n
+    }
+    body := bufstr(bbuf, cl)
+    rt_free(bbuf)
+    rt_free(scratch)
+    return ReqRead{status: 0, req: req, body: body}
+}
+
+fn handle_conn(h: Handler, fd: int, inflight: shared) {
+    defer conn_cleanup(fd, inflight)
+    // conn-scoped arena: the request buffer + parse garbage die when the
+    // handler returns instead of accumulating in the serve scope
+    scope {
+        set_rcvtimo(fd, 10) // slowloris guard: reads give up after 10s
+        set_sndtimo(fd, 10) // a client that stops reading can't pin the conn in write()
+        rr := read_request(fd)
+        if rr.status != 0 {
+            resp := http_resp(rr.status, status_text(rr.status) + "\n")
+            write_all(fd, resp)
+        } else {
+            // "METHOD PATH HTTP/1.x" — split on the first two spaces; a
+            // line missing either (or opening with one) is malformed —
+            // substr on a -1/0 hit would dispatch a garbage route.
+            // search inside the request LINE only: a space in a header
+            // value (e.g. Host: a b) would otherwise split the block
+            eol := find(rr.req, "\r\n")
+            line := substr(rr.req, 0, eol)
+            sp1 := find(line, " ")
+            sp2 := -1
+            rest := ""
+            if sp1 > 0 {
+                rest = substr(line, sp1 + 1, len(line))
+                sp2 = find(rest, " ")
+            }
+            if sp1 <= 0 || sp2 <= 0 {
+                resp := http_resp(400, "malformed request line\n")
+                write_all(fd, resp)
+            } else {
+                path := substr(rest, 0, sp2)
+                method := substr(line, 0, sp1)
+
+                // per-conn trap containment: route_serve runs as a nested
+                // task inside a heap try-scope. Its trap stops at
+                // rt_scope_join_free instead of propagating through serve's
+                // shared spawn scope and cancelling sibling handlers
+                rsc := rt_scope_new()
+                spawnBlocking route_serve(h, method, path, rr.body, fd)
+                if rt_scope_join_free(rsc) != 0 {
+                    resp := http_resp(500, "handler trapped\n")
+                    write_all(fd, resp)
+                }
+            }
+        }
+    }
+}
+
+/// listen+serve on port; dispatches `h.route` per request
+fn serve(port: int, h: Handler) {
+    rt_sigpipe_ignore() // reset clients must not kill us on write
+    srv := socket(2, 1, 0) // AF_INET, SOCK_STREAM
+    addr := new(sockaddr)
+    one := new(intp)
+    one.v = 16 // peer-addr buffer size for accept()
+    if rt_set_reuseaddr(srv) != 0 || rt_bind_any(srv, port) != 0 || listen(srv, 64) != 0 {
+        // a failed bind/listen makes every accept return -1 at once:
+        // the serve loop would spin at 100% CPU serving nothing
+        close(srv)
+        println("serve: bind/listen failed on :" + itoa(port))
+        exit(1)
+    }
+    println("listening on :" + itoa(port))
+
+    inflight := mkshared(0)
+    scope {
+        for true {
+            cfd := accept(srv, addr, one)
+            if cfd >= 0 {
+                // claim a slot before spawning; sadd returns the OLD count
+                if sadd(inflight, 1) >= MAX_CONN {
+                    sadd(inflight, -1)
+                    close(cfd)
+                } else {
+                    spawnBlocking handle_conn(h, cfd, inflight)
+                }
+            } else {
+                // persistent accept errors (EMFILE and friends) would
+                // spin the accept loop — back off briefly and retry
+                usleep(50000)
+            }
+        }
+    }
+}

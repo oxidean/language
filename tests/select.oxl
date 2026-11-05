@@ -1,0 +1,107 @@
+// A2: select — multi-chan wait, uniform pick, timeout, else
+import "std/time"
+
+fn feeder(c: chan, lo: int, n: int) {
+    i := 0
+    for i < n {
+        send(c, lo + i)
+        i = i + 1
+    }
+}
+
+fn slow_feeder(c: chan) {
+    time.sleep_ms(50)
+    send(c, 42)
+}
+
+fn sender9(c: chan) {
+    send(c, 9)
+}
+
+fn main() {
+    // 1. two-chan wait: interleaved drains
+    c1 := mkchan()
+    c2 := mkchan()
+    scope {
+        spawn feeder(c1, 100, 3)
+        spawn feeder(c2, 200, 3)
+        got := 0
+        sum := 0
+        for got < 6 {
+            select {
+                v := recv(c1) => {
+                    sum = sum + v
+                }
+                v := recv(c2) => {
+                    sum = sum + v
+                }
+            }
+            got = got + 1
+        }
+        assert(sum == 303 + 603)
+    }
+    println("select two-chan ok")
+
+    // 2. timeout wins when nothing is ready
+    scope {
+        c3 := mkchan()
+        select {
+            v := recv(c3) => {
+                println("FAIL tmo recv")
+                assert(false)
+            }
+            timeout(30) => {
+                println("select timeout ok")
+            }
+        }
+    }
+
+    // 3. recv wins over a longer timeout
+    scope {
+        c4 := mkchan()
+        spawn slow_feeder(c4)
+        hit := 0
+        select {
+            v := recv(c4) => {
+                hit = v
+            }
+            timeout(500) => {
+                hit = -1
+            }
+        }
+        assert(hit == 42)
+        println("select recv-vs-tmo ok")
+    }
+
+    // 4. else arm: non-blocking miss, then ready chan wins
+    scope {
+        c5 := mkchan()
+        hit := 0
+        select {
+            v := recv(c5) => {
+                hit = v
+            }
+            else => {
+                hit = 7
+            }
+        }
+        assert(hit == 7)
+        spawn sender9(c5)
+        // poll until the parked sender is visible — exercises else+ready
+        hit = -1
+        for hit == -1 {
+            select {
+                v := recv(c5) => {
+                    hit = v
+                }
+                else => {
+                    hit = -1
+                }
+            }
+        }
+        assert(hit == 9)
+        println("select else ok")
+    }
+
+    println("select done")
+}

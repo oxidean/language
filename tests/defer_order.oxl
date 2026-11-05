@@ -1,0 +1,23 @@
+// B5 return-operand timing: `return expr` evaluates expr AFTER the
+// defer drain. A susp-capable operand must start (and park) only once
+// defers have run — a defer that writes state the operand reads must
+// be visible to it.
+fn read_after_sleep(g: shared) -> int {
+    msleep(1)
+    return sget(g)
+}
+
+fn outer(g: shared) -> int {
+    defer sset(g, 42)
+    return read_after_sleep(g)
+}
+
+fn main() {
+    g := mkshared(1)
+    v := outer(g)
+    if v != 42 {
+        println("FAIL: operand saw " + itoa(v) + " (pre-drain), want 42")
+        exit(1)
+    }
+    println("defer order ok")
+}

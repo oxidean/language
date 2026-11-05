@@ -1,0 +1,33 @@
+// bootstrap/lexer.oxl — token dump driver over bootstrap/lexlib.
+//   oxl run bootstrap/lexer.oxl -- examples/hello.oxl
+import "lexlib"
+
+// readfile signals failure as "" — the same result a legitimately
+// empty file produces — so probe open() first to tell them apart
+extern fn open(path: cstr, flags: int) -> int
+
+extern fn close(fd: int) -> int
+
+fn main() {
+    if argc() < 2 {
+        println("usage: lexer <file.oxl>")
+        exit(1)
+    }
+    fd := open(cstr(argv(1)), 0) // O_RDONLY
+    if fd < 0 {
+        println("cannot read " + argv(1))
+        exit(1)
+    }
+    v := close(fd)
+    src := readfile(argv(1))
+    // empty source is fine: lex just yields the EOF token
+    toks := lexlib.lex(src)
+    n := 0
+    cur := toks
+    for cur != nil {
+        println(lexlib.kind_name(cur.kind) + "\t" + cur.text)
+        n = n + 1
+        cur = cur.next
+    }
+    println(itoa(n) + " tokens")
+}

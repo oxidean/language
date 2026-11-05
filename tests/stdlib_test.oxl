@@ -1,0 +1,30 @@
+import "std/strings"
+
+import "std/testing"
+
+fn test_strings() {
+    testing.expect(strings.startswith("hello world", "hello"), "startswith")
+    testing.expect(strings.endswith("hello world", "world"), "endswith")
+    testing.expect(strings.contains("abc", "b"), "contains")
+    testing.expect_streq(strings.trim("  hi  "), "hi", "trim")
+    testing.expect_streq(strings.upper("abc"), "ABC", "upper")
+    parts := strings.split("a,b,c", ",")
+    testing.expect_streq(parts.v, "a", "split head")
+    testing.expect_streq(strings.join(parts, "|"), "a|b|c", "join")
+}
+
+fn test_loops() {
+    i := 0
+    n := 0
+    for i < 10 {
+        i = i + 1
+        if i == 3 {
+            continue
+        }
+        if i > 6 {
+            break
+        }
+        n = n + i
+    }
+    testing.expect_eq(n, 18, "break/continue")
+}

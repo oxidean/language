@@ -1,0 +1,27 @@
+// oxl test runs every fn test_*() and reports ok per function.
+// `oxl test examples/smoke_test.oxl`
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn test_add() {
+    assert(add(2, 3) == 5)
+}
+
+fn test_strings() {
+    s := "a" + "b"
+    assert(len(s) == 2)
+}
+
+fn test_chan() {
+    ch := mkchan()
+    scope {
+        spawn send(ch, 7)
+        v := recv(ch)
+        assert(v == 7)
+    }
+}
+
+fn main() {
+    println("not run under `oxl test`")
+}

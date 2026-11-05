@@ -1,0 +1,142 @@
+// D3: methods + interface dispatch
+
+// --- value + pointer receivers, both call shapes ---
+struct Point { x: int, y: int }
+
+fn (p Point) norm() -> int {
+    return p.x * p.x + p.y * p.y
+}
+
+fn (p Point) sum() -> int {
+    return p.x + p.y
+}
+
+fn (p mut Point) shift(dx: int, dy: int) {
+    p.x = p.x + dx
+    p.y = p.y + dy
+}
+
+// --- interface-typed values: two impls through one variable ---
+interface Writer { write(s: str) -> int }
+
+struct Upper { n: int }
+
+fn (u Upper) write(s: str) -> int {
+    return u.n + len(s)
+}
+
+struct Lower { k: int }
+
+fn (l Lower) write(s: str) -> int {
+    return l.k - len(s)
+}
+
+fn emit(w: Writer, s: str) -> int {
+    return w.write(s)
+}
+
+// --- generic with a method constraint: dispatch through the bound ---
+fn use[T Writer](v: T, s: str) -> int {
+    return v.write(s)
+}
+
+// --- iface return + pair-typed method ---
+interface Counter { next() -> [int, err] }
+
+struct Seq { i: int }
+
+fn (s mut Seq) next() -> [int, err] {
+    s.i = s.i + 1
+    return s.i, nil
+}
+
+fn bump(c: Counter) -> [int, err] {
+    return c.next()
+}
+
+// --- enum receivers, own receivers, generic methods pinned by a sig ---
+enum Shape { Circle(int), Square, }
+
+fn (s Shape) area() -> int {
+    return match s {
+        Shape.Circle(r) => r * r * 3
+        Shape.Square => 0
+    }
+}
+
+interface Area { area() -> int }
+
+struct Res { n: int }
+
+fn (r own Res) consume() -> int {
+    return r.n
+}
+
+fn (r Res) get() -> int {
+    return r.n
+}
+
+interface Getter { get() -> int }
+
+struct Id { n: int }
+
+fn (i Id) ident[T any](x: T) -> T {
+    return x
+}
+
+interface Ident { ident(x: int) -> int }
+
+fn main() {
+    // method call sugar + the equivalent free-fn shape
+    p := Point{x: 3, y: 4}
+    assert(p.norm() == 25)
+    assert(norm(p) == 25)
+    assert(p.sum() == 7)
+
+    // mut receiver writes through
+    p.shift(1, 1)
+    assert(p.x == 4 && p.y == 5)
+
+    // an iface var holds either impl; dispatch picks correctly
+    let w: Writer = Upper{n: 10}
+    assert(w.write("abc") == 13)
+    w = Lower{k: 20}
+    assert(w.write("abc") == 17)
+    // iface-typed param dispatches the same way
+    assert(emit(Upper{n: 1}, "hi") == 3)
+    assert(emit(Lower{k: 5}, "hi") == 3)
+    // nil iface compares against nil
+    let wn: Writer = nil
+    assert(wn == nil)
+    assert(w != nil)
+
+    // generic method constraint: same call monomorphizes onto T.m
+    assert(use(Upper{n: 2}, "ab") == 4)
+    assert(use(Lower{k: 9}, "ab") == 7)
+
+    // pair-returning method through the vtable
+    c := Seq{i: 41}
+    [v, e] = bump(c)
+    assert(e == nil && v == 42)
+
+    // enum receiver (match inside), enum impl boxed into an iface
+    s := Shape.Circle(2)
+    assert(s.area() == 12)
+    assert(Shape.Square.area() == 0)
+    let a: Area = Shape.Circle(1)
+    assert(a.area() == 3)
+
+    // value receiver on an own var derefs; own receiver consumes
+    r := new(Res)
+    r.n = 7
+    assert(r.get() == 7)
+    assert(r.consume() == 7)
+    let g: Getter = Res{n: 5}
+    assert(g.get() == 5)
+
+    // a generic method satisfies when the iface sig pins its ty params
+    let d: Ident = Id{n: 0}
+    assert(d.ident(9) == 9)
+
+    println("methods ok")
+}

@@ -1,0 +1,157 @@
+// HTTP CRUD + SQLite pilot — the v0.0.1 success bar for services.
+// Now built on std/http: the server plumbing lives in stdlib, this file
+// only declares the route handler.
+//
+//   oxl run examples/http-crud-sqlite/main.oxl
+//   curl localhost:8080/items             → list rows
+//   curl -d 'widget' localhost:8080/items → insert row
+import "std/http"
+
+import "std/json"
+
+// one shared connection for the whole process — sqlite's serialized
+// mode (THREADSAFE=1) provides the write lock; no per-request open/close.
+// Written once here before serve() spawns handlers and read-only after,
+// so it stays a plain global rather than Shared<T> — the shared-cell
+// rule covers cross-thread mutation, not process-wide constants.
+let db = sqlite_open(cstr("pilot.db"))
+
+struct App { d: int }
+
+// control bytes have no place in a stored name: NUL truncates the row
+// at read (rt_sqlite_query treats columns as C strings) and raw bytes
+// < 0x20 would make the JSON response invalid — jstr doesn't escape
+// them. One byteat scan rejects the whole class, newlines included.
+fn has_ctl(s: str) -> bool {
+    i := 0
+    for i < len(s) {
+        if byteat(s, i) < 32 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// SQLite stores whatever bytes it is handed as TEXT and jstr copies them
+// into the JSON response verbatim — a lone 0xFF produces output strict
+// clients cannot parse. Structural UTF-8 check: ASCII passes, lead bytes
+// carry their continuation count, continuations must be 0x80-0xBF.
+fn valid_utf8(s: str) -> bool {
+    i := 0
+    for i < len(s) {
+        b := byteat(s, i)
+        if b < 128 {
+            i = i + 1
+            continue
+        }
+        need := 0
+        if b >= 194 && b <= 223 {
+            need = 1
+        } else if b >= 224 && b <= 239 {
+            need = 2
+        } else if b >= 240 && b <= 244 {
+            need = 3
+        } else {
+            return false
+        }
+        i = i + 1
+        for need > 0 {
+            if i >= len(s) {
+                return false
+            }
+            c := byteat(s, i)
+            if c < 128 || c > 191 {
+                return false
+            }
+            i = i + 1
+            need = need - 1
+        }
+    }
+    return true
+}
+
+fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
+    status := 404
+    body := "{\"error\":\"not found — try /items\"}\n"
+    if path == "/items" {
+        if method == "POST" {
+            status = 201
+            if has_ctl(reqbody) || !valid_utf8(reqbody) {
+                // sqlite_query emits newline-delimited rows — a stored
+                // newline would also split one row into two on read, and
+                // invalid UTF-8 would make the JSON response unparseable.
+                status = 400
+                body = "{\"error\":\"name must be valid UTF-8 without control bytes\"}\n"
+            } else if sqlite_exec_bind(db, cstr("INSERT INTO items VALUES(?)"), reqbody) != 0 {
+                // ^ request body is bound, never concatenated into SQL
+                status = 500
+                body = "{\"error\":\"insert failed\"}\n"
+            } else {
+                r := json.jobj()
+                json.jadd(r, "created", json.jstr(reqbody))
+                body = json.tojson(r) + "\n"
+            }
+        } else if method == "GET" {
+            if sqlite_exec(db, cstr("SELECT rowid, name FROM items")) != 0 {
+                // sqlite_exec can't return rows, but its status answers
+                // what sqlite_query's bare "" conflates: a failed SELECT
+                // vs. an empty table. Failure is a 500, not {items:[]}.
+                status = 500
+                body = "{\"error\":\"query failed\"}\n"
+            } else {
+                status = 200
+                // rows arrive as "id|name" lines — reshape into real
+                // JSON. Walk the buffer in place: strings.split copies
+                // the remaining suffix at each delimiter — O(n²) on a
+                // large table.
+                qrows := sqlite_query(db, cstr("SELECT rowid, name FROM items"))
+                // jadd rescans child->end per call — the JArrB builder
+                // keeps the tail so listing N rows stays O(N)
+                items := json.jarrb()
+                pos := 0
+                for pos < len(qrows) {
+                    e := pos
+                    for e < len(qrows) && byteat(qrows, e) != 10 {
+                        e = e + 1
+                    }
+                    row := substr(qrows, pos, e)
+                    pos = e + 1
+                    if len(row) > 0 {
+                        item := json.jobj()
+                        sep := find(row, "|")
+                        idstr := ""
+                        nm := row
+                        if sep >= 0 {
+                            idstr = substr(row, 0, sep)
+                            nm = substr(row, sep + 1, len(row))
+                        }
+                        json.jadd(item, "id", json.jint(atoi(idstr)))
+                        json.jadd(item, "name", json.jstr(nm))
+                        json.jarrb_add(items, item)
+                    }
+                }
+                res := json.jobj()
+                json.jadd(res, "items", json.jarrb_arr(items))
+                body = json.tojson(res) + "\n"
+            }
+        } else {
+            // /items speaks POST+GET only — other methods get a status
+            // instead of falling through to the item list
+            status = 405
+            body = "{\"error\":\"method not allowed\"}\n"
+        }
+    }
+    return http.Resp{status: status, body: body, ctype: "application/json"}
+}
+
+fn main() {
+    // table exists before the first request — a fresh db must serve
+    // {items:[]}, not a query error, and the SELECT probe above only
+    // means "failed" once the table is guaranteed to exist.
+    if sqlite_exec(db, cstr("CREATE TABLE IF NOT EXISTS items(name TEXT)")) != 0 {
+        println("pilot: db init failed")
+        exit(1)
+    }
+    http.serve(8080, App{d: 0})
+}

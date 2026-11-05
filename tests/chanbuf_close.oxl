@@ -1,0 +1,31 @@
+// A3 close on a non-empty buffered chan: the ring drains FIFO first,
+// then receivers read the closed state (the chan's slot word — 0 on a
+// buffered chan, which never uses the unbuffered `val` slot). Also
+// covers a receiver already parked on empty when close lands.
+import "std/time"
+
+fn parkrecv(c: chan, got: shared) {
+    v := recv(c) // parks on empty until close wakes it
+    sset(got, v)
+}
+
+fn main() {
+    c := mkchan(2)
+    send(c, 11)
+    send(c, 22)
+    close(c)
+    assert(recv(c) == 11) // buffered contents drain first, FIFO
+    assert(recv(c) == 22)
+    assert(recv(c) == 0) // closed state — never blocks again
+    assert(recv(c) == 0)
+
+    c2 := mkchan(2)
+    got := mkshared(0)
+    scope {
+        spawn parkrecv(c2, got)
+        time.sleep_ms(30) // let the receiver park on empty
+        close(c2)
+    }
+    assert(sget(got) == 0) // parked receiver woke with closed state
+    println("chanbuf close ok")
+}

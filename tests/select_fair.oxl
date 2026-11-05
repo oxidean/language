@@ -1,0 +1,42 @@
+// A2 select fairness: the pick must be uniform over the READY arms,
+// not over arm positions. With a never-ready third arm, a random-start
+// first-ready sweep lands on arm a with P=2/3 (starts at a, or wraps
+// through empty c back to a) — the fair pick is 1/2 each.
+//
+// Both arms are PRELOADED so every measured pick sees two ready arms:
+// live producers can lag behind the buffer and leave one arm empty,
+// and those correct single-ready picks would skew the count.
+fn main() {
+    n := 10000
+    a := mkchan(n)
+    b := mkchan(n)
+    c := mkchan() // never sends: keeps the ready set partial
+    i := 0
+    for i < n {
+        send(a, 1)
+        send(b, 2)
+        i = i + 1
+    }
+    na := 0
+    i = 0
+    for i < n {
+        select {
+            v := recv(a) => {
+                na = na + v // v is always 1: na counts a-picks
+            }
+            w := recv(b) => {}
+            x := recv(c) => {
+                na = na - x // unreachable — silences unused binding
+            }
+        }
+        i = i + 1
+    }
+    println("na=" + itoa(na))
+    // fair: na ≈ n/2; the positional sweep gives ≈ 2n/3 and fails
+    d := na - n / 2
+    if d < 0 {
+        d = -d
+    }
+    assert(d < n / 25)
+    println("select fair ok a=" + itoa(na))
+}
