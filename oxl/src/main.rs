@@ -625,7 +625,13 @@ fn pick_cc() -> String {
 // .exe spelled out or CreateProcess can't resolve it. Append rather than
 // with_extension — `-o app.debug` means app.debug.exe, not app.exe
 fn exe_out_name(out: PathBuf) -> PathBuf {
-    if cfg!(windows) && out.extension().map_or(true, |e| e != "exe") {
+    // extension compare is case-insensitive — `-o app.EXE` must not
+    // grow a second suffix; Windows resolves either spelling
+    let has_exe = out
+        .extension()
+        .and_then(|e| e.to_str())
+        .map_or(false, |e| e.eq_ignore_ascii_case("exe"));
+    if cfg!(windows) && !has_exe {
         let mut s = out.into_os_string();
         s.push(".exe");
         s.into()
