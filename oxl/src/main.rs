@@ -968,7 +968,17 @@ fn json_str<'a>(body: &'a str, key: &str) -> Option<String> {
 /// percent-encode every byte that is not unreserved and not `/`
 fn path_to_uri(p: &str) -> String {
     let mut out = String::from("file://");
+    // Windows paths need unix separators and the authority-form slash:
+    // D:\a\b -> file:///D:/a/b (POSIX /a/b already has one)
+    let mut p = p;
+    if p.len() >= 2 && p.as_bytes()[0].is_ascii_alphabetic() && p.as_bytes()[1] == b':' {
+        out.push('/');
+        out.push(p.as_bytes()[0] as char);
+        out.push(':');
+        p = &p[2..];
+    }
     for &b in p.as_bytes() {
+        let b = if b == b'\\' { b'/' } else { b };
         if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
             out.push(b as char);
         } else {
@@ -998,7 +1008,17 @@ fn uri_to_path(uri: &str) -> String {
         out.push(b[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    let mut p = String::from_utf8_lossy(&out).into_owned();
+    // a Windows file URI carries the drive behind the authority slash
+    // (file:///D:/a/b) — POSIX paths actually start with that slash
+    if p.len() >= 3
+        && p.as_bytes()[0] == b'/'
+        && p.as_bytes()[1].is_ascii_alphabetic()
+        && p.as_bytes()[2] == b':'
+    {
+        p.remove(0);
+    }
+    p
 }
 
 fn hex4(it: &mut std::str::Chars) -> Option<u32> {
