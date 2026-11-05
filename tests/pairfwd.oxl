@@ -55,8 +55,21 @@ fn wake() -> int {
     return nap()
 }
 
+// closure inside an iface pair fn: its inferred ret (Seq) is the
+// conv target, not the outer fn's Big — else the body emits an
+// RtIface into a struct-typed wrapper
+fn clouter() -> [Big, err] {
+    f := { |x: int| return Seq{i: x} }
+    s := f(50)
+    return s, nil
+}
+
 fn main() {
     assert(wake() == 5)
+    [vc, ec] = clouter()
+    assert(ec == nil)
+    [nc, e7] = vc.next()
+    assert(e7 == nil && nc == 51)
     [v, e] = fwd_iface()
     assert(e == nil)
     [n, e2] = v.next()

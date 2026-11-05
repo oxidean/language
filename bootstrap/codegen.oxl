@@ -2938,6 +2938,8 @@ fn gclosure(g: mut G, params: ref parser.NList, body: ref parser.Node) -> str {
     g.defers = nil
     save_ret := g.retk
     g.retk = 0
+    save_cret := g.cret
+    g.cret = xclret(g, body)
     wpush(g)
     wln(g, "static " + ret_c + " o_cl_" + sid + "(struct o_env_" + sid + " *_e" + psig + ") {")
     check.env_push(g.env)
@@ -2967,6 +2969,7 @@ fn gclosure(g: mut G, params: ref parser.NList, body: ref parser.Node) -> str {
     g.inframe = save_frame
     g.defers = save_def
     g.retk = save_ret
+    g.cret = save_cret
     // the value: env populated from the enclosing scope
     inits := ""
     cp = caps

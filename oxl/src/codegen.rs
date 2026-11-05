@@ -1757,6 +1757,7 @@ impl<'a> Gen<'a> {
         let saved_fslots = std::mem::take(&mut self.fslots);
         let saved_ret_pair = self.cur_ret_pair;
         self.cur_ret_pair = false;
+        let saved_ret_ty = std::mem::replace(&mut self.cur_ret_ty, ret.clone());
         let saved_defers = std::mem::take(&mut self.defers);
         let saved_fn = std::mem::replace(&mut self.cur_fn, format!("o_cl_{id}"));
         let _ = writeln!(self.out, "static {ret_c} o_cl_{id}(struct o_env_{id} *_e{psig}) {{");
@@ -1781,6 +1782,7 @@ impl<'a> Gen<'a> {
         self.in_frame = saved_frame;
         self.fslots = saved_fslots;
         self.cur_ret_pair = saved_ret_pair;
+        self.cur_ret_ty = saved_ret_ty;
         self.defers = saved_defers;
         self.cur_fn = saved_fn;
         // the value: escaping-heap env populated from the enclosing scope
