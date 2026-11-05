@@ -1,0 +1,46 @@
+// Regression: a sibling trap's descendant-cancel takes a temp pending
+// hold on a scope whose owner is parked joining it. When the temp drop
+// was the pending->0 transition, an orphan-only drop skipped the joiner
+// wake — the owner hung forever and the outer join deadlocked.
+// C's only pending holder is padder, whose scope D is packed with
+// chan-parked leaves: the trap's wake pass over D is slow enough that
+// padder always drains inside the hold window. run.sh asserts this
+// exits nonzero *quickly* — with the bug it hits the timeout instead.
+import "std/time"
+
+fn leaf() {
+    c := mkchan()
+    v := recv(c) // parks WK_RECV on D: force-woken + slows D's wake pass
+}
+
+fn padder() {
+    scope { // D: child of C
+        i := 0
+        for i < 8000 {
+            spawn leaf()
+            i = i + 1
+        }
+        c2 := mkchan()
+        v := recv(c2) // padder parks on C — C's only pending holder
+    }
+}
+
+fn owner() {
+    scope { // C: the descendant scope the trap sweeps
+        spawn padder()
+        // joins C here: parked WK_JOIN with pending==1 when trap lands
+    }
+}
+
+fn trapper() {
+    time.sleep_ms(1500) // let owner park + padder's leaves park
+    assert(false) // trap → descendant cancel sweeps C
+}
+
+fn main() {
+    scope {
+        spawn owner()
+        spawn trapper()
+    }
+    println("unreachable")
+}

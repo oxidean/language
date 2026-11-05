@@ -302,6 +302,18 @@ fi
 out=$(with_timeout 30 "$OXL" run tests/orphan_join.oxl)
 [ "$(tail -1 <<<"$out")" = "orphan-join ok" ] || { echo "FAIL orphan_join: $out"; exit 1; }
 
+# joiner lost-wakeup: a trap's descendant cancel temp-holds a scope
+# whose owner is parked joining it; if the temp drop is the pending->0
+# transition it must still wake the joiner. Build first so a compile
+# error fails instead of passing as a non-124 nonzero.
+"$OXL" build tests/cancel_join.oxl -o "$scratch/cancel_join" || {
+    echo "FAIL cancel_join: compile failed"; exit 1; }
+rc=0
+with_timeout 25 "$scratch/cancel_join" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
+    echo "FAIL cancel_join: expected trap exit, got rc=$rc"; exit 1
+fi
+
 echo "== a3 buffered channels =="
 out=$("$OXL" run tests/chanbuf.oxl)
 [ "$(tail -1 <<<"$out")" = "chanbuf done" ] || { echo "FAIL chanbuf: $out"; exit 1; }

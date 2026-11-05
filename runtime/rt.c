@@ -406,11 +406,11 @@ static void scope_cancel_tree(RtScope *s) {
         c->wnext = NULL;
         scope_cancel_wake(c);
         scope_cancel_tree(c);
-        int drain = 0;
-        pthread_mutex_lock(&c->mu);
-        if (--c->pending <= 0 && c->orphan) { c->dead = 1; drain = 1; }
-        pthread_mutex_unlock(&c->mu);
-        if (drain) scope_orphan_free(c);
+        /* release the temp hold through scope_done: descendants can be
+         * non-orphan with a parked joiner, and the pending->0 protocol
+         * (wake join_task / drain orphan / signal cv) is what releases
+         * them — an orphan-only drop would hang the scope's owner. */
+        scope_done(c);
     }
 }
 
@@ -497,11 +497,8 @@ static void task_release_frame(RtTask *t, int trapped) {
             pthread_mutex_unlock(&x->mu);
             if (!live) { scope_teardown(x); x = up; continue; }
             scope_cancel_wake(x);
-            int drain = 0;
-            pthread_mutex_lock(&x->mu);
-            if (--x->pending <= 0) { x->dead = 1; drain = 1; }
-            pthread_mutex_unlock(&x->mu);
-            if (drain) scope_orphan_free(x);
+            /* scope_done: same pending->0 drain for these orphans */
+            scope_done(x);
             x = up;
         }
     }
@@ -906,13 +903,7 @@ void rt_trap(int64_t code) {
          * owner hold drops with it); live ones drain later under their
          * last child's scope_done */
         for (RtScope *x = s; x; x = x->parent) {
-            if (x != t->scope) {
-                int drain = 0;
-                pthread_mutex_lock(&x->mu);
-                if (--x->pending <= 0) { x->dead = 1; drain = 1; }
-                pthread_mutex_unlock(&x->mu);
-                if (drain) scope_orphan_free(x);
-            }
+            if (x != t->scope) scope_done(x); /* chain orphan: drains on 0 */
             if (x == t->scope) break;
         }
         tls_task = NULL;
