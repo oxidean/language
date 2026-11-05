@@ -127,6 +127,26 @@ fn lwr(s: str) -> str {
     return out
 }
 
+/// index of needle in s at or after `from`, -1 when absent — find()
+/// takes no offset, and substr()-copying the remaining block per match
+/// allocates ~16KiB x N on repeated headers (request-smuggling inputs
+/// are exactly the many-match case)
+fn find_from(s: str, needle: str, from: int) -> int {
+    last := len(s) - len(needle)
+    i := from
+    for i <= last {
+        j := 0
+        for j < len(needle) && byteat(s, i + j) == byteat(needle, j) {
+            j = j + 1
+        }
+        if j == len(needle) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
 /// Content-Length value from a header block; -1 = malformed or
 /// conflicting duplicates, 0 = absent. Matches only at header-line
 /// starts so a request-target or x-content-length lookalike can't
@@ -136,10 +156,9 @@ fn content_length(req: str, hdr_end: int) -> int {
     hdrs := lwr(substr(req, 0, hdr_end))
     v := 0
     seen := false
-    pos := 0
-    i := find(hdrs, "\r\ncontent-length:")
+    i := find_from(hdrs, "\r\ncontent-length:", 0)
     for i >= 0 {
-        j := pos + i + 17
+        j := i + 17
         for j < len(hdrs) && (byteat(hdrs, j) == 32 || byteat(hdrs, j) == 9) {
             j = j + 1
         }
@@ -165,8 +184,7 @@ fn content_length(req: str, hdr_end: int) -> int {
         }
         v = w
         seen = true
-        pos = j
-        i = find(substr(hdrs, pos, len(hdrs)), "\r\ncontent-length:")
+        i = find_from(hdrs, "\r\ncontent-length:", j)
     }
     return v
 }
