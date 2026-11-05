@@ -1,0 +1,8 @@
+struct P { v: int }
+
+fn use(p: P) {}
+
+fn main() {
+    p := new(P)
+    use(p)
+}

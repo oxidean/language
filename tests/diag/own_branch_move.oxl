@@ -1,0 +1,11 @@
+struct P { v: int }
+
+fn take(p: own P) {}
+
+fn main() {
+    p := new(P)
+    if len("x") > 0 {
+        take(p)
+    }
+    take(p)
+}

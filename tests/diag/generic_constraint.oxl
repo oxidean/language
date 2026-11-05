@@ -1,0 +1,7 @@
+fn f[T any](x: T) -> T {
+    return x + x
+}
+
+fn main() {
+    println(f(1))
+}

@@ -1,0 +1,8 @@
+fn a() {}
+
+fn main() {
+    f := a
+    if f == a {
+        println(1)
+    }
+}

@@ -1,0 +1,8 @@
+fn bump(x: mut int) {
+    x = x + 1
+}
+
+fn main() {
+    v := 1
+    bump(v)
+}

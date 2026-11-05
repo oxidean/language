@@ -1,0 +1,4 @@
+fn main() {
+    s := "abc"
+    println(s["x"])
+}

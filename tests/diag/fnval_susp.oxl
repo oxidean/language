@@ -1,0 +1,7 @@
+fn s() {
+    sleep(1)
+}
+
+fn main() {
+    f := s
+}

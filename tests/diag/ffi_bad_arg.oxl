@@ -1,0 +1,7 @@
+extern fn take(x: int)
+
+struct P { a: int }
+
+fn main() {
+    take(P{a: 1})
+}
