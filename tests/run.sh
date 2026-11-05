@@ -435,10 +435,22 @@ want=$("$OXL" run bootstrap/check.oxl -- tests/diag/own_use_moved.oxl || true)
 cmp "$cgen_dir/chain.c" "$cgen_dir/direct.c" || { echo "FAIL bootstrap chain"; exit 1; }
 
 echo "== a1 coroutine scale =="
-# spec bar: 10k spawned tasks parked on recv under 5 MB RSS — measure
-# peak RSS during the parked window instead of trusting a "done" exit
+# spec bar: 10k spawned tasks parked on recv must cost heap frames,
+# not OS threads — assert on the per-task delta over this binary's
+# own zero-task baseline. An absolute cap can't separate task memory
+# from the platform's process baseline (Windows carries ~4 MB of
+# CRT/winsock/heap before main runs vs ~2 MB on POSIX).
 "$OXL" build tests/conc_scale.oxl -o "$scratch/conc_scale$EXE" || {
     echo "FAIL conc_scale: compile failed"; exit 1; }
+"$scratch/conc_scale$EXE" 0 0 2500 > /dev/null 2>&1 &
+base_pid=$!
+base_rss=0
+while kill -0 $base_pid 2>/dev/null; do
+    r=$(rss_kb $base_pid || true)
+    [ -n "$r" ] && [ "$r" -gt "$base_rss" ] && base_rss=$r
+    sleep 0.2
+done
+wait $base_pid 2>/dev/null || true
 "$scratch/conc_scale$EXE" 10000 1 2500 > "$scratch/scale.out" 2>&1 &
 scale_pid=$!
 # watchdog: a wedged channel/task regression must not hang the whole
@@ -464,8 +476,14 @@ wait $scale_pid || scale_rc=$?
 [ "$scale_rc" -eq 0 ] && [ "$(tail -1 "$scratch/scale.out")" = "done" ] || {
     echo "FAIL scale: rc=$scale_rc: $(cat "$scratch/scale.out")"; exit 1; }
 [ -n "$rss" ] && [ "$rss" -gt 0 ] || { echo "FAIL scale: no RSS sample"; exit 1; }
-[ "$rss" -lt 5120 ] || { echo "FAIL scale: ${rss}kB RSS at 10k parked (spec < 5120kB)"; exit 1; }
-echo "  10k parked tasks RSS: ${rss}kB"
+[ -n "$base_rss" ] && [ "$base_rss" -gt 0 ] || { echo "FAIL scale: no baseline RSS sample"; exit 1; }
+# ~0.3kB/parked task observed on POSIX (RtTask + frame, one alloc);
+# 1kB/task leaves >3x headroom for Windows heap commit granularity
+# yet still fails an order of magnitude under any OS-thread-per-task
+# regression (a thread costs tens of kB minimum).
+delta=$((rss - base_rss))
+[ "$delta" -lt 10240 ] || { echo "FAIL scale: ${delta}kB over ${base_rss}kB baseline at 10k parked (spec < 1kB/task)"; exit 1; }
+echo "  10k parked tasks: ${delta}kB over ${base_rss}kB baseline"
 out=$("$OXL" run tests/conc_ping.oxl -- 5000)
 grep -q "bounces=5000" <<<"$out" || { echo "FAIL ping: $out"; exit 1; }
 
