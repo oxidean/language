@@ -906,9 +906,14 @@ void rt_trap(int64_t code) {
         /* drop the temp refs: a drained orphan tears down here (its
          * owner hold drops with it); live ones drain later under their
          * last child's scope_done */
-        for (RtScope *x = s; x; x = x->parent) {
+        for (RtScope *x = s; x; ) {
+            /* capture pre-drop: scope_done can drain x, and teardown
+             * NULLs x->parent — reading it after would end the walk
+             * early and leak every ancestor's temp hold */
+            RtScope *up = x->parent;
             if (x != t->scope) scope_done(x); /* chain orphan: drains on 0 */
             if (x == t->scope) break;
+            x = up;
         }
         tls_task = NULL;
         longjmp(tls_jb, 1); /* run_task settles the pending slot */
@@ -957,7 +962,9 @@ void rt_trap(int64_t code) {
         if (x == t->scope) break;
     }
     pthread_mutex_unlock(&cancel_tree_mu);
-    for (RtScope *x = s; x; x = x->parent) {
+    for (RtScope *x = s; x; ) {
+        /* capture pre-drop: teardown NULLs x->parent (see frame path) */
+        RtScope *up = x->parent;
         if (x != t->scope) {
             int drain = 0;
             pthread_mutex_lock(&x->mu);
@@ -970,6 +977,7 @@ void rt_trap(int64_t code) {
             }
         }
         if (x == t->scope) break;
+        x = up;
     }
     task_unwind(); /* run_task drains defers + settles pending */
 }
