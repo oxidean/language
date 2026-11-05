@@ -1651,12 +1651,12 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
         if len(sn) > 0 {
             q := check.resolve_named(g.ck, sn)
             if collections.map_has(g.ck.structs, q) {
-                return "({ struct o_s_" + cname(q) + " *_nb = rt_alloc(sizeof(struct o_s_" + cname(q) + ")); __builtin_memset(_nb, 0, sizeof(struct o_s_" + cname(q) + ")); _nb; })"
+                return "({ struct o_s_" + cname(q) + " *_nb = rt_alloc_own(sizeof(struct o_s_" + cname(q) + ")); __builtin_memset(_nb, 0, sizeof(struct o_s_" + cname(q) + ")); _nb; })"
             }
         }
         ct := gcty(g, xty(g, args.v))
         v := argvs.v
-        return "({ " + ct + " *_nb = rt_alloc(sizeof(" + ct + ")); *_nb = (" + v + "); _nb; })"
+        return "({ " + ct + " *_nb = rt_alloc_own(sizeof(" + ct + ")); *_nb = (" + v + "); _nb; })"
     }
     if qn == "mkslice" && args != nil {
         et := check.t_unk(g.ck)
@@ -2268,7 +2268,7 @@ fn gclosure(g: mut G, params: ref parser.NList, body: ref parser.Node) -> str {
         inits = inits + " _e->" + cname(cp.n) + " = " + gxname(g, cp.n) + ";"
         cp = cp.next
     }
-    return "({ struct o_env_" + sid + " *_e = rt_alloc(sizeof(struct o_env_" + sid + "));" + inits + " (RtFnv){ _e, (void*)o_cl_" + sid + " }; })"
+    return "({ struct o_env_" + sid + " *_e = rt_alloc_own(sizeof(struct o_env_" + sid + "));" + inits + " (RtFnv){ _e, (void*)o_cl_" + sid + " }; })"
 }
 
 // ---------- stmt emission (Rust stmt, non-frame path) ----------

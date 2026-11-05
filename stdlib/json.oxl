@@ -7,7 +7,8 @@
 //   child: first member (obj) or element (arr) — a linked list via next
 //
 // Numbers are ints only; string escapes handle \" \\ \n \t. That covers
-// the pilot and config-file cases; floats/unicode escapes are v1 work.
+// the pilot and config-file cases; floats land via j.f/jfloat,
+// \uXXXX escapes are handled — deep unicode edge cases remain v1 work.
 // explicit release for `own ?` buffers (mkbuf) — scope arenas don't
 // reclaim them, so a temporary scratch must be freed by hand
 extern fn rt_free(p: own void)
@@ -314,11 +315,11 @@ fn utf8_3(cp: int) -> str {
 }
 
 // escape sequences only shrink the input (\n 2B→1B, \uXXXX 6B→≤3B),
-// so the raw source length bounds the decode — build into one buffer
+// so the remaining source length bounds the decode — build into one buffer
 // instead of quadratic per-char concatenation
 fn jparse_str(p: mut JCur) -> str {
     p.pos = p.pos + 1 // opening quote
-    buf := mkbuf(len(p.src) + 1)
+    buf := mkbuf(len(p.src) - p.pos + 1)
     // own buf can't defer: capture moves it at registration — every
     // exit frees by hand after bufstr copies the bytes out
     n := 0
