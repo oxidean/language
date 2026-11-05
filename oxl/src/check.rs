@@ -2718,7 +2718,8 @@ fn scan_expr(e: &Expr, s: &mut BodyScan) {
         ExprKind::Call { f, args } => {
             if let ExprKind::Ident(n) = &f.kind {
                 s.callees.insert(n.clone());
-                if matches!(n.as_str(), "recv" | "send" | "sleep" | "usleep") {
+                // usleep is deliberately absent — it blocks its thread, it never parks
+                if matches!(n.as_str(), "recv" | "send" | "sleep") {
                     s.seeded = true;
                 }
             } else {
