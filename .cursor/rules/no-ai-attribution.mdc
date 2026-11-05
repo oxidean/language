@@ -1,0 +1,41 @@
+---
+description: Ban AI/tool co-author and attribution trailers on commits and PRs
+alwaysApply: true
+---
+
+# No AI attribution (commits and PRs)
+
+Never add AI or tooling attribution to **commits, commit messages, PR titles, PR bodies, or PR descriptions** unless the user explicitly asks for it in the current turn.
+
+## Forbidden (case-insensitive)
+
+- AI `Co-Authored-By:` / `Co-authored-by:` trailers (Claude, Cursor, Copilot, ChatGPT, Codex, Gemini, or any AI/bot/`noreply` vendor address)
+- Generator footers: `Generated with/by…`, `Made with…`, `Made-with:…`, `Authored via…`, `via Cursor/Claude/…`
+- Bot emoji generator signatures (`🤖 Generated…`, etc.) when used as attribution
+- Naming models or AI products as the **author** (allowed when they are the **subject** of the change, e.g. “add Copilot webhook”)
+- First-person AI self-refs (“As an AI…”, “I generated this…”)
+- HTML comments or zero-width / invisible markers used as attribution in messages
+
+## Allowed
+
+- Real human `Co-authored-by:` trailers
+- `Signed-off-by:` for the human committer
+- Normal project commit/PR conventions (Conventional Commits, issue refs, etc.)
+
+## Pre-flight
+
+Before `git commit`, `git commit --amend`, or `gh pr create`:
+
+1. Draft the message/body for the change only.
+2. Scan subject, body, and trailers for the forbidden items above.
+3. Strip any match; do not soften into alternate AI attribution. Re-scan.
+4. Only then run the command.
+
+## IDE/CLI injection
+
+Some hosts append trailers after the agent writes the message (e.g. `Made-with: Cursor`). If `git log -1 --format=%B` shows a trailer you did not write:
+
+1. Tell the user it came from the IDE/CLI, not the agent message.
+2. Point them at Cursor **Settings → Git & PRs → Attribution** (turn off commit and PR attribution), and for CLI: `attribution.attributeCommitsToAgent` / `attribution.attributePRsToAgent` set to `false` in `~/.cursor/cli-config.json`.
+3. Do **not** change those settings or rewrite files without an explicit ask.
+4. Do not rewrite pushed history just to scrub old attribution; only amend unpushed commits when the user asks.

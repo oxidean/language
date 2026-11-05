@@ -25,11 +25,31 @@ The parser and LSP checks also invoke `python3`, so have Python 3 on
 - `docs/semantics/` — the contracts everything is built against
 - `agent-os/` — product + spec docs (Agent OS planning artifacts)
 
+## Commits
+
+- Subjects are SemVer-prefixed: `type(scope): subject` — types
+  `feat`, `fix`, `perf`, `revert`, `docs`, `chore`, `test`, `style`,
+  `refactor`, `build`, `ci`. Exempt: `Merge …`, `Revert "…"`,
+  `chore(release): …`.
+- No AI/tool attribution: no `Co-authored-by` / `Generated with` /
+  `Made-with` trailers or bot signatures for any AI or tool, and no
+  invisible markers. Human co-authors and `Signed-off-by` are fine.
+  Policy: `.cursor/rules/no-ai-attribution.mdc`.
+- Enforcement is `scripts/commit-check.sh`: CI `commit-lint` checks the
+  PR range, title, and body on every pull request. To get the same
+  check locally on each commit:
+
+  ```sh
+  git config core.hooksPath .githooks   # installs .githooks/commit-msg
+  ```
+
+  `git commit --no-verify` bypasses the hook; CI still checks.
+- Commits use your configured git identity (see `AGENTS.md`).
+
 ## Rules of the road
 
 - The C backend is interim — keep the codegen seam clean behind the
   emitted state machines for suspend-capable functions (see
   `docs/semantics/concurrency.md`).
 - Stdlib code goes in `stdlib/*.oxl`, written in the language.
-- Commits use your configured git identity (see `AGENTS.md`).
 - Bugs: file an issue with the smallest `.oxl` repro you can make.

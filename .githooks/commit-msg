@@ -1,0 +1,8 @@
+#!/bin/sh
+# commit-msg — commit grammar + no-AI-attribution enforcement.
+# Opt-in: installed via `git config core.hooksPath .githooks`
+# (see CONTRIBUTING.md). Bypass: git commit --no-verify.
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel)
+exec "$ROOT/scripts/commit-check.sh" --file "$1"
