@@ -318,7 +318,8 @@ fi
     echo "FAIL orphan_join: compile failed"; exit 1; }
 rc=0
 out=$(with_timeout 30 "$scratch/orphan_join") || rc=$?
-[ "$(tail -1 <<<"$out")" = "orphan-join ok" ] || { echo "FAIL orphan_join: rc=$rc: $out"; exit 1; }
+# marker alone isn't enough: a crash/time-out after the print must fail
+[ "$rc" -eq 0 ] && [ "$(tail -1 <<<"$out")" = "orphan-join ok" ] || { echo "FAIL orphan_join: rc=$rc: $out"; exit 1; }
 
 # joiner lost-wakeup: a trap's descendant cancel temp-holds a scope
 # whose owner is parked joining it; if the temp drop is the pending->0

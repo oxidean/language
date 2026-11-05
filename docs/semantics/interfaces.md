@@ -44,7 +44,8 @@ parser; `x := e` parses to `Stmt::Let { ty: None, .. }`).
 
 ## TAST (typechecker output — target contract)
 
-`check::Checked` today carries only `suspend: Set<FnId>` and the LSP
+`check::Checked` today carries only `suspend: HashSet<String>`
+(suspendable fn names) and the LSP
 `index`; codegen consumes the original `Crate` plus `checked.suspend`.
 The rest of this section is the boundary the backend design expects —
 not yet emitted by the checker:

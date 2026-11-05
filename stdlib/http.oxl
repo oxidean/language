@@ -127,29 +127,46 @@ fn lwr(s: str) -> str {
     return out
 }
 
-/// Content-Length value from a header block; -1 = malformed, 0 = absent
+/// Content-Length value from a header block; -1 = malformed or
+/// conflicting duplicates, 0 = absent. Matches only at header-line
+/// starts so a request-target or x-content-length lookalike can't
+/// inject a length, and every occurrence must carry the same trimmed
+/// value — a disagreement is a smuggling attempt, not a pick-one (CWE-444)
 fn content_length(req: str, hdr_end: int) -> int {
     hdrs := lwr(substr(req, 0, hdr_end))
-    i := find(hdrs, "content-length:")
-    if i < 0 {
-        return 0
-    }
-    j := i + 15
-    for j < len(hdrs) && (byteat(hdrs, j) == 32 || byteat(hdrs, j) == 9) {
-        j = j + 1
-    }
     v := 0
-    nd := 0
-    for j < len(hdrs) && byteat(hdrs, j) >= 48 && byteat(hdrs, j) <= 57 {
-        v = v * 10 + (byteat(hdrs, j) - 48)
-        if v > MAX_BODY {
-            return v // past the cap — the caller answers 413
+    seen := false
+    pos := 0
+    i := find(hdrs, "\r\ncontent-length:")
+    for i >= 0 {
+        j := pos + i + 17
+        for j < len(hdrs) && (byteat(hdrs, j) == 32 || byteat(hdrs, j) == 9) {
+            j = j + 1
         }
-        nd = nd + 1
-        j = j + 1
-    }
-    if nd == 0 {
-        return -1
+        w := 0
+        nd := 0
+        for j < len(hdrs) && byteat(hdrs, j) >= 48 && byteat(hdrs, j) <= 57 {
+            w = w * 10 + (byteat(hdrs, j) - 48)
+            if w > MAX_BODY {
+                return w // past the cap — the caller answers 413
+            }
+            nd = nd + 1
+            j = j + 1
+        }
+        for j < len(hdrs) && (byteat(hdrs, j) == 32 || byteat(hdrs, j) == 9) {
+            j = j + 1
+        }
+        // value must end the line (or the header block): "12x" is malformed
+        if nd == 0 || j < len(hdrs) && byteat(hdrs, j) != 13 {
+            return -1
+        }
+        if seen && w != v {
+            return -1 // conflicting duplicates — refuse to pick one
+        }
+        v = w
+        seen = true
+        pos = j
+        i = find(substr(hdrs, pos, len(hdrs)), "\r\ncontent-length:")
     }
     return v
 }
@@ -198,7 +215,11 @@ fn read_request(fd: int) -> ReqRead {
         i = i + 1
     }
     for have < cl {
-        n := read(fd, scratch, 4095)
+        want := cl - have
+        if want > 4095 {
+            want = 4095
+        }
+        n := read(fd, scratch, want) // never past cl: bbuf is cl+1
         if n <= 0 {
             rt_free(bbuf)
             rt_free(scratch)
