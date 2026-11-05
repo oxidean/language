@@ -622,10 +622,13 @@ fn pick_cc() -> String {
 }
 
 // cc names its product after -o; on Windows the runnable artifact needs
-// .exe spelled out or CreateProcess can't resolve it
+// .exe spelled out or CreateProcess can't resolve it. Append rather than
+// with_extension — `-o app.debug` means app.debug.exe, not app.exe
 fn exe_out_name(out: PathBuf) -> PathBuf {
     if cfg!(windows) && out.extension().map_or(true, |e| e != "exe") {
-        out.with_extension("exe")
+        let mut s = out.into_os_string();
+        s.push(".exe");
+        s.into()
     } else {
         out
     }
