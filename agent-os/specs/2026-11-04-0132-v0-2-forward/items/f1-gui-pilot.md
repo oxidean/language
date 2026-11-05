@@ -31,8 +31,10 @@ Rationale vs the other two:
 - `extern fn` GTK4 declarations (`gtk_init`, `gtk_window_new`,
   `g_signal_connect` via a small C shim for the macro-based signal API —
   the shim is a `gui_shim.c` next to the pilot, honest about macros)
-- Event loop on `spawnBlocking` (blocking `g_main_loop_run` — the
-  blocking pool exists precisely for this)
+- Event loop on the thread that ran `gtk_init` — GTK requires every
+  call on that thread, so `g_main_loop_run` blocks `main` directly
+  (never `spawnBlocking`: the pool is for leaf calls, a thread-bound
+  toolkit can't move)
 - `unsafe` blocks where GTK's memory model crosses ours (widget
   pointers are `own`-opaque)
 - Document honestly: this proves the FFI+concurrency story for GUIs;

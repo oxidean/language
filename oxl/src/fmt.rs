@@ -593,10 +593,21 @@ impl<'a> Fmt<'a> {
                     if i > 0 {
                         s.push_str(", ");
                     }
+                    // a drained comment forces the call multiline: the
+                    // next arg goes one level deeper so it can't land on
+                    // the comment's line
+                    let ci = self.ci;
                     self.drain_into(&mut s, a.span.lo, ind, false);
+                    if self.ci != ci {
+                        s.push_str(&format!("\n{}", IND.repeat(ind + 1)));
+                    }
                     s.push_str(&self.expr(a, 0, ind));
                 }
+                let ci = self.ci;
                 self.drain_into(&mut s, self.prev_tok_end(e.span.hi), ind, false);
+                if self.ci != ci {
+                    s.push_str(&format!("\n{}", IND.repeat(ind)));
+                }
                 s.push(')');
                 s
             }
@@ -623,10 +634,18 @@ impl<'a> Fmt<'a> {
                     if i > 0 {
                         s.push_str(", ");
                     }
+                    let ci = self.ci;
                     self.drain_into(&mut s, fe.span.lo, ind, false);
+                    if self.ci != ci {
+                        s.push_str(&format!("\n{}", IND.repeat(ind + 1)));
+                    }
                     s.push_str(&format!("{n}: {}", self.expr(fe, 0, ind)));
                 }
+                let ci = self.ci;
                 self.drain_into(&mut s, self.close_brace(e.span.lo), ind, false);
+                if self.ci != ci {
+                    s.push_str(&format!("\n{}", IND.repeat(ind)));
+                }
                 s.push('}');
                 s
             }
@@ -661,8 +680,8 @@ impl<'a> Fmt<'a> {
                 let inner = if expr_prec(e) < POSTFIX { format!("({inner})") } else { inner };
                 format!("{inner} as {}", self.ty(ty))
             }
-            ExprKind::Match { e, arms } => {
-                let mut s = format!("match {} {{", self.expr(e, 0, ind));
+            ExprKind::Match { e: scrut, arms } => {
+                let mut s = format!("match {} {{", self.expr(scrut, 0, ind));
                 for a in arms {
                     // comments before the arm attach inside the match
                     self.drain_into(&mut s, a.span.lo, ind + 1, false);
@@ -698,7 +717,19 @@ impl<'a> Fmt<'a> {
                         }
                     ));
                 }
-                self.drain_into(&mut s, self.prev_tok_end(e.span.hi), ind + 1, false);
+                // anchor the trailing drain at the match body's own
+                // braces: the scrutinee's span (the shadowed `e`) ended
+                // back at the head, and the enclosing span's start can
+                // hit a scrutinee brace (a structlit scrutinee) instead
+                let scrut_end = self.prev_tok_end(scrut.span.hi);
+                let open_lo = self
+                    .toks
+                    .iter()
+                    .filter(|t| t.span.lo >= scrut_end)
+                    .find(|t| &self.src[t.span.lo as usize..t.span.hi as usize] == "{")
+                    .map(|t| t.span.lo)
+                    .unwrap_or(scrut_end);
+                self.drain_into(&mut s, self.close_brace(open_lo), ind + 1, false);
                 s.push_str(&format!("\n{}}}", IND.repeat(ind)));
                 let _ = parent;
                 s
@@ -709,7 +740,14 @@ impl<'a> Fmt<'a> {
                     .map(|p| format!("{}: {}", p.name, self.ty(&p.ty)))
                     .collect();
                 let head = format!("{{ |{}|", ps.join(", "));
-                if body.stmts.len() == 1 && inline_stmt(&body.stmts[0]) {
+                // a comment anywhere inside the braces can't survive
+                // the single-line form — it would drain after the `}`
+                // and land outside the closure; take the block path
+                let inner_comment = self
+                    .comments
+                    .get(self.ci)
+                    .map_or(false, |c| c.lo < self.close_brace(e.span.lo));
+                if body.stmts.len() == 1 && inline_stmt(&body.stmts[0]) && !inner_comment {
                     let mut sub = Fmt {
                         src: self.src,
                         toks: self.toks,
@@ -740,7 +778,10 @@ impl<'a> Fmt<'a> {
                         self.ci += sub.ci;
                         s.push_str(&sub.out);
                     }
-                    self.drain_into(&mut s, self.prev_tok_end(body.span.hi), ind + 1, false);
+                    // the body's span can overshoot its `}` — anchor
+                    // the drain at the closure's own close brace so a
+                    // trailing comment can't land outside it
+                    self.drain_into(&mut s, self.close_brace(e.span.lo), ind + 1, false);
                     s.push_str(&format!("\n{}}}", IND.repeat(ind)));
                     s
                 }

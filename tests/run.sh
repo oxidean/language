@@ -15,7 +15,11 @@ with_timeout() {
     else
         local secs=$1; shift
         "$@" & local pid=$!
-        ( sleep "$secs"; kill -KILL "$pid" 2>/dev/null ) & local dog=$!
+        # watchdog redirects away from the caller's capture pipe: inside
+        # out=$(with_timeout ..) the subshell would inherit that pipe, and
+        # a killed dog can orphan its sleep child still holding it open —
+        # the $() then hangs past the deadline it was enforcing
+        ( sleep "$secs"; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & local dog=$!
         local rc=0
         wait "$pid" 2>/dev/null || rc=$?
         if kill -0 "$dog" 2>/dev/null; then

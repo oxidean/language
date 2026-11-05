@@ -91,6 +91,11 @@ let MAX_CONN = 64
 /// request body cap — bigger uploads get a 413 instead of a read loop
 let MAX_BODY = 1048576
 
+/// whole-request budget (ms) — set_rcvtimo caps each read at 10s, but a
+/// client feeding a byte every 9s would hold the conn forever without
+/// a fixed deadline measured from request start
+let REQ_MS = 30000
+
 /// release the conn slot and the fd on EVERY exit — normal return,
 /// early read failure, and handler trap (the runtime drains task
 /// defers on trap unwind, so a trapping route can't leak either)
@@ -197,7 +202,12 @@ fn read_request(fd: int) -> ReqRead {
     scratch := mkbuf(4096)
     req := ""
     hdr_end := -1
+    deadline := now_ms() + REQ_MS
     for hdr_end < 0 && len(req) <= 16384 {
+        if now_ms() > deadline {
+            rt_free(scratch)
+            return ReqRead{status: 400, req: "", body: ""}
+        }
         n := read(fd, scratch, 4095)
         if n <= 0 {
             rt_free(scratch)
@@ -233,6 +243,11 @@ fn read_request(fd: int) -> ReqRead {
         i = i + 1
     }
     for have < cl {
+        if now_ms() > deadline {
+            rt_free(bbuf)
+            rt_free(scratch)
+            return ReqRead{status: 400, req: "", body: ""}
+        }
         want := cl - have
         if want > 4095 {
             want = 4095

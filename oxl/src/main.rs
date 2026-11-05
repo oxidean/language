@@ -938,6 +938,25 @@ fn hex4(it: &mut std::str::Chars) -> Option<u32> {
     u32::from_str_radix(&s, 16).ok()
 }
 
+/// escape a string for embedding in a JSON string literal — every
+/// control char, not just backslash and quote, or diagnostics and hover
+/// text containing newlines/tabs produce invalid JSON on the wire
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn publish_diags(stdout: &mut impl Write, uri: &str, list: &[(usize, usize, String)]) {
     let mut ds = String::new();
     for (i, (l, c, msg)) in list.iter().enumerate() {
@@ -948,7 +967,7 @@ fn publish_diags(stdout: &mut impl Write, uri: &str, list: &[(usize, usize, Stri
         ds.push_str(&format!(
             "{{\"range\":{{\"start\":{{\"line\":{l0},\"character\":{c0}}},\"end\":{{\"line\":{l0},\"character\":{}}}}},\"severity\":1,\"message\":\"{}\"}}",
             c0 + 1,
-            msg.replace('\\', "\\\\").replace('"', "\\\"")
+            json_escape(msg)
         ));
     }
     let notif = format!(
@@ -1091,7 +1110,7 @@ fn cmd_lsp() {
             match (hit, def) {
                 (Some(u), false) => format!(
                     "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"contents\":{{\"kind\":\"plaintext\",\"value\":\"{}\"}}}}}}",
-                    u.sig.replace('\\', "\\\\").replace('"', "\\\"")
+json_escape(&u.sig)
                 ),
                 (Some(u), true) => {
                     // def spans index into their own file's source — the
