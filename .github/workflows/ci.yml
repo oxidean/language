@@ -17,7 +17,7 @@ jobs:
         # macos-latest (not macos-15): explicit macos-15 jobs on this repo
         # sat queued ~15min and were cancelled without a runner (empty
         # runner_name, zero steps); macos-latest schedules and passes.
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,11 +29,29 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y sqlite3 libsqlite3-dev
 
+      # no sqlite dev package on a stock Windows runner — compile the
+      # amalgamation instead (LANG_SQLITE_SRC, consumed by the driver
+      # and by run.sh's own cc calls)
+      - name: sqlite amalgamation (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://sqlite.org/2026/sqlite-amalgamation-3540100.zip -OutFile sqlite.zip
+          Expand-Archive sqlite.zip sqlite
+
+      - name: windows toolchain env
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "LANG_CC=gcc" >> "$GITHUB_ENV"
+          echo "LANG_SQLITE_SRC=$(cygpath -m "$PWD")/sqlite/sqlite-amalgamation-3540100/sqlite3.c" >> "$GITHUB_ENV"
+
       - name: build compiler
         run: cargo build --release --manifest-path oxl/Cargo.toml
 
       - name: run test suite
-        run: bash tests/run.sh "$PWD/oxl/target/release/oxl"
+        shell: bash
+        run: bash tests/run.sh "$PWD/oxl/target/release/oxl${{ runner.os == 'Windows' && '.exe' || '' }}"
 
   # Commit-message gate (see scripts/commit-check.sh): SemVer-prefix
   # grammar on subjects + no-AI-attribution scan, on the PR's commit
