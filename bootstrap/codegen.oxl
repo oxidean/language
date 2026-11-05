@@ -6,9 +6,8 @@
 //   oxl run bootstrap/codegen.oxl -- file.oxl > out.c
 //   cc -O2 -pthread -Iruntime out.c runtime/rt.c -lsqlite3 -o out
 //
-// Subset boundary (same as the checker port): the bootstrap parser does
-// not produce generics, so monomorphized instantiations don't exist —
-// every fn emits exactly once under its qualified name.
+// Full surface: methods + interfaces emit as RtIface/vtab pairs and
+// generic fns mono-instantiate per call binding (Rust insts).
 import "check"
 
 import "std/collections"
@@ -79,6 +78,38 @@ fn nput(b: mut GBuf, s: own parser.Node) {
     }
 }
 
+// one queued monomorphized instantiation (Rust insts entry)
+struct GInst {
+    q: str,
+    mangled: str,
+    bind: own collections.Map,
+    next: own GInst,
+}
+
+// one materialized (iface, impl) vtab pair — newest first
+struct GVU { w: str, impl: str, next: own GVU }
+
+// how a resolved call emits (Rust CallPlan): k 0 = not a call target,
+// 1 = oxl fn (dotted=1 -> the receiver expr precedes args),
+// 2 = iface vtab slot
+struct GCP {
+    k: int,
+    dotted: int,
+    q: str,
+    w: str,
+    midx: int,
+    mname: str,
+    ps: own check.IList,
+    rk: int,
+    r1: int,
+}
+
+// one call arg after coercion: text plus borrow marks around it
+struct GArgOut { v: str, pre: str, post: str }
+
+// resolved pair-call info: the emitted pair-struct tag + the val ty
+struct GPair { tag: str, vt: int }
+
 struct G {
     ck: own check.Ck,
     its: []check.It,
@@ -113,6 +144,13 @@ struct G {
     labeln: int,
     hoistn: int,
     retk: int, // current fn ret kind (2 = [T, err])
+    cret: int, // current fn declared ret1 tyid (-1 none; conv target)
+    subst: own collections.Map, // tyvar -> tyid for the inst being emitted (nil = off)
+    insts: own GInst, // pending instantiation queue (LIFO)
+    inst_done: own collections.Map, // mangled inst name -> 1
+    vtabs: own GVU, // materialized (iface, impl) pairs, newest first
+    vtab_set: own collections.Map, // "w|impl" -> 1 dedup
+    vout: []str, // vtab thunks + arrays (emitted after out)
     cur: str, // current fn's qualified name
     inframe: int,
 }
@@ -274,6 +312,7 @@ fn tyi(g: ref G, t: int) -> int {
 
 // ty -> C type (Rust cty)
 fn gcty(g: mut G, t: int) -> str {
+    t = gsub(g, t)
     k := tyk(g, t)
     if k == check.k_int() || k == check.k_err() {
         return "int64_t"
@@ -304,6 +343,9 @@ fn gcty(g: mut G, t: int) -> str {
     }
     if k == check.k_fn() {
         return "RtFnv"
+    }
+    if k == check.k_iface() {
+        return "RtIface"
     }
     if k == check.k_struct() {
         return "struct o_s_" + cname(g.ck.tyv[t].name)
@@ -712,6 +754,10 @@ fn xty_name(g: mut G, n: str) -> int {
     fi := gfn(g, n)
     if fi >= 0 {
         sig := g.ck.fnsv[fi]
+        if sig.typarams != nil {
+            // generic fns can't be fn values (Rust: ty_params guard)
+            return check.t_unk(g.ck)
+        }
         r1 := sig.ret1
         if sig.retk == 0 {
             r1 = check.t_void(g.ck)
@@ -754,11 +800,27 @@ fn xty_call(g: mut G, f: ref parser.Node, args: ref parser.NList) -> int {
             }
         }
     }
+    // method/vtab/generic call result ty (Rust expr_ty call path)
+    cp := gcall_plan(g, f, args)
+    if cp.k == 2 {
+        if cp.rk == 0 {
+            return check.t_void(g.ck)
+        }
+        return cp.r1
+    }
     fi := gfn(g, name)
+    if fi < 0 && cp.k == 1 {
+        fi = gfn(g, cp.q)
+    }
     if fi >= 0 {
         sig := g.ck.fnsv[fi]
         if sig.retk == 1 || sig.retk == 2 {
-            return sig.ret1
+            rt := sig.ret1
+            if sig.typarams != nil {
+                b := gcall_bindf(g, fi, f, args, cp.dotted)
+                rt = check.subst_ty(g.ck, rt, b)
+            }
+            return gsub(g, rt)
         }
         return check.t_void(g.ck)
     }
@@ -988,6 +1050,406 @@ fn gdt(g: mut G, t: int) -> int {
     return t
 }
 
+// ---------- generics + iface machinery (Rust insts/conv/vtabs) ----------
+
+// subst a declared ty through the active inst bind (Rust dt)
+fn gsub(g: mut G, t: int) -> int {
+    if t < 0 || g.subst == nil {
+        return t
+    }
+    return check.subst_ty(g.ck, t, g.subst)
+}
+
+// ty -> C-identifier fragment for inst names (Rust mangle_ty)
+fn gmangle(g: mut G, t: int) -> str {
+    n := check.ty_name(g.ck, t)
+    out := ""
+    i := 0
+    for i < len(n) {
+        c := byteat(n, i)
+        ok := c >= 65 && c <= 90 || c >= 97 && c <= 122 || c >= 48 && c <= 57
+        if ok {
+            out = out + substr(n, i, 1)
+        } else {
+            out = out + "_"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// inst name for a generic callee — `q__<ty>__<ty>` in typarams order
+// (Rust inst_name); unbound params default to int
+fn ginst_name(g: mut G, q: str, tpl: ref check.TPList, bind: ref collections.Map) -> str {
+    n := q
+    tp := tpl
+    for tp != nil {
+        t := check.t_int(g.ck)
+        if collections.map_has(bind, tp.v.n) {
+            [v, err] = collections.map_get(bind, tp.v.n)
+            if err == nil {
+                t = v
+            }
+        }
+        n = n + "__" + gmangle(g, t)
+        tp = tp.next
+    }
+    return n
+}
+
+// queue a generic instantiation for emission (Rust insts push);
+// dedup is by mangled name — returns the callee name either way.
+// The proto + pair-ret decl are emitted here so uses always see them.
+fn ginst_queue(g: mut G, q: str, tpl: ref check.TPList, bind: own collections.Map) -> str {
+    m := ginst_name(g, q, tpl, bind)
+    if collections.map_has(g.inst_done, m) {
+        return m
+    }
+    collections.map_set(g.inst_done, m, 1)
+    fi := gfn(g, q)
+    if fi >= 0 {
+        sig := g.ck.fnsv[fi]
+        if sig.retk == 2 {
+            g.head = push(g.head, "struct o_ret_" + cname(m) + " { " + gcty(g, check.subst_ty(g.ck, sig.ret1, bind)) + " val; int64_t err; };\n")
+        }
+        if !check.sl_has(g.ck.susp, q) {
+            // susp insts emit only frames — no o_f_ proto
+            rc := "void"
+            if sig.retk == 1 {
+                rc = gcty(g, check.subst_ty(g.ck, sig.ret1, bind))
+            }
+            if sig.retk == 2 {
+                rc = "struct o_ret_" + cname(m)
+            }
+            ps := ""
+            first := true
+            il := sig.params
+            for il != nil {
+                if !first {
+                    ps = ps + ", "
+                }
+                first = false
+                ps = ps + gcty(g, check.subst_ty(g.ck, il.v, bind))
+                il = il.next
+            }
+            if first {
+                ps = "void"
+            }
+            g.head = push(g.head, rc + " o_f_" + cname(m) + "(" + ps + ");\n")
+        }
+    }
+    in := new(GInst)
+    in.q = q
+    in.mangled = m
+    in.bind = bind
+    in.next = g.insts
+    g.insts = in
+    return m
+}
+
+// bind declared sig params (incl. the receiver slot when `recv` is
+// set) against effective arg types (Rust call_bindings) — nil for
+// non-generic sigs
+fn gcall_bind(g: mut G, fi: int, recv: ref parser.Node, args: ref parser.NList) -> own collections.Map {
+    sig := g.ck.fnsv[fi]
+    if sig.typarams == nil {
+        return nil
+    }
+    bind := collections.map_new()
+    wl := sig.params
+    if recv != nil && wl != nil {
+        rt := gsub(g, xty(g, recv))
+        check.bind_vars(g.ck, wl.v, rt, bind)
+        wl = wl.next
+    }
+    al := args
+    for al != nil && wl != nil {
+        gt := gsub(g, xty(g, al.v))
+        check.bind_vars(g.ck, wl.v, gt, bind)
+        wl = wl.next
+        al = al.next
+    }
+    tp := sig.typarams
+    for tp != nil {
+        if !collections.map_has(bind, tp.v.n) {
+            collections.map_set(bind, tp.v.n, check.t_int(g.ck))
+        }
+        tp = tp.next
+    }
+    return bind
+}
+
+// call-binding helper: dotted method calls bind the receiver slot too
+fn gcall_bindf(g: mut G, fi: int, f: ref parser.Node, args: ref parser.NList, dotted: int) -> own collections.Map {
+    if dotted == 1 {
+        match f {
+            parser.Node.Field{obj} => {
+                return gcall_bind(g, fi, obj, args)
+            }
+            _ => {
+            }
+        }
+    }
+    return gcall_bind(g, fi, nil, args)
+}
+
+// base struct/enum name behind own/ref/mut — impl keys (Rust ty_base)
+fn gty_base(g: mut G, t: int) -> str {
+    t = gsub(g, t)
+    k := tyk(g, t)
+    if k == check.k_struct() || k == check.k_enum() {
+        return g.ck.tyv[t].name
+    }
+    if k == check.k_own() || k == check.k_ref() || k == check.k_mut() {
+        return gty_base(g, tyi(g, t))
+    }
+    return ""
+}
+
+// method name -> vtab slot index inside iface `w` (-1 when absent)
+fn gimidx(g: mut G, w: str, m: str) -> int {
+    ii := check.iface_ent(g.ck, w)
+    if ii < 0 {
+        return -1
+    }
+    ml := g.ck.ifacesv[ii].methods
+    i := 0
+    for ml != nil {
+        if ml.v.n == m {
+            return i
+        }
+        ml = ml.next
+        i = i + 1
+    }
+    return -1
+}
+
+// record an (iface, impl) pair for vtab emission (Rust vtab_uses)
+fn gvtab_use(g: mut G, w: str, implkey: str) {
+    k := w + "|" + implkey
+    if collections.map_has(g.vtab_set, k) {
+        return
+    }
+    collections.map_set(g.vtab_set, k, 1)
+    v := new(GVU)
+    v.w = w
+    v.impl = implkey
+    v.next = g.vtabs
+    g.vtabs = v
+}
+
+// vtab symbol fragment for an impl key — `iface:W2` rewraps sanitize
+// to `iface_W2` since ':' is not a C identifier char
+fn gvtkey(implkey: str) -> str {
+    if len(implkey) > 6 && substr(implkey, 0, 6) == "iface:" {
+        return "iface_" + cname(substr(implkey, 6, len(implkey)))
+    }
+    return cname(implkey)
+}
+
+// `{data, o_vt_W_I}` — pointer impls hand over directly, values box so
+// the data outlives the stack slot (Rust iface_wrap)
+fn giface_wrap_v(g: mut G, e: ref parser.Node, v: str, w: str, implkey: str) -> str {
+    gvtab_use(g, w, implkey)
+    got := gsub(g, xty(g, e))
+    vt := "o_vt_" + cname(w) + "_" + gvtkey(implkey)
+    gk := tyk(g, got)
+    if gk == check.k_own() || gk == check.k_ref() || gk == check.k_mut() {
+        return "(RtIface){ (void*)(" + v + "), " + vt + " }"
+    }
+    if gk == check.k_iface() {
+        return "({ RtIface *_iw = rt_alloc_own(sizeof(RtIface)); *_iw = (" + v + "); (RtIface){ (void*)_iw, " + vt + " }; })"
+    }
+    ct := gcty(g, got)
+    return "({ " + ct + " *_iw = rt_alloc_own(sizeof(" + ct + ")); *_iw = (" + v + "); (RtIface){ (void*)_iw, " + vt + " }; })"
+}
+
+// emit `v` (the already-emitted `e`) coerced to `want` — only iface
+// conversions do anything: nil -> the empty pair, same iface passes
+// through, other iface rewraps, concrete impls box (Rust conv)
+fn gconv_v(g: mut G, e: ref parser.Node, v: str, want: int) -> str {
+    w := gsub(g, want)
+    if w < 0 || tyk(g, w) != check.k_iface() {
+        return v
+    }
+    wn := g.ck.tyv[w].name
+    got := gsub(g, xty(g, e))
+    gk := tyk(g, got)
+    if gk == check.k_err() {
+        return "(RtIface){ 0, 0 }"
+    }
+    if gk == check.k_iface() {
+        gn := g.ck.tyv[got].name
+        if gn == wn {
+            return v
+        }
+        return giface_wrap_v(g, e, v, wn, "iface:" + gn)
+    }
+    b := gty_base(g, got)
+    if len(b) > 0 {
+        return giface_wrap_v(g, e, v, wn, b)
+    }
+    return v
+}
+
+fn gconv(g: mut G, e: ref parser.Node, want: int) -> str {
+    return gconv_v(g, e, gx(g, e), want)
+}
+
+// receiver arg adapted to the method's receiver ty (Rust adapt_recv):
+// value wants deref pointers, pointer wants ref values
+fn gadapt_v(g: mut G, e: ref parser.Node, ev: str, want: int) -> str {
+    got := gsub(g, xty(g, e))
+    w := gsub(g, want)
+    wk := tyk(g, w)
+    gk := tyk(g, got)
+    if (wk == check.k_struct() || wk == check.k_enum()) && (gk == check.k_own() || gk == check.k_ref() || gk == check.k_mut()) {
+        return "(*" + ev + ")"
+    }
+    if (wk == check.k_own() || wk == check.k_ref() || wk == check.k_mut()) && (gk == check.k_struct() || gk == check.k_enum()) {
+        return "(&" + ev + ")"
+    }
+    return ev
+}
+
+// resolve a call target the way the checker did (Rust call_plan):
+// plain fn, `x.m` -> `T.m` or an iface vtab slot, bare `m(x, ..)` ->
+// `T.m` with args[0] already the receiver
+fn gcall_plan(g: mut G, f: ref parser.Node, args: ref parser.NList) -> own GCP {
+    cp := new(GCP)
+    cp.k = 0
+    cp.dotted = 0
+    cp.q = ""
+    cp.w = ""
+    cp.midx = -1
+    cp.mname = ""
+    cp.ps = nil
+    cp.rk = -1
+    cp.r1 = -1
+    name := check.callee_name(f)
+    if len(name) == 0 {
+        return cp
+    }
+    if gfn(g, name) >= 0 {
+        cp.k = 1
+        cp.q = check.resolve_named(g.ck, name)
+        return cp
+    }
+    match f {
+        parser.Node.Field{obj, name} => {
+            ot := gsub(g, xty(g, obj))
+            if ot >= 0 {
+                mt := check.method_target(g.ck, ot, name)
+                if mt.k == 1 {
+                    cp.k = 1
+                    cp.dotted = 1
+                    cp.q = mt.q
+                    return cp
+                }
+                if mt.k == 2 {
+                    cp.k = 2
+                    cp.dotted = 1
+                    cp.w = g.ck.tyv[ot].name
+                    cp.mname = name
+                    cp.midx = gimidx(g, cp.w, name)
+                    cp.ps = check.il_clone(mt.ps)
+                    cp.rk = mt.rk
+                    cp.r1 = mt.r1
+                    return cp
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    if args != nil {
+        t0 := gsub(g, xty(g, args.v))
+        if t0 >= 0 {
+            mt := check.method_target(g.ck, t0, name)
+            if mt.k == 1 {
+                cp.k = 1
+                cp.q = mt.q
+                return cp
+            }
+        }
+    }
+    return cp
+}
+
+// (pair-tag, val-ty) for a pair call — 'o_vret_<W>_<m>' for vtab
+// slots, 'o_ret_<callee-or-inst>' for fns; "" / -1 when not a pair call
+fn gpair_info(g: mut G, call: ref parser.Node) -> GPair {
+    r := GPair{tag: "", vt: -1}
+    if call == nil || check.nk(call) != 8 {
+        return r
+    }
+    match call {
+        parser.Node.Call{f, args} => {
+            cp := gcall_plan(g, f, args)
+            if cp.k == 2 && cp.rk == 2 {
+                r.tag = "o_vret_" + cname(cp.w) + "_" + cname(cp.mname)
+                r.vt = cp.r1
+                return r
+            }
+            if cp.k == 1 {
+                fi := gfn(g, cp.q)
+                if fi >= 0 && g.ck.fnsv[fi].retk == 2 {
+                    sig := g.ck.fnsv[fi]
+                    r.tag = "o_ret_" + cname(cp.q)
+                    r.vt = sig.ret1
+                    if sig.typarams != nil {
+                        b := gcall_bindf(g, fi, f, args, cp.dotted)
+                        r.tag = "o_ret_" + cname(ginst_name(g, cp.q, sig.typarams, b))
+                        r.vt = check.subst_ty(g.ck, r.vt, b)
+                    }
+                    return r
+                }
+            }
+        }
+        _ => {
+        }
+    }
+    return r
+}
+
+// pair-struct name a call produces — "" for non-pair or unknown callees
+fn gpairsig(g: mut G, call: ref parser.Node) -> str {
+    return gpair_info(g, call).tag
+}
+
+// one call arg coerced to its declared param (subst'd via the callee
+// bind when generic, then through the current inst): iface conv,
+// str->cstr, own->mut/ref borrow marks
+fn garg_c(g: mut G, e: ref parser.Node, v: str, pt: int, bind: ref collections.Map) -> GArgOut {
+    o := GArgOut{v: "", pre: "", post: ""}
+    o.v = v
+    if pt < 0 {
+        return o
+    }
+    pt2 := pt
+    if bind != nil {
+        pt2 = check.subst_ty(g.ck, pt2, bind)
+    }
+    pt2 = gsub(g, pt2)
+    o.v = gconv_v(g, e, o.v, pt2)
+    raw := gsub(g, xty(g, e))
+    if tyk(g, pt2) == check.k_cstr() && tyk(g, raw) == check.k_str() {
+        o.v = "rt_cstr(" + o.v + ")"
+    }
+    if tyk(g, raw) == check.k_own() {
+        pk := tyk(g, pt2)
+        if pk == check.k_mut() {
+            o.pre = "rt_borrow_mut(" + o.v + "); "
+            o.post = "rt_unborrow(" + o.v + "); "
+        }
+        if pk == check.k_ref() {
+            o.pre = "rt_borrow_read(" + o.v + "); "
+            o.post = "rt_unborrow(" + o.v + "); "
+        }
+    }
+    return o
+}
+
 // frame slot name for an fsl value (-2 -> p_<name>, else v<i>)
 fn fslot_str(name: str, v: int) -> str {
     if v == -2 {
@@ -1026,35 +1488,37 @@ fn gdefers(g: mut G) {
 }
 
 // susp callee name: bare leaf builtin or qualified oxl fn ("" = not susp)
-fn gsusp_name(g: mut G, f: ref parser.Node) -> str {
-    n := check.callee_name(f)
-    if len(n) == 0 {
-        return ""
-    }
-    qn := check.resolve_named(g.ck, n)
-    if check.is_susp_builtin(qn) {
-        return qn
-    }
-    if check.sl_has(g.ck.susp, qn) {
-        return qn
-    }
-    return ""
-}
-
-// does this call park? (Rust call_is_susp)
+// does this call park? returns the EMIT name — builtin leaf, oxl fn
+// base, or the mangled inst for generic susp callees (Rust call_is_susp)
 fn g_call_susp(g: mut G, e: ref parser.Node) -> str {
     if e == nil || check.nk(e) != 8 {
         return ""
     }
-    sn := ""
     match e {
-        parser.Node.Call{f} => {
-            sn = gsusp_name(g, f)
+        parser.Node.Call{f, args} => {
+            n := check.callee_name(f)
+            if len(n) == 0 {
+                return ""
+            }
+            qn := check.resolve_named(g.ck, n)
+            if check.is_susp_builtin(qn) {
+                return qn
+            }
+            cp := gcall_plan(g, f, args)
+            if cp.k != 1 || !check.sl_has(g.ck.susp, cp.q) {
+                return ""
+            }
+            fi := gfn(g, cp.q)
+            if fi >= 0 && g.ck.fnsv[fi].typarams != nil {
+                bind := gcall_bindf(g, fi, f, args, cp.dotted)
+                return ginst_queue(g, cp.q, g.ck.fnsv[fi].typarams, bind)
+            }
+            return cp.q
         }
         _ => {
         }
     }
-    return sn
+    return ""
 }
 
 // pattern -> (cond, binds) over scrutinee accessor `acc` (Rust arm_cond)
@@ -1303,7 +1767,7 @@ fn gxsusp(g: mut G, e: ref parser.Node, sn: str) -> str {
             if check.is_susp_builtin(sn) {
                 gfsusp_leaf(g, sn, args, 1, fd, "")
             } else {
-                gfsusp_call(g, sn, args, 1, fd, "")
+                gfsusp_call(g, e, sn, 1, fd, "")
             }
         }
         _ => {
@@ -1345,6 +1809,22 @@ fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> str {
             neg = "!"
         }
         return "(" + neg + "rt_streq(" + lv + ", " + rv + "))"
+    }
+    // iface eq/ne compares the erased data ptr (Rust binary op)
+    if op == "==" || op == "!=" {
+        lt2 := gsub(g, lt)
+        rt2 := gsub(g, xty(g, r))
+        if tyk(g, lt2) == check.k_iface() || tyk(g, rt2) == check.k_iface() {
+            le := lv
+            re := rv
+            if tyk(g, lt2) == check.k_iface() {
+                le = lv + ".data"
+            }
+            if tyk(g, rt2) == check.k_iface() {
+                re = rv + ".data"
+            }
+            return "(" + le + " " + op + " (void*)" + re + ")"
+        }
     }
     return "(" + lv + " " + op + " " + rv + ")"
 }
@@ -1388,6 +1868,26 @@ fn gxfield(g: mut G, obj: ref parser.Node, name: str) -> str {
     return o + ".f_" + name
 }
 
+// declared ty of field `fname` on struct `sname` (-1 unknown) —
+// variant payloads register under their `E.V`-qualified name too
+fn gfield_ty(g: mut G, sname: str, fname: str) -> int {
+    if !collections.map_has(g.ck.structs, sname) {
+        return -1
+    }
+    [si, err] = collections.map_get(g.ck.structs, sname)
+    if err != nil {
+        return -1
+    }
+    fl := g.ck.structsv[si].fields
+    for fl != nil {
+        if fl.v.n == fname {
+            return fl.v.t
+        }
+        fl = fl.next
+    }
+    return -1
+}
+
 fn gxlit(g: mut G, obj: ref parser.Node, fields: ref parser.NList) -> str {
     name := check.callee_name(obj)
     path := check.resolve_named(g.ck, name)
@@ -1397,10 +1897,15 @@ fn gxlit(g: mut G, obj: ref parser.Node, fields: ref parser.NList) -> str {
     for fl != nil {
         match fl.v {
             parser.Node.NamedField{name, val} => {
+                v := gx(g, val)
+                ft := gfield_ty(g, path, name)
+                if ft >= 0 {
+                    v = gconv_v(g, val, v, ft)
+                }
                 if len(init) > 0 {
                     init = init + ", "
                 }
-                init = init + ".f_" + name + " = " + gx(g, val)
+                init = init + ".f_" + name + " = " + v
             }
             _ => {
             }
@@ -1722,43 +2227,112 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
     if len(b) > 0 {
         return b
     }
-    // regular call — oxl fn gets o_f_, extern/raw C keeps the bare name
+    // method + iface dispatch (D3) and monomorphized generics (Rust
+    // call_plan / insts): `x.m(..)` -> `T.m(x, ..)`, `w.m(..)` -> a
+    // vtab slot call, bare `m(x, ..)` -> `T.m(x, ..)`
+    cp := gcall_plan(g, f, args)
+    if cp.k == 2 {
+        match f {
+            parser.Node.Field{obj} => {
+                ov := gx(g, obj)
+                ret_c := "void"
+                if cp.rk == 1 {
+                    ret_c = gcty(g, cp.r1)
+                }
+                if cp.rk == 2 {
+                    ret_c = "struct o_vret_" + cname(cp.w) + "_" + cname(cp.mname)
+                }
+                sig := "void*"
+                il := cp.ps
+                for il != nil {
+                    sig = sig + ", " + gcty(g, il.v)
+                    il = il.next
+                }
+                argl := ""
+                il = cp.ps
+                al := args
+                av := argvs
+                for al != nil {
+                    v := av.v
+                    if il != nil {
+                        v = gconv_v(g, al.v, v, il.v)
+                        raw := gsub(g, xty(g, al.v))
+                        if tyk(g, il.v) == check.k_cstr() && tyk(g, raw) == check.k_str() {
+                            v = "rt_cstr(" + v + ")"
+                        }
+                        il = il.next
+                    }
+                    argl = argl + ", " + v
+                    al = al.next
+                    av = av.next
+                }
+                return "({ RtIface _iv = " + ov + "; ((" + ret_c + " (*)(" + sig + "))_iv.vtab[" + itoa(cp.midx) + "])(_iv.data" + argl + "); })"
+            }
+            _ => {
+            }
+        }
+    }
+    // fnsv resolution: dotted `x.m` resolves through the plan, plain
+    // and bare-method calls come off `name`
     fi := gfn(g, name)
+    eq := qn
+    if fi < 0 && cp.k == 1 {
+        fi = gfn(g, cp.q)
+        eq = cp.q
+    }
     if fi < 0 {
         return name + "(" + gav_join(argvs) + ")"
     }
     sig := g.ck.fnsv[fi]
+    // generic callees queue a mono instantiation — the name resolves
+    // now; the queue happens at bind's last use (own move)
+    let bind: own collections.Map = nil
+    mangled := ""
     callee := name
     if sig.is_extern == 0 {
-        callee = "o_f_" + cname(qn)
+        callee = "o_f_" + cname(eq)
+        if sig.typarams != nil {
+            bind = gcall_bindf(g, fi, f, args, cp.dotted)
+            mangled = ginst_name(g, eq, sig.typarams, bind)
+            callee = "o_f_" + cname(mangled)
+        }
     }
-    // str -> cstr coercion + own-arg borrows around the call
+    // str -> cstr coercion + own-arg borrows around the call; iface
+    // args wrap through conv (Rust conv call sites)
     pre := ""
     post := ""
     il := sig.params
-    al := args
-    av := argvs
     let coerced: own GAv = nil
     let ctail: own GAv = nil
+    if cp.k == 1 && cp.dotted == 1 && il != nil {
+        // `x.m(..)` — the receiver is an implicit first arg adapted to
+        // the declared receiver ty, never conv'd (Rust adapt_recv)
+        pt := il.v
+        if bind != nil {
+            pt = check.subst_ty(g.ck, pt, bind)
+        }
+        pt = gsub(g, pt)
+        match f {
+            parser.Node.Field{obj} => {
+                c := new(GAv)
+                c.v = gadapt_v(g, obj, gx(g, obj), pt)
+                coerced = c
+                ctail = c
+            }
+            _ => {
+            }
+        }
+        il = il.next
+    }
+    al := args
+    av := argvs
     for al != nil {
         v := av.v
         if il != nil {
-            pt := il.v
-            raw := xty(g, al.v)
-            if tyk(g, pt) == check.k_cstr() && tyk(g, gdt(g, raw)) == check.k_str() {
-                v = "rt_cstr(" + v + ")"
-            }
-            if tyk(g, raw) == check.k_own() {
-                pk := tyk(g, pt)
-                if pk == check.k_mut() {
-                    pre = pre + "rt_borrow_mut(" + v + "); "
-                    post = post + "rt_unborrow(" + v + "); "
-                }
-                if pk == check.k_ref() {
-                    pre = pre + "rt_borrow_read(" + v + "); "
-                    post = post + "rt_unborrow(" + v + "); "
-                }
-            }
+            o := garg_c(g, al.v, v, il.v, bind)
+            v = o.v
+            pre = pre + o.pre
+            post = post + o.post
             il = il.next
         }
         c := new(GAv)
@@ -1773,6 +2347,18 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
         al = al.next
         av = av.next
     }
+    rt1 := sig.ret1
+    if bind != nil {
+        rt1 = check.subst_ty(g.ck, rt1, bind)
+    }
+    rt1 = gsub(g, rt1)
+    retag := "o_ret_" + cname(eq)
+    if len(mangled) > 0 {
+        retag = "o_ret_" + cname(mangled)
+    }
+    if sig.typarams != nil {
+        ginst_queue(g, eq, sig.typarams, bind)
+    }
     inner := callee + "(" + gav_join(coerced) + ")"
     if len(pre) == 0 {
         return inner
@@ -1781,12 +2367,59 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
         return "({ " + pre + inner + "; " + post + "})"
     }
     if sig.retk == 1 {
-        return "({ " + gcty(g, sig.ret1) + " __rc; " + pre + "__rc = " + inner + "; " + post + "__rc; })"
+        return "({ " + gcty(g, rt1) + " __rc; " + pre + "__rc = " + inner + "; " + post + "__rc; })"
     }
-    return "({ struct o_ret_" + cname(qn) + " __rc; " + pre + "__rc = " + inner + "; " + post + "__rc; })"
+    return "({ struct " + retag + " __rc; " + pre + "__rc = " + inner + "; " + post + "__rc; })"
 }
 
 // ---------- spawn (Rust spawn) ----------
+// arg vector coerced to declared sig params (subst'd when generic) —
+// `recv` prepends as an adapted first arg for dotted method calls
+fn gav_decl(g: mut G, args: ref parser.NList, fi: int, bind: ref collections.Map, recv: ref parser.Node) -> own GAv {
+    let head: own GAv = nil
+    let tail: own GAv = nil
+    let il: own check.IList = nil
+    if fi >= 0 {
+        il = g.ck.fnsv[fi].params
+    }
+    if recv != nil {
+        v := gx(g, recv)
+        if il != nil {
+            pt := il.v
+            if bind != nil {
+                pt = check.subst_ty(g.ck, pt, bind)
+            }
+            pt = gsub(g, pt)
+            v = gadapt_v(g, recv, v, pt)
+            il = il.next
+        }
+        c := new(GAv)
+        c.v = v
+        head = c
+        tail = c
+    }
+    al := args
+    for al != nil {
+        v := gx(g, al.v)
+        if il != nil {
+            o := garg_c(g, al.v, v, il.v, bind)
+            v = o.v
+            il = il.next
+        }
+        c := new(GAv)
+        c.v = v
+        if head == nil {
+            head = c
+            tail = c
+        } else {
+            tail.next = c
+            tail = tail.next
+        }
+        al = al.next
+    }
+    return head
+}
+
 fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
     if e == nil || check.nk(e) != 8 {
         return
@@ -1842,13 +2475,40 @@ fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
             if len(name) == 0 {
                 return
             }
-            qn := check.resolve_named(g.ck, name)
+            // dotted `x.m` spawns resolve to `T.m` with a receiver slot;
+            // generic callees queue an inst (Rust call_plan/inst_name)
+            cp := gcall_plan(g, f, args)
+            base := check.resolve_named(g.ck, name)
+            fi2 := -1
+            if cp.k == 1 {
+                base = cp.q
+                fi2 = gfn(g, cp.q)
+            }
+            let bind: own collections.Map = nil
+            ename := base
+            if fi2 >= 0 && g.ck.fnsv[fi2].typarams != nil {
+                bind = gcall_bindf(g, fi2, f, args, cp.dotted)
+                ename = ginst_name(g, base, g.ck.fnsv[fi2].typarams, bind)
+            }
+            let rnode: ref parser.Node = nil
+            if cp.k == 1 && cp.dotted == 1 {
+                match f {
+                    parser.Node.Field{obj} => {
+                        rnode = obj
+                    }
+                    _ => {
+                    }
+                }
+            }
             // suspendable callee — heap frame + poll driver task
-            if check.sl_has(g.ck.susp, qn) {
-                cn := cname(qn)
-                argvs := gav(g, args)
+            if cp.k == 1 && check.sl_has(g.ck.susp, base) {
+                cn := cname(ename)
+                argvs := gav_decl(g, args, fi2, bind, rnode)
+                if bind != nil {
+                    ginst_queue(g, base, g.ck.fnsv[fi2].typarams, bind)
+                }
                 wln(g, "    { struct o_frm_" + cn + " *_t = (struct o_frm_" + cn + " *)rt_task_new(o_poll_" + cn + ", (int64_t)sizeof(struct o_frm_" + cn + "));")
-                gspawn_args(g, qn, "_t", argvs)
+                gspawn_args(g, base, "_t", argvs)
                 sp := "rt_spawn_task"
                 if blocking {
                     sp = "rt_spawnb_task"
@@ -1861,10 +2521,38 @@ fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
             g.tmpn = g.tmpn + 1
             sid := itoa(id)
             tr := "struct o_args_" + sid + " {"
-            al := args
+            // declared param types when resolvable (subst'd for insts;
+            // the receiver slot leads for dotted methods), else expr ty
+            let il: own check.IList = nil
+            if fi2 >= 0 {
+                il = g.ck.fnsv[fi2].params
+            }
             i := 0
+            if rnode != nil {
+                at := gsub(g, xty(g, rnode))
+                if il != nil {
+                    at = il.v
+                    if bind != nil {
+                        at = check.subst_ty(g.ck, at, bind)
+                    }
+                    at = gsub(g, at)
+                    il = il.next
+                }
+                tr = tr + " " + gcty(g, at) + " a" + itoa(i) + ";"
+                i = i + 1
+            }
+            al := args
             for al != nil {
-                tr = tr + " " + gcty(g, xty(g, al.v)) + " a" + itoa(i) + ";"
+                at := gsub(g, xty(g, al.v))
+                if il != nil {
+                    at = il.v
+                    if bind != nil {
+                        at = check.subst_ty(g.ck, at, bind)
+                    }
+                    at = gsub(g, at)
+                    il = il.next
+                }
+                tr = tr + " " + gcty(g, at) + " a" + itoa(i) + ";"
                 i = i + 1
                 al = al.next
             }
@@ -1872,11 +2560,10 @@ fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
             // the arg-ref list as a GAv so gbuiltin can consume it
             let afs: own GAv = nil
             let atail: own GAv = nil
-            i = 0
-            al = args
-            for al != nil {
+            k2 := 0
+            for k2 < i {
                 c := new(GAv)
-                c.v = "a->a" + itoa(i)
+                c.v = "a->a" + itoa(k2)
                 if afs == nil {
                     afs = c
                     atail = c
@@ -1884,8 +2571,7 @@ fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
                     atail.next = c
                     atail = atail.next
                 }
-                i = i + 1
-                al = al.next
+                k2 = k2 + 1
             }
             arefs := gav_join(afs)
             body := ""
@@ -1907,9 +2593,8 @@ fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
                     body = bb + ";"
                 } else {
                     callee := name
-                    fi := gfn(g, name)
-                    if fi >= 0 && g.ck.fnsv[fi].is_extern == 0 {
-                        callee = "o_f_" + cname(qn)
+                    if fi2 >= 0 && g.ck.fnsv[fi2].is_extern == 0 {
+                        callee = "o_f_" + cname(ename)
                     }
                     body = callee + "(" + arefs + ");"
                 }
@@ -1917,12 +2602,16 @@ fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
             tr = tr + "static void* l_tr_" + sid + "(void* _p) { struct o_args_" + sid + "* a = _p; " + body + " return 0; }\n"
             g.tramp = push(g.tramp, tr)
             wln(g, "    { struct o_args_" + sid + "* a = rt_alloc(sizeof(struct o_args_" + sid + "));")
+            fills := gav_decl(g, args, fi2, bind, rnode)
+            if bind != nil {
+                ginst_queue(g, base, g.ck.fnsv[fi2].typarams, bind)
+            }
+            av := fills
             i = 0
-            al = args
-            for al != nil {
-                wln(g, "      a->a" + itoa(i) + " = " + gx(g, al.v) + ";")
+            for av != nil {
+                wln(g, "      a->a" + itoa(i) + " = " + av.v + ";")
                 i = i + 1
-                al = al.next
+                av = av.next
             }
             sp := "rt_spawn"
             if blocking {
@@ -1945,9 +2634,19 @@ fn gspawn_args(g: mut G, qn: str, dst: str, argvs: ref GAv) {
         return
     }
     match g.its[fi].node {
-        parser.Node.Fn{params} => {
-            pl := params
+        parser.Node.Fn{recv, params} => {
             av := argvs
+            if recv != nil && av != nil {
+                match recv {
+                    parser.Node.Param{name} => {
+                        wln(g, "      " + dst + "->p_" + name + " = " + av.v + ";")
+                    }
+                    _ => {
+                    }
+                }
+                av = av.next
+            }
+            pl := params
             for pl != nil && av != nil {
                 match pl.v {
                     parser.Node.Param{name} => {
@@ -2313,19 +3012,19 @@ fn glet2(g: mut G, names: str, call: ref parser.Node) {
         na = substr(names, 0, i)
         nb = substr(names, i + 1, len(names))
     }
-    vt := check.t_unk(g.ck)
-    qn := check.resolve_named(g.ck, cn)
-    fi := -1
-    if len(cn) > 0 {
-        fi = gfn(g, cn)
+    pr := gpair_info(g, call)
+    tag := pr.tag
+    vt := pr.vt
+    if vt < 0 {
+        vt = check.t_unk(g.ck)
     }
-    if fi >= 0 {
-        vt = g.ck.fnsv[fi].ret1
+    if len(tag) == 0 {
+        tag = "o_ret_" + cname(check.resolve_named(g.ck, cn))
     }
     n := g.tmpn
     g.tmpn = g.tmpn + 1
     c := gx(g, call)
-    wln(g, "    struct o_ret_" + cname(qn) + " _r" + itoa(n) + " = " + c + ";")
+    wln(g, "    struct " + tag + " _r" + itoa(n) + " = " + c + ";")
     if len(na) > 0 && na != "_" {
         wln(g, "    " + gcty(g, vt) + " " + na + " = _r" + itoa(n) + ".val;")
         check.env_set(g.env, na, vt)
@@ -2350,12 +3049,14 @@ fn gs(g: mut G, s: ref parser.Node) {
                 t = xty(g, init)
             }
             v := gx(g, init)
+            v = gconv_v(g, init, v, t)
             wln(g, "    " + gcty(g, t) + " " + name + " = " + v + ";")
             check.env_set(g.env, name, t)
         }
         parser.Node.Bind{name, init} => {
             t := xty(g, init)
             v := gx(g, init)
+            v = gconv_v(g, init, v, t)
             wln(g, "    " + gcty(g, t) + " " + name + " = " + v + ";")
             check.env_set(g.env, name, t)
         }
@@ -2365,6 +3066,7 @@ fn gs(g: mut G, s: ref parser.Node) {
         parser.Node.Assign{target, val} => {
             t := gx(g, target)
             v := gx(g, val)
+            v = gconv_v(g, val, v, xty(g, target))
             wln(g, "    " + t + " = " + v + ";")
         }
         parser.Node.ExprStmt{e} => {
@@ -2380,10 +3082,23 @@ fn gs(g: mut G, s: ref parser.Node) {
                 wln(g, "    return;")
             } else if g.retk == 2 && vals.next != nil {
                 v := gx(g, vals.v)
+                v = gconv_v(g, vals.v, v, g.cret)
                 e2 := gx(g, vals.next.v)
                 wln(g, "    return (struct o_ret_" + cname(g.cur) + "){ " + v + ", " + e2 + " };")
+            } else if g.retk == 2 {
+                // `return paircall()` forwards — rewrap when the
+                // callee's pair tag differs (Rust o_vret_ -> o_ret_)
+                v := gx(g, vals.v)
+                tag := gpairsig(g, vals.v)
+                cur := "o_ret_" + cname(g.cur)
+                if len(tag) > 0 && tag != cur {
+                    wln(g, "    return (struct " + cur + "){ (" + v + ").val, (" + v + ").err };")
+                } else {
+                    wln(g, "    return " + v + ";")
+                }
             } else {
                 v := gx(g, vals.v)
+                v = gconv_v(g, vals.v, v, g.cret)
                 wln(g, "    return " + v + ";")
             }
         }
@@ -2468,13 +3183,46 @@ fn gsusp_ret(g: mut G, code: str) {
 // suspend point for an oxl-fn call: alloc child frame, poll it, propagate
 // PENDING/CANCEL, bind the result on READY (Rust fsusp_call)
 // dk: 0 void, 1 frame-field(da), 2 assign-target(da), 3 pair(da,db; ""=blank)
-fn gfsusp_call(g: mut G, name: str, args: ref parser.NList, dk: int, da: str, db: str) {
+fn gfsusp_call(g: mut G, call: ref parser.Node, name: str, dk: int, da: str, db: str) {
     cn := cname(name)
     frty := "o_frm_" + cn
-    argvs := gav(g, args)
+    // re-plan for the base qn + decl-aware arg fills (recv adapts,
+    // params conv — incl. generic susp insts where `name` is mangled)
+    let argvs: own GAv = nil
+    bname := ""
+    match call {
+        parser.Node.Call{f, args} => {
+            cp := gcall_plan(g, f, args)
+            bname = cp.q
+            fi := -1
+            let bind: own collections.Map = nil
+            let rnode: ref parser.Node = nil
+            if cp.k == 1 {
+                fi = gfn(g, cp.q)
+            }
+            if fi >= 0 && g.ck.fnsv[fi].typarams != nil {
+                bind = gcall_bindf(g, fi, f, args, cp.dotted)
+            }
+            if cp.dotted == 1 {
+                match f {
+                    parser.Node.Field{obj} => {
+                        rnode = obj
+                    }
+                    _ => {
+                    }
+                }
+            }
+            argvs = gav_decl(g, args, fi, bind, rnode)
+        }
+        _ => {
+        }
+    }
+    if len(bname) == 0 {
+        bname = name
+    }
     wln(g, "    { struct " + frty + " *_c = (struct " + frty + " *)malloc(sizeof(struct " + frty + "));")
     wln(g, "      ((RtFrame *)_c)->cur_scope = tls_scope; ((RtFrame *)_c)->state = 0;")
-    gspawn_args(g, name, "_c", argvs)
+    gspawn_args(g, bname, "_c", argvs)
     k := g.staten
     g.staten = g.staten + 1
     g.states = push(g.states, k)
@@ -2545,7 +3293,7 @@ fn gfsusp_go(g: mut G, call: ref parser.Node, dk: int, da: str, db: str) {
             if check.is_susp_builtin(sn) {
                 gfsusp_leaf(g, sn, args, dk, da, db)
             } else {
-                gfsusp_call(g, sn, args, dk, da, db)
+                gfsusp_call(g, call, sn, dk, da, db)
             }
         }
         _ => {
@@ -2796,6 +3544,7 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
                 gfsusp_go(g, init, 1, fd, "")
             } else {
                 v := gx(g, init)
+                v = gconv_v(g, init, v, t)
                 wln(g, "    fr->" + fd + " = " + v + ";")
             }
         }
@@ -2807,6 +3556,7 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
                 gfsusp_go(g, init, 1, fd, "")
             } else {
                 v := gx(g, init)
+                v = gconv_v(g, init, v, t)
                 wln(g, "    fr->" + fd + " = " + v + ";")
             }
         }
@@ -2826,17 +3576,17 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
                 _ => {
                 }
             }
-            qn := check.resolve_named(g.ck, cn)
-            susp := len(cn) > 0 && check.sl_has(g.ck.susp, qn)
+            sn := g_call_susp(g, call)
             fa := ""
             fb := ""
-            vt := check.t_unk(g.ck)
-            fi := -1
-            if len(cn) > 0 {
-                fi = gfn(g, cn)
+            pr := gpair_info(g, call)
+            tag := pr.tag
+            vt := pr.vt
+            if vt < 0 {
+                vt = check.t_unk(g.ck)
             }
-            if fi >= 0 {
-                vt = g.ck.fnsv[fi].ret1
+            if len(tag) == 0 {
+                tag = "o_ret_" + cname(check.resolve_named(g.ck, cn))
             }
             if len(na) > 0 && na != "_" {
                 fa = gfslot(g, na, gcty(g, vt))
@@ -2846,10 +3596,14 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
                 fb = gfslot(g, nb, "int64_t")
                 check.env_set(g.env, nb, check.t_err(g.ck))
             }
-            if susp {
+            if len(sn) > 0 {
                 match call {
                     parser.Node.Call{args} => {
-                        gfsusp_call(g, qn, args, 3, fa, fb)
+                        if check.is_susp_builtin(sn) {
+                            gfsusp_leaf(g, sn, args, 3, fa, fb)
+                        } else {
+                            gfsusp_call(g, call, sn, 3, fa, fb)
+                        }
                     }
                     _ => {
                     }
@@ -2859,7 +3613,7 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
             n := g.tmpn
             g.tmpn = g.tmpn + 1
             c := gx(g, call)
-            wln(g, "    { struct o_ret_" + cname(qn) + " _r" + itoa(n) + " = " + c + ";")
+            wln(g, "    { struct " + tag + " _r" + itoa(n) + " = " + c + ";")
             if len(fa) > 0 {
                 wln(g, "      fr->" + fa + " = _r" + itoa(n) + ".val;")
             }
@@ -2869,15 +3623,15 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
             wln(g, "    }")
         }
         parser.Node.Assign{target, val} => {
-            if len(g_call_susp(g, val)) > 0 {
+            sn := g_call_susp(g, val)
+            if len(sn) > 0 {
                 tc := gx(g, target)
                 match val {
-                    parser.Node.Call{f, args} => {
-                        sn := gsusp_name(g, f)
+                    parser.Node.Call{args} => {
                         if check.is_susp_builtin(sn) {
                             gfsusp_leaf(g, sn, args, 2, tc, "")
                         } else {
-                            gfsusp_call(g, sn, args, 2, tc, "")
+                            gfsusp_call(g, val, sn, 2, tc, "")
                         }
                     }
                     _ => {
@@ -2886,6 +3640,7 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
             } else {
                 t := gx(g, target)
                 v := gx(g, val)
+                v = gconv_v(g, val, v, xty(g, target))
                 wln(g, "    " + t + " = " + v + ";")
             }
         }
@@ -2897,31 +3652,20 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
         }
         parser.Node.Ret{vals} => {
             // `return suspPair()` forwards [v, err] — desugar via two slots
-            if vals != nil && vals.next == nil && len(g_call_susp(g, vals.v)) > 0 {
-                cn := ""
-                match vals.v {
-                    parser.Node.Call{f} => {
-                        cn = check.callee_name(f)
-                    }
-                    _ => {
-                    }
-                }
-                fi := gfn(g, cn)
-                if fi >= 0 && g.ck.fnsv[fi].retk == 2 {
-                    pa := gfslot(g, "_pa" + itoa(g.hoistn), gcty(g, g.ck.fnsv[fi].ret1))
+            sn := ""
+            if vals != nil && vals.next == nil {
+                sn = g_call_susp(g, vals.v)
+            }
+            if len(sn) > 0 {
+                pr2 := gpair_info(g, vals.v)
+                if len(pr2.tag) > 0 {
+                    pa := gfslot(g, "_pa" + itoa(g.hoistn), gcty(g, pr2.vt))
                     g.hoistn = g.hoistn + 1
                     pe := gfslot(g, "_pe" + itoa(g.hoistn), "int64_t")
                     g.hoistn = g.hoistn + 1
                     gfscope_drain(g, 0)
                     gdefers(g)
-                    qn := check.resolve_named(g.ck, cn)
-                    match vals.v {
-                        parser.Node.Call{args} => {
-                            gfsusp_call(g, qn, args, 3, pa, pe)
-                        }
-                        _ => {
-                        }
-                    }
+                    gfsusp_call(g, vals.v, sn, 3, pa, pe)
                     wln(g, "    fr->result = (struct o_ret_" + cname(g.cur) + "){ fr->" + pa + ", fr->" + pe + " };")
                     gsusp_ret(g, "RT_READY")
                     return
@@ -2932,10 +3676,21 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
             if vals != nil {
                 if g.retk == 2 && vals.next != nil {
                     v := gx(g, vals.v)
+                    v = gconv_v(g, vals.v, v, g.cret)
                     e2 := gx(g, vals.next.v)
                     wln(g, "    fr->result = (struct o_ret_" + cname(g.cur) + "){ " + v + ", " + e2 + " };")
+                } else if g.retk == 2 {
+                    v := gx(g, vals.v)
+                    tag := gpairsig(g, vals.v)
+                    cur := "o_ret_" + cname(g.cur)
+                    if len(tag) > 0 && tag != cur {
+                        wln(g, "    fr->result = (struct " + cur + "){ (" + v + ").val, (" + v + ").err };")
+                    } else {
+                        wln(g, "    fr->result = " + v + ";")
+                    }
                 } else {
                     v := gx(g, vals.v)
+                    v = gconv_v(g, vals.v, v, g.cret)
                     wln(g, "    fr->result = " + v + ";")
                 }
             }
@@ -3165,8 +3920,41 @@ fn gparams(g: mut G, params: ref parser.NList) -> str {
     return s
 }
 
+// declared param list with an optional receiver prepended — method
+// sigs carry the receiver slot first (Rust func param emission)
+fn gparams2(g: mut G, recv: ref parser.Node, params: ref parser.NList) -> str {
+    rp := ""
+    if recv != nil {
+        match recv {
+            parser.Node.Param{name, ty} => {
+                rp = gcty(g, gty(g, ty)) + " " + name
+            }
+            _ => {
+            }
+        }
+    }
+    pl := params
+    for pl != nil {
+        match pl.v {
+            parser.Node.Param{name, ty} => {
+                if len(rp) > 0 {
+                    rp = rp + ", "
+                }
+                rp = rp + gcty(g, gty(g, ty)) + " " + name
+            }
+            _ => {
+            }
+        }
+        pl = pl.next
+    }
+    if len(rp) == 0 {
+        return "void"
+    }
+    return rp
+}
+
 // frame path for a susp fn (Rust func_frame): struct o_frm_ + o_poll_ driver
-fn gframe(g: mut G, qn: str, params: ref parser.NList, ret: ref parser.Node, body: ref parser.Node) {
+fn gframe(g: mut G, qn: str, recv: ref parser.Node, params: ref parser.NList, ret: ref parser.Node, body: ref parser.Node) {
     g.inframe = 1
     g.fsl = check.env_new()
     check.env_push(g.fsl)
@@ -3179,6 +3967,18 @@ fn gframe(g: mut G, qn: str, params: ref parser.NList, ret: ref parser.Node, bod
     g.defers = nil
     check.env_push(g.env)
     pfields := ""
+    if recv != nil {
+        match recv {
+            parser.Node.Param{name, ty} => {
+                t := gty(g, ty)
+                pfields = pfields + " " + gcty(g, t) + " p_" + name + ";"
+                check.env_set(g.env, name, t)
+                check.env_set(g.fsl, name, -2)
+            }
+            _ => {
+            }
+        }
+    }
     pl := params
     for pl != nil {
         match pl.v {
@@ -3237,21 +4037,47 @@ fn gfunc(g: mut G, i: int) {
         return
     }
     match g.its[i].node {
-        parser.Node.Fn{name, params, ret, body} => {
-            qn := check.qname(g.its[i].mod, name)
+        parser.Node.Fn{name, recv, typarams} => {
+            if typarams != nil {
+                // generic defs emit only as mono instantiations
+                return
+            }
             g.ck.cur_mod = g.its[i].mod
+            qn := check.fn_qname(g.ck, g.its[i].mod, recv, name)
+            gemit_named_fn(g, i, qn, qn)
+        }
+        _ => {
+        }
+    }
+}
+
+// emit one fn under `qn` — `base` is the fnsv/susp-set key (same as qn
+// except for instantiations, where qn is the mangled name)
+fn gemit_named_fn(g: mut G, i: int, qn: str, base: str) {
+    match g.its[i].node {
+        parser.Node.Fn{recv, params, ret, body} => {
             g.cur = qn
             g.retk = gretdk(g, ret)
+            g.cret = gsub(g, gret1(g, ret))
             g.defers = nil
-            if check.sl_has(g.ck.susp, qn) {
-                gframe(g, qn, params, ret, body)
+            if check.sl_has(g.ck.susp, base) {
+                gframe(g, qn, recv, params, ret, body)
                 if qn == "main" {
                     g.maink = 1
                 }
                 return
             }
-            wln(g, gret_c(g, ret, qn, true) + " o_f_" + cname(qn) + "(" + gparams(g, params) + ") {")
+            wln(g, gret_c(g, ret, qn, true) + " o_f_" + cname(qn) + "(" + gparams2(g, recv, params) + ") {")
             check.env_push(g.env)
+            if recv != nil {
+                match recv {
+                    parser.Node.Param{name, ty} => {
+                        check.env_set(g.env, name, gty(g, ty))
+                    }
+                    _ => {
+                    }
+                }
+            }
             pl := params
             for pl != nil {
                 match pl.v {
@@ -3274,6 +4100,26 @@ fn gfunc(g: mut G, i: int) {
         _ => {
         }
     }
+}
+
+// mono-instantiated generic fn — the body re-emits under the mangled
+// name with `ibind` resolving its ty params (Rust func_inst)
+fn gfunc_inst(g: mut G, iq: str, im: str, ibind: own collections.Map) {
+    fi := gfn_item(g, iq)
+    if fi < 0 {
+        return
+    }
+    g.ck.cur_mod = g.its[fi].mod
+    si := gfn(g, iq)
+    if si >= 0 {
+        g.ck.ty_scope = check.tp_names(g.ck.fnsv[si].typarams)
+        g.ck.cur_ty_params = check.tp_clone(g.ck.fnsv[si].typarams)
+    }
+    g.subst = ibind
+    gemit_named_fn(g, fi, im, iq)
+    g.subst = nil
+    g.ck.ty_scope = nil
+    g.ck.cur_ty_params = nil
 }
 
 // enum decl: payload structs + the tagged union (Rust generate pass 1)
@@ -3356,15 +4202,16 @@ fn gemit_retstruct(g: mut G, i: int) {
         return
     }
     match g.its[i].node {
-        parser.Node.Fn{ex, name, ret} => {
-            if ex {
+        parser.Node.Fn{ex, name, recv, typarams, ret} => {
+            if ex || typarams != nil {
+                // pair-ret insts emit `o_ret_<mangled>` at queue time
                 return
             }
             if gretdk(g, ret) != 2 {
                 return
             }
             g.ck.cur_mod = g.its[i].mod
-            qn := check.qname(g.its[i].mod, name)
+            qn := check.fn_qname(g.ck, g.its[i].mod, recv, name)
             g.head = push(g.head, "struct o_ret_" + cname(qn) + " { " + gcty(g, gret1(g, ret)) + " val; int64_t err; };")
         }
         _ => {
@@ -3398,14 +4245,18 @@ fn gemit_proto(g: mut G, i: int) {
         return
     }
     match g.its[i].node {
-        parser.Node.Fn{ex, name, params, ret} => {
+        parser.Node.Fn{ex, name, recv, typarams, params, ret} => {
+            if !ex && typarams != nil {
+                // generic fns only exist as instantiations (Rust: no proto)
+                return
+            }
             g.ck.cur_mod = g.its[i].mod
-            qn := check.qname(g.its[i].mod, name)
+            qn := check.fn_qname(g.ck, g.its[i].mod, recv, name)
             nm := name
             if !ex {
                 nm = "o_f_" + cname(qn)
             }
-            g.head = push(g.head, gret_c(g, ret, qn, !ex) + " " + nm + "(" + gparams(g, params) + ");\n")
+            g.head = push(g.head, gret_c(g, ret, qn, !ex) + " " + nm + "(" + gparams2(g, recv, params) + ");\n")
         }
         _ => {
         }
@@ -3451,6 +4302,173 @@ fn gemit_fnv(g: mut G) {
     }
 }
 
+// bind a generic impl method's ty params from the iface-declared
+// method params (Rust vtab_bind) — nil when the impl isn't generic
+fn gvtab_bind(g: mut G, fi: int, m: ref check.IMethod) -> own collections.Map {
+    sig := g.ck.fnsv[fi]
+    if sig.typarams == nil {
+        return nil
+    }
+    bind := collections.map_new()
+    w := sig.params
+    if w != nil {
+        w = w.next // params[0] is the receiver; iface decls carry the rest
+    }
+    mp := m.params
+    for w != nil && mp != nil {
+        check.bind_vars(g.ck, w.v, mp.v, bind)
+        w = w.next
+        mp = mp.next
+    }
+    return bind
+}
+
+// queue insts for generic impl methods the recorded vtab pairs pin —
+// returns nonzero when new work appeared (Rust seed_vtab_insts)
+fn gseed_vtab_insts(g: mut G) -> int {
+    progress := 0
+    vu := g.vtabs
+    for vu != nil {
+        impl := vu.impl
+        if len(impl) > 6 && substr(impl, 0, 6) == "iface:" {
+            vu = vu.next
+        } else {
+            ii := check.iface_ent(g.ck, vu.w)
+            if ii >= 0 {
+                ml := g.ck.ifacesv[ii].methods
+                for ml != nil {
+                    fname := impl + "." + ml.v.n
+                    fi := gfn(g, fname)
+                    if fi >= 0 && g.ck.fnsv[fi].typarams != nil {
+                        b := gvtab_bind(g, fi, ml.v)
+                        if b != nil {
+                            m := ginst_name(g, fname, g.ck.fnsv[fi].typarams, b)
+                            if !collections.map_has(g.inst_done, m) {
+                                ginst_queue(g, fname, g.ck.fnsv[fi].typarams, b)
+                                progress = 1
+                            }
+                        }
+                    }
+                    ml = ml.next
+                }
+            }
+            vu = vu.next
+        }
+    }
+    return progress
+}
+
+// concrete vtabs + receiver-normalizing thunks for every (iface, impl)
+// pair a conversion site produced (Rust emit_vtabs)
+fn gemvtab(g: mut G) {
+    vu := g.vtabs
+    for vu != nil {
+        w := vu.w
+        impl := vu.impl
+        ii := check.iface_ent(g.ck, w)
+        if ii >= 0 {
+            ml := g.ck.ifacesv[ii].methods
+            slots := ""
+            i := 0
+            for ml != nil {
+                m := ml.v
+                tname := "o_vtt_" + cname(w) + "_" + gvtkey(impl) + "_" + itoa(i)
+                ret_c := "void"
+                if m.retk == 1 {
+                    ret_c = gcty(g, m.ret1)
+                }
+                if m.retk == 2 {
+                    ret_c = "struct o_vret_" + cname(w) + "_" + cname(m.n)
+                }
+                psig := ""
+                argl := ""
+                il := m.params
+                k := 0
+                for il != nil {
+                    psig = psig + ", " + gcty(g, il.v) + " a" + itoa(k)
+                    argl = argl + ", a" + itoa(k)
+                    il = il.next
+                    k = k + 1
+                }
+                g.vout = push(g.vout, "static " + ret_c + " " + tname + "(void* _d" + psig + ") {")
+                if len(impl) > 6 && substr(impl, 0, 6) == "iface:" {
+                    // iface->iface rewrap: forward through the source
+                    // pair's vtab (Rust same-impl arm)
+                    w2 := substr(impl, 6, len(impl))
+                    j := gimidx(g, w2, m.n)
+                    vsig := "void*"
+                    il = m.params
+                    for il != nil {
+                        vsig = vsig + ", " + gcty(g, il.v)
+                        il = il.next
+                    }
+                    if m.retk == 0 {
+                        g.vout = push(g.vout, "    RtIface *_iv = (RtIface*)_d;\n    ((void (*)(" + vsig + "))_iv->vtab[" + itoa(j) + "])(_iv->data" + argl + ");\n}\n")
+                    }
+                    if m.retk == 1 {
+                        g.vout = push(g.vout, "    RtIface *_iv = (RtIface*)_d;\n    return ((" + ret_c + " (*)(" + vsig + "))_iv->vtab[" + itoa(j) + "])(_iv->data" + argl + ");\n}\n")
+                    }
+                    if m.retk == 2 {
+                        src := "struct o_vret_" + cname(w2) + "_" + cname(m.n)
+                        g.vout = push(g.vout, "    RtIface *_iv = (RtIface*)_d;\n    " + src + " _r = ((" + src + " (*)(" + vsig + "))_iv->vtab[" + itoa(j) + "])(_iv->data" + argl + ");\n    return (" + ret_c + "){ _r.val, _r.err };\n}\n")
+                    }
+                } else {
+                    // concrete impl — normalize the erased receiver to
+                    // the method's declared receiver ty
+                    fname := impl + "." + m.n
+                    cn := "struct o_s_" + cname(impl)
+                    if collections.map_has(g.ck.enums, impl) {
+                        cn = "struct o_en_" + cname(impl)
+                    }
+                    callee := "o_f_" + cname(fname)
+                    let bind: own collections.Map = nil
+                    mret := m.retk
+                    mfi := gfn(g, fname)
+                    if mfi >= 0 {
+                        mret = g.ck.fnsv[mfi].retk
+                        if g.ck.fnsv[mfi].typarams != nil {
+                            bind = gvtab_bind(g, mfi, m)
+                            if bind != nil {
+                                callee = "o_f_" + cname(ginst_name(g, fname, g.ck.fnsv[mfi].typarams, bind))
+                            }
+                        }
+                    }
+                    recv := "((" + cn + "*)_d)"
+                    if mfi >= 0 && g.ck.fnsv[mfi].params != nil {
+                        rty := g.ck.fnsv[mfi].params.v
+                        if bind != nil {
+                            rty = check.subst_ty(g.ck, rty, bind)
+                        }
+                        rk0 := tyk(g, rty)
+                        if rk0 == check.k_struct() || rk0 == check.k_enum() {
+                            recv = "(*(" + cn + "*)_d)"
+                        }
+                    }
+                    cargs := recv + argl
+                    if mret == 0 {
+                        g.vout = push(g.vout, "    " + callee + "(" + cargs + ");\n}\n")
+                    }
+                    if mret == 1 {
+                        g.vout = push(g.vout, "    return " + callee + "(" + cargs + ");\n}\n")
+                    }
+                    if mret == 2 {
+                        rtag := substr(callee, 4, len(callee))
+                        g.vout = push(g.vout, "    struct o_ret_" + rtag + " _r = " + callee + "(" + cargs + ");\n    return (" + ret_c + "){ _r.val, _r.err };\n}\n")
+                    }
+                }
+                if len(slots) > 0 {
+                    slots = slots + ", "
+                }
+                slots = slots + "(void*)" + tname
+                ml = ml.next
+                i = i + 1
+            }
+            g.vout = push(g.vout, "static void* o_vt_" + cname(w) + "_" + gvtkey(impl) + "[] = { " + slots + " };\n")
+        }
+        vu = vu.next
+    }
+}
+
 fn genall(g: mut G) -> str {
     g.head = push(g.head, "#include \"rt.h\"\n\n")
     i := 0
@@ -3466,6 +4484,18 @@ fn genall(g: mut G) -> str {
     i = 0
     for i < len(g.its) {
         gemit_retstruct(g, i)
+        i = i + 1
+    }
+    // iface pair-ret decls — o_vret_<W>_<m> for `-> [T, err]` methods
+    i = 0
+    for i < len(g.ck.ifacesv) {
+        ml := g.ck.ifacesv[i].methods
+        for ml != nil {
+            if ml.v.retk == 2 {
+                g.head = push(g.head, "struct o_vret_" + cname(g.ck.ifacesv[i].n) + "_" + cname(ml.v.n) + " { " + gcty(g, ml.v.ret1) + " val; int64_t err; };\n")
+            }
+            ml = ml.next
+        }
         i = i + 1
     }
     i = 0
@@ -3497,14 +4527,23 @@ fn genall(g: mut G) -> str {
     }
     g.out = g.w
     gemit_fnv(g)
-    // global initializers run inside oxl_main's prologue
+    // global initializers run inside oxl_main's prologue — before the
+    // inst drain: they can still queue insts / record vtab uses
     i = 0
     for i < len(g.its) {
         if check.nk(g.its[i].node) == 10 {
             match g.its[i].node {
-                parser.Node.Let{name, init} => {
+                parser.Node.Let{name, ty, init} => {
                     g.ck.cur_mod = g.its[i].mod
+                    t := check.t_unk(g.ck)
+                    if ty != nil {
+                        t = gty(g, ty)
+                    }
+                    if ty == nil {
+                        t = xty(g, init)
+                    }
                     v := gx(g, init)
+                    v = gconv_v(g, init, v, t)
                     g.ginit = push(g.ginit, "    o_g_" + cname(name) + " = " + v + ";")
                 }
                 _ => {
@@ -3513,6 +4552,26 @@ fn genall(g: mut G) -> str {
         }
         i = i + 1
     }
+    // mono instantiations + vtab-seeded method insts — a co-fixpoint:
+    // bodies create conv sites (vtab uses), vtab pairs pin generic
+    // method insts, insts create more conv sites (Rust insts loop)
+    g.w = g.out
+    progress := true
+    for progress {
+        progress = false
+        for g.insts != nil {
+            in := g.insts
+            g.insts = in.next
+            progress = true
+            gfunc_inst(g, in.q, in.mangled, in.bind)
+        }
+        if gseed_vtab_insts(g) > 0 {
+            progress = true
+        }
+    }
+    g.out = g.w
+    // concrete vtabs + thunks — after every body so vtab_uses is final
+    gemvtab(g)
     oxlmain := ""
     if g.testm == 1 {
         // test mode: scope-wrap each top-level test_ fn (Rust test_mode)
@@ -3551,7 +4610,7 @@ fn genall(g: mut G) -> str {
     if g.testm == 0 && g.maink == 2 {
         oxlmain = "void oxl_main(void) {\n" + wjoin(g.ginit) + "    o_f_main(); }\n"
     }
-    return wjoin(g.head) + wjoin(g.tramp) + wjoin(g.fhead) + wjoin(g.clpro) + wjoin(g.fbody) + wjoin(g.out) + oxlmain + wjoin(g.clbod)
+    return wjoin(g.head) + wjoin(g.tramp) + wjoin(g.fhead) + wjoin(g.clpro) + wjoin(g.vout) + wjoin(g.fbody) + wjoin(g.out) + oxlmain + wjoin(g.clbod)
 }
 
 // ---------- driver ----------
@@ -3590,8 +4649,9 @@ fn main() {
     for i < len(g.its) {
         if check.nk(g.its[i].node) == 24 {
             match g.its[i].node {
-                parser.Node.Fn{name} => {
-                    collections.map_set(g.fidx, check.qname(g.its[i].mod, name), i)
+                parser.Node.Fn{name, recv} => {
+                    g.ck.cur_mod = g.its[i].mod
+                    collections.map_set(g.fidx, check.fn_qname(g.ck, g.its[i].mod, recv, name), i)
                 }
                 _ => {
                 }
@@ -3627,6 +4687,13 @@ fn main() {
     g.labeln = 0
     g.hoistn = 0
     g.retk = 0
+    g.cret = -1
+    g.subst = nil
+    g.insts = nil
+    g.inst_done = collections.map_new()
+    g.vtabs = nil
+    g.vtab_set = collections.map_new()
+    g.vout = mkslice(str, 0)
     g.cur = ""
     g.inframe = 0
     g.maink = 0
