@@ -306,17 +306,15 @@ grep -q "11 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }
 
 echo "== bootstrap parser =="
 out=$("$OXL" run bootstrap/parser.oxl -- examples/features.oxl)
-$PY - "$out" <<'PY' || { echo "FAIL parser"; exit 1; }
-import json,sys
-d=json.loads(sys.argv[1])
-assert len(d['items'])==6 and not any('skip' in i for i in d['items']), d
-PY
+printf '%s' "$out" | $PY -c 'import json,sys
+d=json.load(sys.stdin)
+assert len(d["items"])==6 and not any("skip" in i for i in d["items"]), d' || { echo "FAIL parser"; exit 1; }
 out=$("$OXL" run bootstrap/parser.oxl -- bootstrap/parser.oxl)
-$PY - "$out" <<'PY' || { echo "FAIL parser self-parse"; exit 1; }
-import json,sys
-d=json.loads(sys.argv[1])
-assert len(d['items'])>20 and not any('skip' in i for i in d['items']), d
-PY
+# stdin not argv for the payload — a self-parse AST is far past the
+# ~32KB command-line cap Windows puts on every child process
+printf '%s' "$out" | $PY -c 'import json,sys
+d=json.load(sys.stdin)
+assert len(d["items"])>20 and not any("skip" in i for i in d["items"]), d' || { echo "FAIL parser self-parse"; exit 1; }
 
 echo "== bootstrap checker =="
 # the self-hosted typechecker must check itself and representative sources
