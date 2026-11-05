@@ -34,7 +34,7 @@ extern fn gui_entry_set_text(entry: int, t: cstr)
 
 extern fn gui_button_new(label: cstr) -> int
 
-extern fn gui_label_new(text: cstr) -> int
+extern fn gui_label_new(text: str) -> int
 
 extern fn gui_listbox_new() -> int
 
@@ -54,7 +54,7 @@ extern fn gui_emit(obj: int, sig: cstr)
 // by value, so each row carries its own removal context
 fn add_row(lb: int, text: str) -> int {
     row := gui_box_new(0, 8)
-    gui_box_append(row, gui_label_new(cstr(text)))
+    gui_box_append(row, gui_label_new(text))
     del := gui_button_new("x")
     gui_connect(del, "clicked", { |w: int| gui_listbox_remove(lb, row) })
     gui_box_append(row, del)
@@ -75,8 +75,9 @@ fn main() {
     // add = click button or press enter in the entry
     on_add := { |w: int|
         t := gui_entry_text(entry)
-        if len(str(t)) > 0 {
-            add_row(lb, str(t))
+        st := str(t)
+        if len(st) > 0 {
+            add_row(lb, st)
             gui_entry_set_text(entry, "")
         }
     }

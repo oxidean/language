@@ -343,6 +343,16 @@ if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
     echo "FAIL cancel_join: expected trap exit, got rc=$rc"; exit 1
 fi
 
+# scope-exit join: break/continue/return inside a loop-nested scope must
+# drain its children — a bare goto orphaned them. Build + run the binary
+# directly like orphan_join: detached children would hold the capture
+# pipe open past the deadline under `oxl run`.
+"$OXL" build tests/scope_exit.oxl -o "$scratch/scope_exit" || {
+    echo "FAIL scope_exit: compile failed"; exit 1; }
+rc=0
+out=$(with_timeout 30 "$scratch/scope_exit") || rc=$?
+[ "$rc" -eq 0 ] && [ "$(tail -1 <<<"$out")" = "scope-exit ok" ] || { echo "FAIL scope_exit: rc=$rc: $out"; exit 1; }
+
 echo "== a3 buffered channels =="
 out=$("$OXL" run tests/chanbuf.oxl)
 [ "$(tail -1 <<<"$out")" = "chanbuf done" ] || { echo "FAIL chanbuf: $out"; exit 1; }

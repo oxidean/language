@@ -25,8 +25,9 @@ HTTP CRUD + SQLite pilot. See the roadmap below for what's v0 vs later.
 
 ## Building the toolchain
 
-Requires: Rust (cargo), a C compiler (`cc`), pthreads, sqlite3 dev
-headers (runtime links `-lsqlite3`). Supported platforms: Linux
+Requires: Rust (cargo), a C compiler (`cc`), and pthreads. Programs
+that use the sqlite3 shims also need sqlite3 dev headers (`-lsqlite3`
+is linked only when the emitted C calls them). Supported platforms: Linux
 (x86_64) and macOS (aarch64); Windows is not yet supported (the
 runtime is POSIX/pthread — a portability layer is future work).
 
@@ -48,7 +49,7 @@ overrides.
 oxl build file.oxl [-o out]   # compile to a native binary
 oxl run file.oxl [args...]    # compile + run
 oxl test file.oxl             # run all fn test_*() in a scope each
-oxl fmt file.oxl [-w]         # normalize indentation/whitespace
+oxl fmt [-w|--check] file.oxl # canonical AST pretty-print (comments kept)
 oxl doc file.oxl              # /// comments → markdown
 oxl lsp                        # stdio LSP: diagnostics, hover, goto-definition
 ```
@@ -118,7 +119,7 @@ oxl/          the compiler (Rust): lexer → parser → check → codegen → C 
 runtime/       rt.c/rt.h — arenas, ObjHdr checks, scopes/traps, executor, channels
 docs/          design doc, semantics annex, prototype report
 stdlib/        the standard library, written in the language (strings, testing, http, json, sync, time, os)
-bootstrap/     self-host components — lexer + parser done, self-parses clean (docs/self-hosting.md)
+bootstrap/     self-host components — lexer, parser, checker, codegen (docs/self-hosting.md)
 examples/      pilot programs (see above)
 tests/         tests/run.sh end-to-end suite (runs in CI)
 prototype/     de-risking benchmarks

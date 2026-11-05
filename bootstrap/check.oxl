@@ -2205,11 +2205,11 @@ fn register(ck: mut Ck, its: []It) {
 
 // ---------- builtins ----------
 fn is_builtin(n: str) -> bool {
-    return n == "print" || n == "println" || n == "mkchan" || n == "send" || n == "recv" || n == "close" || n == "sleep" || n == "new" || n == "mkslice" || n == "push" || n == "assert" || n == "itoa" || n == "argc" || n == "argv" || n == "len" || n == "byteat" || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf" || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32" || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open" || n == "str" || n == "sqlite_exec" || n == "sqlite_exec_bind" || n == "set_rcvtimo" || n == "sqlite_query" || n == "sqlite_close" || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared" || n == "sget" || n == "sset" || n == "scas" || n == "sadd" || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi" || n == "itof" || n == "atof" || n == "ftoa"
+    return n == "print" || n == "println" || n == "mkchan" || n == "send" || n == "recv" || n == "close" || n == "sleep" || n == "msleep" || n == "new" || n == "mkslice" || n == "push" || n == "assert" || n == "itoa" || n == "argc" || n == "argv" || n == "len" || n == "byteat" || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf" || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32" || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open" || n == "str" || n == "sqlite_exec" || n == "sqlite_exec_bind" || n == "set_rcvtimo" || n == "sqlite_query" || n == "sqlite_close" || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared" || n == "sget" || n == "sset" || n == "scas" || n == "sadd" || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi" || n == "itof" || n == "atof" || n == "ftoa"
 }
 
 fn is_susp_builtin(n: str) -> bool {
-    return n == "recv" || n == "send" || n == "sleep"
+    return n == "recv" || n == "send" || n == "sleep" || n == "msleep"
 }
 
 // ---------- expressions ----------
@@ -3007,7 +3007,7 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             }
             return t_void(ck)
         }
-        if qn == "sleep" {
+        if qn == "sleep" || qn == "msleep" {
             if args != nil {
                 assignable(ck, t_int(ck), expr(ck, args.v, env))
             }

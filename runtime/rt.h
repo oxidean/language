@@ -150,6 +150,7 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t);
 int rt_recv_poll(RtChan *ch, RtTask *t);
 void rt_close(RtChan *ch);
 int rt_sleep_poll(int64_t secs, RtTask *t);
+int rt_msleep_poll(int64_t ms, RtTask *t);   /* ms-granularity suspend */
 
 /* --- select: park on N chans at once; first ready arm wins ---
  * sel_arm values: 0..n-1 = chan slot, RT_SEL_TMO = timeout, RT_SEL_ELSE */
@@ -191,6 +192,7 @@ typedef struct {
 
 /* --- misc builtins --- */
 void rt_sleep(int64_t secs);
+void rt_msleep(int64_t ms);               /* blocking ms sleep, cancel-aware */
 OxlStr rt_str_lit(const char *s);
 OxlStr rt_strcat(OxlStr a, OxlStr b);
 int rt_streq(OxlStr a, OxlStr b);

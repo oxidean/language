@@ -861,8 +861,9 @@ fn analyze(path: &Path, src: &str) -> Analysis {
             .list
             .iter()
             .map(|d| {
-                let (l, c) = diags.line_col(d.span.lo);
-                (l, c, format!("[{}] {}", d.code, d.msg))
+                // LSP columns are UTF-16 units; publish_diags wants 1-based
+                let (l, c) = lsp_line_col(src, d.span.lo);
+                (l + 1, c + 1, format!("[{}] {}", d.code, d.msg))
             })
             .collect(),
         index: checked.index,
@@ -910,6 +911,20 @@ fn json_str<'a>(body: &'a str, key: &str) -> Option<String> {
 }
 
 /// reads the four hex digits of a `\uXXXX` escape
+/// filesystem path -> `file://` URI (inverse of uri_to_path):
+/// percent-encode every byte that is not unreserved and not `/`
+fn path_to_uri(p: &str) -> String {
+    let mut out = String::from("file://");
+    for &b in p.as_bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// `file://` URI -> filesystem path (LSP clients percent-encode)
 fn uri_to_path(uri: &str) -> String {
     let s = uri.strip_prefix("file://").unwrap_or(uri);
@@ -1125,14 +1140,15 @@ json_escape(&u.sig)
                     let (l0, c0) = lsp_line_col(&src, u.def_span.lo);
                     let (l1, c1) = lsp_line_col(&src, u.def_span.hi);
                     let uri2 = if u.def_file.starts_with('/') {
-                        format!("file://{}", u.def_file)
+                        path_to_uri(&u.def_file)
                     } else {
                         // relative decl paths resolve against the doc dir
                         let base = Path::new(&file).parent().unwrap_or(Path::new("."));
                         let p = base.join(&u.def_file);
                         let p = p.canonicalize().unwrap_or(p);
-                        format!("file://{}", p.display())
+                        path_to_uri(&p.to_string_lossy())
                     };
+                    let uri2 = json_escape(&uri2);
                     format!(
                         "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"uri\":\"{uri2}\",\"range\":{{\"start\":{{\"line\":{l0},\"character\":{c0}}},\"end\":{{\"line\":{l1},\"character\":{c1}}}}}}}}}"
                     )

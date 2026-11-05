@@ -117,12 +117,14 @@ struct Gen<'a> {
     frame_decls: Vec<String>,
     /// RtScope fields (one per `scope {}` site in this fn)
     scope_decls: Vec<String>,
+    /// indices into scope_decls of scopes open at this emission point
+    fscope_stack: Vec<usize>,
     /// resume states used (for the switch prologue)
     state_labels: Vec<usize>,
     state_ctr: usize,
     label_ctr: usize,
-    /// (continue-label, break-label) per enclosing loop
-    loop_labels: Vec<(String, String)>,
+    /// (continue-label, break-label, open-scope depth) per enclosing loop
+    loop_labels: Vec<(String, String, usize)>,
     hoist_ctr: usize,
     /// frame struct decls + poll prototypes — before all poll bodies
     /// (a poll body may spawn a fn whose frame is declared later)
@@ -177,6 +179,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         bind_env: std::cell::RefCell::new(Vec::new()),
         frame_decls: Vec::new(),
         scope_decls: Vec::new(),
+        fscope_stack: Vec::new(),
         state_labels: Vec::new(),
         state_ctr: 1,
         label_ctr: 0,
@@ -958,6 +961,7 @@ impl<'a> Gen<'a> {
                         "argv" | "itoa" | "substr" | "bufstr" | "sqlite_query" | "readfile" | "ftoa" => {
                             return Ty::Str
                         }
+                        "str" => return Ty::Str,
                         "cstr" => return Ty::CStr,
                         "mkbuf" | "sqlite_open" => return Ty::Own(Box::new(Ty::Unknown)),
                         "mkshared" => return Ty::Shared,
@@ -1933,6 +1937,7 @@ impl<'a> Gen<'a> {
             "send" => format!("rt_send({})", j(argvs)),
             "recv" => format!("rt_recv({})", a0),
             "sleep" => format!("rt_sleep({})", a0),
+            "msleep" => format!("rt_msleep({})", a0),
             "itoa" => format!("rt_itoa({})", a0),
             "argc" => "rt_argc()".into(),
             "argv" => format!("rt_argv({})", a0),
@@ -2446,6 +2451,13 @@ impl<'a> Gen<'a> {
                     };
                 }
                 _ => {
+                    // `cstr("lit")` — a literal already is a C string; an
+                    // rt_cstr copy would only sit in the scope arena
+                    if name == "cstr" {
+                        if let Some(Expr { kind: ExprKind::Str(s), .. }) = args.first() {
+                            return format!("\"{}\"", c_escape(s));
+                        }
+                    }
                     if let Some(b) = self.builtin_emit(name, &argvs) {
                         return b;
                     }
@@ -2490,7 +2502,13 @@ impl<'a> Gen<'a> {
                             };
                             let raw_at = self.expr_ty(a);
                             if pt == Ty::CStr && self.dt(&raw_at) == Ty::Str {
-                                v = format!("rt_cstr({v})");
+                                // a literal already is a C string — an
+                                // rt_cstr copy would only sit in the
+                                // caller's scope arena
+                                v = match &a.kind {
+                                    ExprKind::Str(s) => format!("\"{}\"", c_escape(s)),
+                                    _ => format!("rt_cstr({v})"),
+                                };
                             }
                             // only `own` args start a fresh borrow — mut/ref args
                             // are reborrows inside the caller's existing region
@@ -2554,7 +2572,7 @@ impl<'a> Gen<'a> {
 
     /// is `n` a suspend point callee (susp fn or blocking builtin)?
     fn susp_name(&self, n: &str) -> bool {
-        self.susp.contains(n) || matches!(n, "recv" | "send" | "sleep")
+        self.susp.contains(n) || matches!(n, "recv" | "send" | "sleep" | "msleep")
     }
 
     /// is this expr a call to a susp callee?
@@ -2953,6 +2971,27 @@ impl<'a> Gen<'a> {
         );
     }
 
+    /// join+finish frame scope `sc{i}` — same suspend point a scope's own
+    /// exit emits: park until children drain, then tear the scope down
+    fn fscope_close(&mut self, i: usize) {
+        let k = self.state_ctr;
+        self.state_ctr += 1;
+        self.state_labels.push(k);
+        let _ = writeln!(self.out,
+            "    fr->state = {k};\n    if (rt_scope_join_poll(&fr->sc{i}, task) == RT_PENDING) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }}\n    s{k}: ;\n    {{ int64_t _e = rt_scope_finish(&fr->sc{i});\n      if (_e) rt_scope_propagate(tls_scope, _e); }}");
+    }
+
+    /// close every frame scope open at stack depth `from`, innermost
+    /// first. break/continue/return exits route through this — a bare
+    /// goto/return orphans the scope's live children and leaks the
+    /// frame-resident RtScope
+    fn fscope_drain(&mut self, from: usize) {
+        let open: Vec<usize> = self.fscope_stack[from..].to_vec();
+        for i in open.into_iter().rev() {
+            self.fscope_close(i);
+        }
+    }
+
     /// emit a suspend point for an oxl-fn call: allocate the child frame,
     /// poll it, propagate PENDING/CANCEL, bind the result on READY
     fn fsusp_call(&mut self, name: &str, args: &[Expr], dest: FDest) {
@@ -3019,6 +3058,7 @@ impl<'a> Gen<'a> {
         let poll = match name {
             "recv" => format!("rt_recv_poll({}, task)", argvs[0]),
             "send" => format!("rt_send_poll({}, {}, task)", argvs[0], argvs[1]),
+            "msleep" => format!("rt_msleep_poll({}, task)", argvs[0]),
             _ => format!("rt_sleep_poll({}, task)", argvs[0]),
         };
         let _ = writeln!(self.out,
@@ -3129,7 +3169,7 @@ impl<'a> Gen<'a> {
                     if let ExprKind::Call { f, args } = &init.kind {
                         if let ExprKind::Ident(n) = &f.kind {
                             let n = n.clone();
-                            if matches!(n.as_str(), "recv" | "send" | "sleep") {
+                            if matches!(n.as_str(), "recv" | "send" | "sleep" | "msleep") {
                                 self.fsusp_leaf(&n, args, FDest::Field(fd));
                             } else {
                                 self.fsusp_call(&n, args, FDest::Field(fd));
@@ -3236,7 +3276,7 @@ impl<'a> Gen<'a> {
                     if let ExprKind::Call { f, args } = &val.kind {
                         if let ExprKind::Ident(n) = &f.kind {
                             let n = n.clone();
-                            if matches!(n.as_str(), "recv" | "send" | "sleep") {
+                            if matches!(n.as_str(), "recv" | "send" | "sleep" | "msleep") {
                                 self.fsusp_leaf(&n, args, FDest::Assign(tc));
                             } else {
                                 self.fsusp_call(&n, args, FDest::Assign(tc));
@@ -3260,7 +3300,7 @@ impl<'a> Gen<'a> {
                     if let ExprKind::Call { f, args } = &e.kind {
                         if let ExprKind::Ident(n) = &f.kind {
                             let n = n.clone();
-                            if matches!(n.as_str(), "recv" | "send" | "sleep") {
+                            if matches!(n.as_str(), "recv" | "send" | "sleep" | "msleep") {
                                 self.fsusp_leaf(&n, args, FDest::Void);
                             } else {
                                 self.fsusp_call(&n, args, FDest::Void);
@@ -3276,6 +3316,7 @@ impl<'a> Gen<'a> {
                 self.stmt_defer(call);
             }
             Stmt::Return { vals, .. } => {
+                self.fscope_drain(0);
                 self.emit_defers();
                 if !vals.is_empty() {
                     if self.cur_ret_pair && vals.len() == 2 {
@@ -3316,7 +3357,11 @@ impl<'a> Gen<'a> {
                 let lend = self.new_label();
                 let c = self.expr(cond);
                 let _ = writeln!(self.out, "    {lhead}: ;\n    if (!({c})) goto {lend};");
-                self.loop_labels.push((lhead.clone(), lend.clone()));
+                self.loop_labels.push((
+                    lhead.clone(),
+                    lend.clone(),
+                    self.fscope_stack.len(),
+                ));
                 self.env.push(HashMap::new());
                 self.fslots.push(HashMap::new());
                 self.fstmts(&body.stmts);
@@ -3326,12 +3371,16 @@ impl<'a> Gen<'a> {
                 let _ = writeln!(self.out, "    goto {lhead};\n    {lend}: ;");
             }
             Stmt::Break { .. } => {
-                if let Some((_, lend)) = self.loop_labels.last() {
+                if let Some((_, lend, depth)) = self.loop_labels.last() {
+                    let (lend, depth) = (lend.clone(), *depth);
+                    self.fscope_drain(depth);
                     let _ = writeln!(self.out, "    goto {lend};");
                 }
             }
             Stmt::Continue { .. } => {
-                if let Some((lhead, _)) = self.loop_labels.last() {
+                if let Some((lhead, _, depth)) = self.loop_labels.last() {
+                    let (lhead, depth) = (lhead.clone(), *depth);
+                    self.fscope_drain(depth);
                     let _ = writeln!(self.out, "    goto {lhead};");
                 }
             }
@@ -3339,16 +3388,14 @@ impl<'a> Gen<'a> {
                 let i = self.scope_decls.len();
                 self.scope_decls.push(format!("RtScope sc{i};"));
                 let _ = writeln!(self.out, "    rt_scope_enter(&fr->sc{i});");
+                self.fscope_stack.push(i);
                 self.env.push(HashMap::new());
                 self.fslots.push(HashMap::new());
                 self.fstmts(&body.stmts);
                 self.fslots.pop();
                 self.env.pop();
-                let k = self.state_ctr;
-                self.state_ctr += 1;
-                self.state_labels.push(k);
-                let _ = writeln!(self.out,
-                    "    fr->state = {k};\n    if (rt_scope_join_poll(&fr->sc{i}, task) == RT_PENDING) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }}\n    s{k}: ;\n    {{ int64_t _e = rt_scope_finish(&fr->sc{i});\n      if (_e) rt_scope_propagate(tls_scope, _e); }}");
+                self.fscope_stack.pop();
+                self.fscope_close(i);
             }
             Stmt::Spawn { call, blocking, .. } => self.spawn(call, *blocking),
             Stmt::Select { arms, .. } => self.fselect(arms),
@@ -3454,6 +3501,7 @@ impl<'a> Gen<'a> {
         self.fslots = vec![HashMap::new()];
         self.frame_decls = Vec::new();
         self.scope_decls = Vec::new();
+        self.fscope_stack = Vec::new();
         self.state_labels = Vec::new();
         self.state_ctr = 1;
         self.loop_labels = Vec::new();

@@ -56,7 +56,7 @@ assignable to it.
 
 - Enum scrutinee: all variants must be covered by name or by a
   wildcard/bind arm. The error names missing variants:
-  `non-exhaustive match on `E` — missing B`.
+  ``non-exhaustive match on `E` — missing B``.
 - `bool`: `true`+`false` covers without a wildcard.
 - `int`/`float`/`str`: literal patterns never exhaust — a `_` (or
   bare bind) arm is required.

@@ -334,7 +334,10 @@ impl<'a> Parser<'a> {
     /// `-> t` / `-> [t, err]` / nothing
     fn parse_ret(&mut self) -> Option<RetTy> {
         let ret = if self.eat_p(P::Arrow) {
-            if self.eat_p(P::LBracket) {
+            // `[` opens the `[T, err]` pair form only when a type follows;
+            // `-> []T` is a plain slice return and falls through to ty()
+            if self.cur().tok == Tok::P(P::LBracket) && self.peek().tok != Tok::P(P::RBracket) {
+                self.bump();
                 let t = self.ty()?;
                 self.expect_p(P::Comma, "`,`");
                 // err member is fixed

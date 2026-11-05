@@ -89,8 +89,13 @@ void gui_entry_set_text(int64_t entry, const char *t) {
 int64_t gui_button_new(const char *label) {
     return (int64_t)(intptr_t)gtk_button_new_with_label(label);
 }
-int64_t gui_label_new(const char *text) {
-    return (int64_t)(intptr_t)gtk_label_new(text);
+/* takes the borrowed OxlStr — the dup lives only for the gtk call,
+ * so per-row text never enters the caller's scope arena */
+int64_t gui_label_new(OxlStr text) {
+    char *z = g_strndup(text.p, (gsize)text.n);
+    GtkWidget *l = gtk_label_new(z);
+    g_free(z);
+    return (int64_t)(intptr_t)l;
 }
 void gui_label_set_text(int64_t lbl, const char *t) {
     gtk_label_set_text(GTK_LABEL((gpointer)(intptr_t)lbl), t);

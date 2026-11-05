@@ -1215,7 +1215,7 @@ void rt_send(RtChan *ch, int64_t v) {
         if (rt_cancelled()) {
             /* retract our own unclaimed slot only — a 1 here could be
              * another thread sender's fresh deposit */
-            if (ch->has && ch->slot_owner == me) { ch->has = 0; ch->slot_owner = NULL; }
+            if (ch->has && ch->slot_owner == me) { ch->has = 0; ch->val = 0; ch->slot_owner = NULL; }
             goto cancelled;
         }
         /* consumed or closed mid-wait: the send is complete either way
@@ -1273,8 +1273,9 @@ int64_t rt_recv(RtChan *ch) {
             task_unwind();
         }
     }
-    v = ch->val;
+    v = ch->has ? ch->val : 0; /* closed+empty delivers 0, not a stale slot */
     ch->has = 0;
+    ch->val = 0;
     /* broadcast, not signal: with racing senders a lone wakeup can land
      * on the *completing* send instead of the queued one and strand it */
     pthread_cond_broadcast(&ch->cv_send);
@@ -1306,8 +1307,9 @@ int rt_recv_poll(RtChan *ch, RtTask *t) {
         return RT_READY;
     }
     if (ch->has || ch->closed) {
-        t->chan_res = ch->val;
+        t->chan_res = ch->has ? ch->val : 0;
         ch->has = 0;
+        ch->val = 0;
         pthread_cond_broadcast(&ch->cv_send);
         pthread_mutex_unlock(&ch->mu);
         return RT_READY;
@@ -1380,7 +1382,9 @@ void rt_close(RtChan *ch) {
      * can unref+free it while we still walk detached nodes */
     for (SelW *w = sw; w; w = w->next)
         __sync_add_and_fetch(&w->sel->refs, 1);
-    int64_t val = ch->val;
+    int64_t val = ch->has ? ch->val : 0;
+    ch->has = 0;
+    ch->val = 0;
     pthread_mutex_unlock(&ch->mu);
     while (r) {
         RtTask *n = r->next;
@@ -1442,6 +1446,26 @@ int rt_sleep_poll(int64_t secs, RtTask *t) {
     return RT_PENDING;
 }
 
+static void *msleep_tick(void *p) {
+    RtTask *x = p;
+    RtTask *w = x->arg;
+    int64_t ms = x->chan_res;
+    free(x);
+    if (ms > 0) sleep_us(ms * 1000);
+    rt_task_wake(w);
+    return 0;
+}
+int rt_msleep_poll(int64_t ms, RtTask *t) {
+    RtTask *timer = malloc(sizeof *timer);
+    memset(timer, 0, sizeof *timer);
+    timer->arg = t;
+    timer->chan_res = ms;
+    pthread_t th;
+    if (pthread_create(&th, NULL, msleep_tick, timer) == 0) pthread_detach(th);
+    else { free(timer); return RT_READY; }
+    return RT_PENDING;
+}
+
 /* ---------------- select ----------------
  * A parked select owns one SelW node per recv arm, linked on each chan's
  * selq. The first fire claims the task's parked flag (park_claim) so a
@@ -1469,8 +1493,9 @@ static int sel_ready(RtChan *ch, int64_t *v, RtTask **wake_me) {
         return 1;
     }
     if (ch->has || ch->closed) {
-        *v = ch->val;
+        *v = ch->has ? ch->val : 0;
         ch->has = 0;
+        ch->val = 0;
         pthread_cond_broadcast(&ch->cv_send);
         return 1;
     }
@@ -1849,6 +1874,12 @@ void rt_println_f64(double v) { printf("%.15g\n", v); fflush(stdout); }
 void rt_sleep(int64_t secs) {
     if (rt_cancelled()) task_unwind();
     sleep((unsigned)secs);
+}
+
+/* ms-granularity variant — same suspend contract as rt_sleep */
+void rt_msleep(int64_t ms) {
+    if (rt_cancelled()) task_unwind();
+    if (ms > 0) sleep_us(ms * 1000);
 }
 
 /* ---------------- args, strings, buffers ---------------- */

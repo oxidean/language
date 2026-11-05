@@ -11,7 +11,11 @@ struct MapNode { key: str, val: int, next: own MapNode }
 
 struct Bucket { head: own MapNode }
 
-struct Map { bs: []Bucket, size: int }
+// free: singly-linked node freelist — `own` handles can't cross the
+// rt_free(own void) FFI boundary in v0, so deleted nodes are recycled
+// instead of freed. Insert/delete churn reuses nodes and stays bounded
+// at the high-water mark instead of leaking one node per delete.
+struct Map { bs: []Bucket, size: int, free: own MapNode }
 
 struct Set { m: own Map }
 
@@ -33,6 +37,7 @@ fn map_new() -> own Map {
     m := new(Map)
     m.bs = mkslice(Bucket, 16)
     m.size = 0
+    m.free = nil
     return m
 }
 
@@ -56,7 +61,14 @@ fn map_set(m: mut Map, k: str, v: int) {
         }
         p = p.next
     }
-    n := new(MapNode)
+    // recycle a del'd node before allocating — bounds live nodes at
+    // the map's high-water mark (see Map.free)
+    n := m.free
+    if n == nil {
+        n = new(MapNode)
+    } else {
+        m.free = n.next // move leaves n.next nil for the relink below
+    }
     n.key = k
     n.val = v
     n.next = m.bs[h].head
@@ -90,6 +102,8 @@ fn map_del(m: mut Map, k: str) {
     }
     if p.key == k {
         m.bs[h].head = p.next
+        p.next = m.free // recycle onto the freelist (Map.free)
+        m.free = p
         m.size = m.size - 1
         return
     }
@@ -99,8 +113,11 @@ fn map_del(m: mut Map, k: str) {
             return
         }
         if n.key == k {
-            // unlink: drop n from the chain; node arena-frees with scope
+            // unlink and recycle — `own` nodes can't reach rt_free's
+            // `own void` boundary, so they go back to the map's freelist
             p.next = n.next
+            n.next = m.free
+            m.free = n
             m.size = m.size - 1
             return
         }

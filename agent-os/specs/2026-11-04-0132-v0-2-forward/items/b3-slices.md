@@ -37,7 +37,8 @@ Nothing — pure frontend+runtime addition. Track C benefits.
   outlive the scope — same rule as `ref`. Ordinary slice escapes are
   not generally runtime-checked and are unsafe (see
   `docs/semantics/slices.md`); the checker rejects `[]T` at `return`
-  and `spawn` boundaries, and the general check lands with the D2
-  own-move tracking work.
+  and `spawn` boundaries. The general check — an arena-backed slice
+  stored in an outer struct and read after its scope closes reads
+  freed storage — remains open work beyond the D2 own-move tracking.
 - Generics interplay: `[]T` inside generic fns — shape-substitution
   already handles pointer-sized types; verify.

@@ -10,7 +10,9 @@ the design's Go-shape implies.
 
 - `defer expr` — runs when the enclosing fn returns (any exit: value,
   error return, or scope-trap unwind).
-- LIFO order (Zig/Go), evaluated at return-site in reverse.
+- LIFO order (Zig/Go): each defer's call arguments are evaluated when
+  the defer registers; the captured calls run in reverse registration
+  order when the fn exits — a loop deferring `f(i)` prints 2, 1, 0.
 - Lowering: **runtime registration**, not statement reordering — each
   executed `defer` pushes a thunk (call + value-captured env) onto the
   running task's per-task defer stack; fns drain down to their entry

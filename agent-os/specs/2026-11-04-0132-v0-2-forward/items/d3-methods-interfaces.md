@@ -43,5 +43,5 @@ interface itself, inheritance. Shallow is the point.
 ## Risks
 
 - Vtable layout + method set computation — the meat of the work.
-- `own`/`mut` receivers (`fn (mut p Point)`) — borrow semantics must
+- `own`/`mut` receivers (`fn (p mut Point)`) — borrow semantics must
   compose with method dispatch; keep the same rules as free fns.

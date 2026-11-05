@@ -11,7 +11,9 @@ fn unix_ms() -> int {
     return now_ms()
 }
 
-/// sleep the calling task for `ms` milliseconds
+/// sleep the calling task for `ms` milliseconds — suspends (parks) the
+/// task so its pool worker stays free and cancel fires on time; usleep
+/// blocks the worker thread and only remains for deliberate blocking
 fn sleep_ms(ms: int) {
-    usleep(ms * 1000)
+    msleep(ms)
 }

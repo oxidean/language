@@ -63,7 +63,7 @@ struct GArm { has: int, cond: str, binds: own GBnd }
 struct GEV { ok: bool, en: str, vn: str, i: int }
 
 // (continue, break) label pair per enclosing loop in a frame body
-struct GLab { c: str, b: str }
+struct GLab { c: str, b: str, d: int }
 
 // forward-appending Node list builder for the hoist transform
 struct GBuf { items: own parser.NList, tail: own parser.NList }
@@ -105,6 +105,7 @@ struct G {
     sdecls: []str, // "RtScope scN;" frame fields
     states: []int, // resume labels used in this frame
     loops: []GLab, // (continue, break) label stack
+    sopen: []int, // sdecls indices of scopes open at this emission point
     tmpn: int,
     scopen: int,
     cln: int,
@@ -795,6 +796,9 @@ fn xty_call(g: mut G, f: ref parser.Node, args: ref parser.NList) -> int {
     if name == "argv" || name == "itoa" || name == "substr" || name == "bufstr" || name == "sqlite_query" || name == "readfile" || name == "ftoa" {
         return check.t_str(g.ck)
     }
+    if name == "str" {
+        return check.t_str(g.ck)
+    }
     if name == "cstr" {
         return check.tk(g.ck, check.k_cstr())
     }
@@ -1256,6 +1260,9 @@ fn gbuiltin(name: str, argvs: ref GAv) -> str {
     }
     if name == "sleep" {
         return "rt_sleep(" + a0 + ")"
+    }
+    if name == "msleep" {
+        return "rt_msleep(" + a0 + ")"
     }
     if name == "itoa" {
         return "rt_itoa(" + a0 + ")"
@@ -2513,6 +2520,9 @@ fn gfsusp_leaf(g: mut G, name: str, args: ref parser.NList, dk: int, da: str, db
     if name == "sleep" {
         poll = "rt_sleep_poll(" + gav_at(argvs, 0) + ", task)"
     }
+    if name == "msleep" {
+        poll = "rt_msleep_poll(" + gav_at(argvs, 0) + ", task)"
+    }
     wln(g, "    if (" + poll + " == RT_PENDING) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }")
     wln(g, "    s" + itoa(k) + ": ;")
     wln(g, "    if (rt_cancelled()) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_CANCEL; }")
@@ -2902,6 +2912,7 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
                     g.hoistn = g.hoistn + 1
                     pe := gfslot(g, "_pe" + itoa(g.hoistn), "int64_t")
                     g.hoistn = g.hoistn + 1
+                    gfscope_drain(g, 0)
                     gdefers(g)
                     qn := check.resolve_named(g.ck, cn)
                     match vals.v {
@@ -2916,6 +2927,7 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
                     return
                 }
             }
+            gfscope_drain(g, 0)
             gdefers(g)
             if vals != nil {
                 if g.retk == 2 && vals.next != nil {
@@ -2964,7 +2976,7 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
             c := gx(g, cond)
             wln(g, "    " + lhead + ": ;")
             wln(g, "    if (!(" + c + ")) goto " + lend + ";")
-            g.loops = push(g.loops, GLab{c: lhead, b: lend})
+            g.loops = push(g.loops, GLab{c: lhead, b: lend, d: len(g.sopen)})
             check.env_push(g.env)
             check.env_push(g.fsl)
             gfblk(g, body)
@@ -2976,11 +2988,13 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
         }
         parser.Node.Break => {
             if len(g.loops) > 0 {
+                gfscope_drain(g, g.loops[len(g.loops) - 1].d)
                 wln(g, "    goto " + g.loops[len(g.loops) - 1].b + ";")
             }
         }
         parser.Node.Continue => {
             if len(g.loops) > 0 {
+                gfscope_drain(g, g.loops[len(g.loops) - 1].d)
                 wln(g, "    goto " + g.loops[len(g.loops) - 1].c + ";")
             }
         }
@@ -2988,19 +3002,14 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
             i := len(g.sdecls)
             g.sdecls = push(g.sdecls, "RtScope sc" + itoa(i) + ";")
             wln(g, "    rt_scope_enter(&fr->sc" + itoa(i) + ");")
+            g.sopen = push(g.sopen, i)
             check.env_push(g.env)
             check.env_push(g.fsl)
             gfblk(g, body)
             check.env_pop(g.fsl)
             check.env_pop(g.env)
-            k := g.staten
-            g.staten = g.staten + 1
-            g.states = push(g.states, k)
-            wln(g, "    fr->state = " + itoa(k) + ";")
-            wln(g, "    if (rt_scope_join_poll(&fr->sc" + itoa(i) + ", task) == RT_PENDING) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }")
-            wln(g, "    s" + itoa(k) + ": ;")
-            wln(g, "    { int64_t _e = rt_scope_finish(&fr->sc" + itoa(i) + ");")
-            wln(g, "      if (_e) { if (fr->sc" + itoa(i) + ".parent) { fr->sc" + itoa(i) + ".parent->trapped = 1; fr->sc" + itoa(i) + ".parent->err = _e; } else { fprintf(stderr, \"trap %lld escaped top scope\\n\", (long long)_e); abort(); } } }")
+            gpop_sopen(g)
+            gfscope_close(g, i)
         }
         parser.Node.Spawn{e} => {
             gspawn(g, e, false)
@@ -3046,6 +3055,45 @@ fn gpop_loop(g: mut G) {
         i = i + 1
     }
     g.loops = ys
+}
+
+// join+finish frame scope sc<i> — same suspend point a scope's own exit
+// emits: park until children drain, then tear the scope down
+fn gfscope_close(g: mut G, i: int) {
+    k := g.staten
+    g.staten = g.staten + 1
+    g.states = push(g.states, k)
+    wln(g, "    fr->state = " + itoa(k) + ";")
+    wln(g, "    if (rt_scope_join_poll(&fr->sc" + itoa(i) + ", task) == RT_PENDING) { fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }")
+    wln(g, "    s" + itoa(k) + ": ;")
+    wln(g, "    { int64_t _e = rt_scope_finish(&fr->sc" + itoa(i) + ");")
+    wln(g, "      if (_e) rt_scope_propagate(tls_scope, _e); }")
+}
+
+// close every frame scope open at stack depth `from`, innermost first —
+// break/continue/return exits route through this: a bare goto orphans
+// the scope's live children and leaks the frame-resident RtScope
+fn gfscope_drain(g: mut G, from: int) {
+    j := len(g.sopen) - 1
+    for j >= from {
+        gfscope_close(g, g.sopen[j])
+        j = j - 1
+    }
+}
+
+// pop the innermost open frame scope (mirror of gpop_loop)
+fn gpop_sopen(g: mut G) {
+    n := len(g.sopen)
+    if n == 0 {
+        return
+    }
+    ys := mkslice(int, n - 1)
+    i := 0
+    for i < n - 1 {
+        ys[i] = g.sopen[i]
+        i = i + 1
+    }
+    g.sopen = ys
 }
 
 // ---------- fn emission (Rust func/func_frame/generate) ----------
@@ -3127,6 +3175,7 @@ fn gframe(g: mut G, qn: str, params: ref parser.NList, ret: ref parser.Node, bod
     g.states = mkslice(int, 0)
     g.staten = 1
     g.loops = mkslice(GLab, 0)
+    g.sopen = mkslice(int, 0)
     g.defers = nil
     check.env_push(g.env)
     pfields := ""
@@ -3570,6 +3619,7 @@ fn main() {
     g.sdecls = mkslice(str, 0)
     g.states = mkslice(int, 0)
     g.loops = mkslice(GLab, 0)
+    g.sopen = mkslice(int, 0)
     g.tmpn = 0
     g.scopen = 0
     g.cln = 0

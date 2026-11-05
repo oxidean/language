@@ -259,7 +259,7 @@ pub struct Checker<'a> {
 }
 
 const BUILTINS: &[&str] = &[
-    "print", "println", "mkchan", "send", "recv", "close", "sleep", "new",
+    "print", "println", "mkchan", "send", "recv", "close", "sleep", "msleep", "new",
     "mkslice", "push",
     "assert", "itoa", "argc", "argv", "len", "byteat", "substr", "find", "atoi",
     "mkbuf", "bufstr", "poke8", "poke16", "poke32", "htons", "htonl",
@@ -1961,7 +1961,7 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::Void;
                 }
-                "sleep" => {
+                "sleep" | "msleep" => {
                     if let Some(a) = args.first() {
                         let t = self.expr(a, env);
                         self.assignable(&Ty::Int, &t, a.span);
@@ -2336,7 +2336,7 @@ impl<'a> Checker<'a> {
                 ExprKind::Call { f, args } => {
                     let builtin_susp = matches!(
                         &f.kind,
-                        ExprKind::Ident(n) if n == "recv" || n == "send" || n == "sleep"
+                        ExprKind::Ident(n) if n == "recv" || n == "send" || n == "sleep" || n == "msleep"
                     );
                     builtin_susp
                         || args.iter().any(expr_susp)
@@ -2400,7 +2400,7 @@ impl<'a> Checker<'a> {
                 ExprKind::Call { f, args } => {
                     let susp_callee = matches!(&f.kind,
                         ExprKind::Ident(n)
-                            if susp.contains(n) || n == "recv" || n == "send" || n == "sleep");
+                            if susp.contains(n) || n == "recv" || n == "send" || n == "sleep" || n == "msleep");
                     susp_callee
                         || args.iter().any(|a| expr_has_susp(a, susp))
                         || matches!(&f.kind, ExprKind::Call { .. } | ExprKind::Field { .. })
@@ -2471,7 +2471,7 @@ impl<'a> Checker<'a> {
                                     ExprKind::Call { f, .. }
                                         if matches!(&f.kind, ExprKind::Ident(n)
                                             if susp.contains(n)
-                                                || n == "recv" || n == "send" || n == "sleep"));
+                                                || n == "recv" || n == "send" || n == "sleep" || n == "msleep"));
                                 if !(stmt_pos && top_call) {
                                     diags.push(Diag::err(a.span, "check",
                                         "suspending call inside a match arm must be the whole arm body \
@@ -2731,7 +2731,7 @@ fn scan_expr(e: &Expr, s: &mut BodyScan) {
             if let ExprKind::Ident(n) = &f.kind {
                 s.callees.insert(n.clone());
                 // usleep is deliberately absent — it blocks its thread, it never parks
-                if matches!(n.as_str(), "recv" | "send" | "sleep") {
+                if matches!(n.as_str(), "recv" | "send" | "sleep" | "msleep") {
                     s.seeded = true;
                 }
             } else {
