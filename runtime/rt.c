@@ -1,16 +1,22 @@
 /* oxl runtime — v0 implementation. See docs/semantics/. */
 #define _DEFAULT_SOURCE /* keep POSIX/BSD decls visible under strict -std */
 #include "rt.h"
+#ifndef _WIN32
 #include <arpa/inet.h>
+#endif
 #include <errno.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/socket.h>
+#endif
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #define ARENA_CAP (1 << 20)
 
@@ -60,11 +66,11 @@ static void *alloc_in(RtScope *s, int64_t size, int own) {
         /* non-own allocs that miss the arena are still scope-lived:
          * track them so join_scope frees them with the arena */
         if (!own && s) {
-            pthread_mutex_lock(&s->mu);
+            oxl_mu_lock(&s->mu);
             h->hscope = s;
             h->hnext = s->heap;
             s->heap = h;
-            pthread_mutex_unlock(&s->mu);
+            oxl_mu_unlock(&s->mu);
         }
     }
     static uint32_t gen = 1;
@@ -83,13 +89,13 @@ void rt_free(void *obj) {
     if (!h->arena) {
         if (h->hscope) { /* scope-tracked: unlink before freeing */
             RtScope *s = h->hscope;
-            pthread_mutex_lock(&s->mu);
+            oxl_mu_lock(&s->mu);
             ObjHdr **pp = &s->heap;
             while (*pp) {
                 if (*pp == h) { *pp = h->hnext; break; }
                 pp = &(*pp)->hnext;
             }
-            pthread_mutex_unlock(&s->mu);
+            oxl_mu_unlock(&s->mu);
         }
         free(h);
     }
@@ -124,13 +130,13 @@ void rt_unborrow(void *obj) {
  * and a surviving child's later unlink sees parent==NULL instead of
  * locking destroyed memory. Lock order: link_mu first, at most one
  * scope mu nested inside; never two scope mutexes under it. */
-static pthread_mutex_t link_mu = PTHREAD_MUTEX_INITIALIZER;
+static oxl_mutex_t link_mu = OXL_MUTEX_INIT;
 
 void rt_scope_enter(RtScope *s) {
     memset(s, 0, sizeof *s);
     s->parent = tls_scope;
-    pthread_mutex_init(&s->mu, NULL);
-    pthread_cond_init(&s->cv, NULL);
+    oxl_mu_init(&s->mu, NULL);
+    oxl_cv_init(&s->cv, NULL);
     s->arena_buf = xmalloc(ARENA_CAP);
     s->arena_cap = ARENA_CAP;
     s->owner = tls_task;
@@ -145,16 +151,16 @@ void rt_scope_enter(RtScope *s) {
          * it wins unlink, so p->mu is alive for this whole section.
          * The local keeps p valid for the unlock after we detach. */
         RtScope *p = s->parent;
-        pthread_mutex_lock(&link_mu);
-        pthread_mutex_lock(&p->mu);
+        oxl_mu_lock(&link_mu);
+        oxl_mu_lock(&p->mu);
         if (p->cancel || p->dead) s->cancel = 1;
         if (p->dead) s->parent = NULL;
         else {
             s->sib = p->children;
             p->children = s;
         }
-        pthread_mutex_unlock(&p->mu);
-        pthread_mutex_unlock(&link_mu);
+        oxl_mu_unlock(&p->mu);
+        oxl_mu_unlock(&link_mu);
     }
     tls_scope = s;
 }
@@ -170,8 +176,8 @@ void rt_scope_enter(RtScope *s) {
 /* wakeup cell for tasks driven outside the work pool (root, blocking
  * pool): owned by the driver's stack, pointed at for the task's life */
 typedef struct RtWake {
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
+    oxl_mutex_t mu;
+    oxl_cond_t cv;
     volatile int ready;
 } RtWake;
 
@@ -237,14 +243,14 @@ static void park_add(RtTask *t, RtScope *s, void *obj, int kind) {
     if (!t) return;
     if (!s) { t->parked = 1; t->waitobj = obj; t->waitkind = kind; return; }
     task_ref(t);
-    pthread_mutex_lock(&s->mu);
+    oxl_mu_lock(&s->mu);
     t->parked = 1;
     t->park_scope = s;
     t->waitobj = obj;
     t->waitkind = kind;
     t->pnext = s->parked;
     s->parked = t;
-    pthread_mutex_unlock(&s->mu);
+    oxl_mu_unlock(&s->mu);
 }
 
 /* drop `t` from its scope's parked list (idempotent hygiene; the claim
@@ -253,7 +259,7 @@ static void park_del(RtTask *t) {
     RtScope *s = t->park_scope;
     if (!s) return;
     int unlinked = 0;
-    pthread_mutex_lock(&s->mu);
+    oxl_mu_lock(&s->mu);
     if (t->pnext != t) { /* parked-list sentinel: self-link = not listed */
         RtTask **pp = &s->parked;
         while (*pp) {
@@ -262,7 +268,7 @@ static void park_del(RtTask *t) {
         }
         t->pnext = t;
     }
-    pthread_mutex_unlock(&s->mu);
+    oxl_mu_unlock(&s->mu);
     if (unlinked) task_unref(t); /* the list's ref leaves with the node */
 }
 
@@ -281,12 +287,12 @@ static void pool_push(RtTask *t);
 static void pool_start(void);
 
 static struct {
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
+    oxl_mutex_t mu;
+    oxl_cond_t cv;
     RtTask *head, *tail;
     int started;
     int workers; /* live detached workers — spawn_fallback checks this */
-} pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0, 0 };
+} pool = { OXL_MUTEX_INIT, OXL_CV_INIT, 0, 0, 0, 0 };
 
 static void scope_heap_free(RtScope *s);
 
@@ -299,7 +305,7 @@ static void scope_heap_free(RtScope *s);
  * (it NULLs our parent link first under the same mutex), so a NULL
  * here means "already detached — the struct is gone, touch nothing". */
 static void scope_unlink(RtScope *s) {
-    pthread_mutex_lock(&link_mu);
+    oxl_mu_lock(&link_mu);
     RtScope *p = s->parent;
     if (p) {
         RtScope **pp = &p->children;
@@ -310,14 +316,14 @@ static void scope_unlink(RtScope *s) {
     }
     s->parent = NULL;
     s->sib = NULL;
-    pthread_mutex_unlock(&link_mu);
+    oxl_mu_unlock(&link_mu);
 }
 
 /* detach every child of s under link_mu: each survives with parent==NULL
  * so its later teardown/walk can never lock s's about-to-die mutex.
  * Runs before sync destruction in every teardown path. */
 static void scope_detach_children(RtScope *s) {
-    pthread_mutex_lock(&link_mu);
+    oxl_mu_lock(&link_mu);
     for (RtScope *c = s->children; c; ) {
         RtScope *n = c->sib;
         c->parent = NULL;
@@ -325,17 +331,17 @@ static void scope_detach_children(RtScope *s) {
         c = n;
     }
     s->children = NULL;
-    pthread_mutex_unlock(&link_mu);
+    oxl_mu_unlock(&link_mu);
 }
 
 static void scope_teardown(RtScope *s) {
-    pthread_mutex_lock(&s->mu);
+    oxl_mu_lock(&s->mu);
     s->dead = 1; /* teardown commits here: trap walks must skip us */
-    pthread_mutex_unlock(&s->mu);
+    oxl_mu_unlock(&s->mu);
     scope_unlink(s);
     scope_detach_children(s);
-    pthread_mutex_destroy(&s->mu);
-    pthread_cond_destroy(&s->cv);
+    oxl_mu_destroy(&s->mu);
+    oxl_cv_destroy(&s->cv);
     scope_heap_free(s);
     free(s->arena_buf);
     s->arena_buf = NULL;
@@ -353,14 +359,14 @@ static void scope_done(RtScope *s) {
     if (!s) return;
     RtTask *wake = NULL;
     int orphan_drain = 0;
-    pthread_mutex_lock(&s->mu);
+    oxl_mu_lock(&s->mu);
     s->pending--;
     if (s->pending <= 0) {
         if (s->join_task) wake = s->join_task;
         else if (s->orphan) { orphan_drain = 1; s->dead = 1; }
-        else pthread_cond_signal(&s->cv);
+        else oxl_cv_signal(&s->cv);
     }
-    pthread_mutex_unlock(&s->mu);
+    oxl_mu_unlock(&s->mu);
     /* outside s->mu: avoids s->mu/pool.mu inversion. The joiner is ours
      * to wake — but its parked ref can be the last one, and park_del
      * would free it under us: pin it across the wake first. */
@@ -376,7 +382,11 @@ static void scope_done(RtScope *s) {
 /* SIGPIPE must not kill the process before write() returns EPIPE —
  * servers ignore it. Wrapped in rt.c because a libc `signal` extern
  * conflicts with the real prototype (clang -Wint-conversion). */
-void rt_sigpipe_ignore(void) { signal(SIGPIPE, SIG_IGN); }
+void rt_sigpipe_ignore(void) {
+#ifndef _WIN32
+    signal(SIGPIPE, SIG_IGN);
+#endif
+}
 
 /* heap-allocated scope for library code that can't name RtScope's
  * size (stdlib http trap containment). Join with rt_scope_join_free —
@@ -403,7 +413,7 @@ int64_t rt_scope_join_free(void *sv) {
 
 /* serializes trap-time descendant passes: trappers share the wnext
  * scratch links, so two racing traps must not clobber each other */
-static pthread_mutex_t cancel_tree_mu = PTHREAD_MUTEX_INITIALIZER;
+static oxl_mutex_t cancel_tree_mu = OXL_MUTEX_INIT;
 
 /* cancel every scope below s and force-wake their parked tasks.
  * The children list lives under link_mu: while it is held no child can
@@ -413,18 +423,18 @@ static pthread_mutex_t cancel_tree_mu = PTHREAD_MUTEX_INITIALIZER;
  * our unlock and the wake — dropped after its subtree is done. */
 static void scope_cancel_tree(RtScope *s) {
     RtScope *list = NULL;
-    pthread_mutex_lock(&link_mu);
+    oxl_mu_lock(&link_mu);
     for (RtScope *c = s->children; c; c = c->sib) {
-        pthread_mutex_lock(&c->mu);
+        oxl_mu_lock(&c->mu);
         if (!c->dead) {
             c->cancel = 1;
             c->pending++;
             c->wnext = list;
             list = c;
         }
-        pthread_mutex_unlock(&c->mu);
+        oxl_mu_unlock(&c->mu);
     }
-    pthread_mutex_unlock(&link_mu);
+    oxl_mu_unlock(&link_mu);
     while (list) {
         RtScope *c = list;
         list = c->wnext;
@@ -480,12 +490,12 @@ static void task_defers_drain(RtTask *t) {
     }
 }
 
-/* cancel/unwind for thread tasks: pthread_exit would skip the settle
+/* cancel/unwind for thread tasks: oxl_thread_exit would skip the settle
  * (scope_done + free) AND kill the pool worker — unwind into the
  * task's own setjmp slot instead, exactly like frame traps */
 static void task_unwind(void) {
     RtTask *t = tls_task;
-    if (!t) pthread_exit(0); /* foreign thread: nothing to settle */
+    if (!t) oxl_thread_exit(0); /* foreign thread: nothing to settle */
     park_del(t);
     longjmp(tls_jb, 1);
 }
@@ -508,7 +518,7 @@ static void task_release_frame(RtTask *t, int trapped) {
     if (t->is_frame && !trapped) {
         for (RtScope *x = t->frame->cur_scope;
              x && x != t->scope;) {
-            pthread_mutex_lock(&x->mu);
+            oxl_mu_lock(&x->mu);
             x->orphan = 1;
             x->cancel = 1;
             int live = x->pending > 0;
@@ -519,7 +529,7 @@ static void task_release_frame(RtTask *t, int trapped) {
             if (live) { task_ref(t); x->pending++; }
             else x->dead = 1; /* tearing down below — traps must skip */
             RtScope *up = x->parent;
-            pthread_mutex_unlock(&x->mu);
+            oxl_mu_unlock(&x->mu);
             if (!live) { scope_teardown(x); x = up; continue; }
             scope_cancel_wake(x);
             /* scope_done: same pending->0 drain for these orphans */
@@ -569,7 +579,7 @@ static void run_task(RtTask *t) {
     task_release_frame(t, trapped);
 }
 
-/* pthread_create refused: spawn must never silently drop caller-owned
+/* oxl_thread_spawn refused: spawn must never silently drop caller-owned
  * state packed into the arg frame (fds, slots — their cleanup only
  * exists inside the fn). Drive the fn task on the calling thread
  * instead: run_task does the full settle (defers, scope_done, run-ref
@@ -586,7 +596,7 @@ static void run_inline(RtTask *t) {
     tls_scope = ps;
 }
 
-/* pthread_create refused. First fallback: hand the task to the work
+/* oxl_thread_spawn refused. First fallback: hand the task to the work
  * pool — the async contract holds (a blocking task must NOT run on the
  * caller: an HTTP accept loop would stall for the whole request), and
  * settle still does the full cleanup. Only when the pool has no live
@@ -597,9 +607,9 @@ static void spawn_fallback(RtTask *t) {
     t->external = 0; /* a pooled task wakes via pool_push, not a local wk */
     t->wk = NULL;
     pool_start();
-    pthread_mutex_lock(&pool.mu);
+    oxl_mu_lock(&pool.mu);
     int live = pool.workers > 0;
-    pthread_mutex_unlock(&pool.mu);
+    oxl_mu_unlock(&pool.mu);
     if (live) { pool_push(t); return; }
     if (t->is_frame) {
         RtScope *sc = t->scope; /* run_root drops the run ref — pin sc */
@@ -613,12 +623,12 @@ static void spawn_fallback(RtTask *t) {
 static void *worker(void *_p) {
     (void)_p;
     for (;;) {
-        pthread_mutex_lock(&pool.mu);
-        while (!pool.head) pthread_cond_wait(&pool.cv, &pool.mu);
+        oxl_mu_lock(&pool.mu);
+        while (!pool.head) oxl_cv_wait(&pool.cv, &pool.mu);
         RtTask *t = pool.head;
         pool.head = t->next;
         if (!pool.head) pool.tail = NULL;
-        pthread_mutex_unlock(&pool.mu);
+        oxl_mu_unlock(&pool.mu);
         if (!t->scope || !t->scope->cancel) run_task(t);
         else {
             /* cancelled before it ran: earlier poll rounds may still
@@ -643,32 +653,38 @@ static void *worker(void *_p) {
 }
 
 static void pool_start(void) {
-    pthread_mutex_lock(&pool.mu);
+    oxl_mu_lock(&pool.mu);
     /* fill once, retry while the pool is dead: a transient create
      * failure at startup must not pin the pool at zero forever */
     if (!pool.started || pool.workers == 0) {
+#ifdef _WIN32
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        long n = (long)si.dwNumberOfProcessors;
+#else
         long n = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
         if (n < 2) n = 2;
         if (n > 32) n = 32;
         for (long i = pool.workers; i < n; i++) {
-            pthread_t t;
-            if (pthread_create(&t, NULL, worker, NULL) != 0) break;
-            pthread_detach(t);
+            oxl_thread_t t;
+            if (oxl_thread_spawn(&t, NULL, worker, NULL) != 0) break;
+            oxl_thread_detach(t);
             pool.workers++;
         }
         pool.started = 1;
     }
-    pthread_mutex_unlock(&pool.mu);
+    oxl_mu_unlock(&pool.mu);
 }
 
 static void pool_push(RtTask *t) {
     pool_start();
     t->next = NULL;
-    pthread_mutex_lock(&pool.mu);
+    oxl_mu_lock(&pool.mu);
     if (pool.tail) pool.tail->next = t; else pool.head = t;
     pool.tail = t;
-    pthread_cond_signal(&pool.cv);
-    pthread_mutex_unlock(&pool.mu);
+    oxl_cv_signal(&pool.cv);
+    oxl_mu_unlock(&pool.mu);
 }
 
 /* re-enqueue a suspended frame task: external drivers wait on their own
@@ -678,10 +694,10 @@ void rt_task_wake(RtTask *t) {
     if (t->external) {
         if (__sync_lock_test_and_set(&t->wstate, WS_WAKEREQ) == WS_PARKED) {
             RtWake *w = t->wk;
-            pthread_mutex_lock(&w->mu);
+            oxl_mu_lock(&w->mu);
             w->ready = 1;
-            pthread_cond_signal(&w->cv);
-            pthread_mutex_unlock(&w->mu);
+            oxl_cv_signal(&w->cv);
+            oxl_mu_unlock(&w->mu);
         }
     } else {
         if (__sync_lock_test_and_set(&t->wstate, WS_WAKEREQ) == WS_PARKED)
@@ -700,8 +716,8 @@ static void *task_wrap(void *p) {
 static void *task_wrap_frame(void *p) {
     RtTask *t = p;
     RtWake wk;
-    pthread_mutex_init(&wk.mu, NULL);
-    pthread_cond_init(&wk.cv, NULL);
+    oxl_mu_init(&wk.mu, NULL);
+    oxl_cv_init(&wk.cv, NULL);
     wk.ready = 0;
     t->wk = &wk;
     tls_scope = t->scope;
@@ -716,10 +732,10 @@ static void *task_wrap_frame(void *p) {
             if (t->poll(t->frame, t) != RT_PENDING) break;
             if (__sync_lock_test_and_set(&t->wstate, WS_PARKED) == WS_WAKEREQ)
                 continue; /* wake already landed */
-            pthread_mutex_lock(&wk.mu);
-            while (!wk.ready) pthread_cond_wait(&wk.cv, &wk.mu);
+            oxl_mu_lock(&wk.mu);
+            while (!wk.ready) oxl_cv_wait(&wk.cv, &wk.mu);
             wk.ready = 0;
-            pthread_mutex_unlock(&wk.mu);
+            oxl_mu_unlock(&wk.mu);
         }
     } else {
         trapped = 1;
@@ -729,17 +745,17 @@ static void *task_wrap_frame(void *p) {
     if (t->sel) rt_select_arm(t);
     scope_done(t->scope);
     t->wk = NULL;
-    pthread_mutex_destroy(&wk.mu);
-    pthread_cond_destroy(&wk.cv);
+    oxl_mu_destroy(&wk.mu);
+    oxl_cv_destroy(&wk.cv);
     task_release_frame(t, trapped);
     return 0;
 }
 
 static void scope_pending_up(RtScope *s) {
     if (!s) return;
-    pthread_mutex_lock(&s->mu);
+    oxl_mu_lock(&s->mu);
     s->pending++;
-    pthread_mutex_unlock(&s->mu);
+    oxl_mu_unlock(&s->mu);
 }
 
 void rt_spawn(void *(*fn)(void *), void *arg) {
@@ -750,8 +766,8 @@ void rt_spawn(void *(*fn)(void *), void *arg) {
         memset(t, 0, sizeof *t);
         task_ref(t); /* run ref — dropped at settle */
         t->fn = fn; t->arg = arg;
-        pthread_t th;
-        if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
+        oxl_thread_t th;
+        if (oxl_thread_spawn(&th, NULL, task_wrap, t) == 0) oxl_thread_detach(th);
         else spawn_fallback(t); /* never drop the task — pool or inline */
         return;
     }
@@ -771,8 +787,8 @@ void rt_spawnb(void *(*fn)(void *), void *arg) {
     memset(t, 0, sizeof *t);
     task_ref(t); /* run ref — dropped at settle */
     t->fn = fn; t->arg = arg; t->scope = s;
-    pthread_t th;
-    if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
+    oxl_thread_t th;
+    if (oxl_thread_spawn(&th, NULL, task_wrap, t) == 0) oxl_thread_detach(th);
     else spawn_fallback(t); /* settle does scope_done + the run ref */
 }
 
@@ -804,8 +820,8 @@ void rt_spawnb_task(RtFrame *fr) {
     RtTask *t = task_of(fr);
     scope_pending_up(t->scope);
     t->external = 1;
-    pthread_t th;
-    if (pthread_create(&th, NULL, task_wrap_frame, t) == 0) pthread_detach(th);
+    oxl_thread_t th;
+    if (oxl_thread_spawn(&th, NULL, task_wrap_frame, t) == 0) oxl_thread_detach(th);
     else spawn_fallback(t); /* pool keeps the pending slot + frame alive */
 }
 
@@ -815,8 +831,8 @@ void rt_spawnb_task(RtFrame *fr) {
 int rt_run_root(RtFrame *fr) {
     RtTask *t = task_of(fr);
     RtWake wk;
-    pthread_mutex_init(&wk.mu, NULL);
-    pthread_cond_init(&wk.cv, NULL);
+    oxl_mu_init(&wk.mu, NULL);
+    oxl_cv_init(&wk.cv, NULL);
     wk.ready = 0;
     t->external = 1;
     t->wk = &wk;
@@ -840,10 +856,10 @@ int rt_run_root(RtFrame *fr) {
             if (t->poll(fr, t) != RT_PENDING) break;
             if (__sync_lock_test_and_set(&t->wstate, WS_PARKED) == WS_WAKEREQ)
                 continue;
-            pthread_mutex_lock(&wk.mu);
-            while (!wk.ready) pthread_cond_wait(&wk.cv, &wk.mu);
+            oxl_mu_lock(&wk.mu);
+            while (!wk.ready) oxl_cv_wait(&wk.cv, &wk.mu);
             wk.ready = 0;
-            pthread_mutex_unlock(&wk.mu);
+            oxl_mu_unlock(&wk.mu);
         }
     } else {
         trapped = 1;
@@ -854,8 +870,8 @@ int rt_run_root(RtFrame *fr) {
     tls_scope = prev_scope;
     if (t->sel) rt_select_arm(t);
     t->wk = NULL;
-    pthread_mutex_destroy(&wk.mu);
-    pthread_cond_destroy(&wk.cv);
+    oxl_mu_destroy(&wk.mu);
+    oxl_cv_destroy(&wk.cv);
     task_release_frame(t, trapped);
     return trapped;
 }
@@ -876,16 +892,16 @@ static void scope_heap_free(RtScope *s) {
 }
 
 static int join_scope(RtScope *s) {
-    pthread_mutex_lock(&s->mu);
-    while (s->pending > 0) pthread_cond_wait(&s->cv, &s->mu);
+    oxl_mu_lock(&s->mu);
+    while (s->pending > 0) oxl_cv_wait(&s->cv, &s->mu);
     int err = s->trapped ? (int)s->err : 0;
     s->dead = 1; /* teardown commits here: trap walks must skip us */
-    pthread_mutex_unlock(&s->mu);
+    oxl_mu_unlock(&s->mu);
     RtScope *up = s->parent; /* captured pre-detach for tls_scope restore */
     scope_unlink(s);
     scope_detach_children(s);
-    pthread_mutex_destroy(&s->mu);
-    pthread_cond_destroy(&s->cv);
+    oxl_mu_destroy(&s->mu);
+    oxl_cv_destroy(&s->cv);
     scope_heap_free(s);
     free(s->arena_buf); /* bulk-free: the arena story */
     tls_scope = up;
@@ -895,27 +911,27 @@ static int join_scope(RtScope *s) {
 /* frame-task join: register as the scope's joiner, or READY if drained */
 int rt_scope_join_poll(RtScope *s, RtTask *t) {
     park_add(t, t->scope, s, WK_JOIN);
-    pthread_mutex_lock(&s->mu);
+    oxl_mu_lock(&s->mu);
     if (s->pending > 0) {
         s->join_task = t;
-        pthread_mutex_unlock(&s->mu);
+        oxl_mu_unlock(&s->mu);
         return RT_PENDING;
     }
-    pthread_mutex_unlock(&s->mu);
+    oxl_mu_unlock(&s->mu);
     if (park_claim(t)) park_del(t); /* self-unpark on the no-wait path */
     return RT_READY;
 }
 
 int rt_scope_finish(RtScope *s) {
-    pthread_mutex_lock(&s->mu);
+    oxl_mu_lock(&s->mu);
     int err = s->trapped ? (int)s->err : 0;
     s->dead = 1;
-    pthread_mutex_unlock(&s->mu);
+    oxl_mu_unlock(&s->mu);
     RtScope *up = s->parent;
     scope_unlink(s);
     scope_detach_children(s);
-    pthread_mutex_destroy(&s->mu);
-    pthread_cond_destroy(&s->cv);
+    oxl_mu_destroy(&s->mu);
+    oxl_cv_destroy(&s->cv);
     scope_heap_free(s);
     free(s->arena_buf);
     tls_scope = up;
@@ -927,10 +943,10 @@ int rt_scope_finish(RtScope *s) {
  * join_scope/rt_scope_finish restored to tls_scope */
 void rt_scope_propagate(RtScope *p, int64_t err) {
     if (p) {
-        pthread_mutex_lock(&p->mu);
+        oxl_mu_lock(&p->mu);
         p->trapped = 1;
         p->err = err; /* keep the code — propagation must not swallow it */
-        pthread_mutex_unlock(&p->mu);
+        oxl_mu_unlock(&p->mu);
     } else {
         fprintf(stderr, "trap %lld escaped top scope\n", (long long)err);
         abort();
@@ -958,7 +974,7 @@ void rt_trap(int64_t code) {
          * drops; already-drained ones tear down now, here on the live
          * stack, since no joiner is coming */
         for (RtScope *x = s; x; x = x->parent) {
-            pthread_mutex_lock(&x->mu);
+            oxl_mu_lock(&x->mu);
             if (!x->trapped) { x->trapped = 1; x->err = code; }
             x->cancel = 1;
             if (x != t->scope) {
@@ -972,7 +988,7 @@ void rt_trap(int64_t code) {
                 x->pending++;
                 task_ref(t); /* orphan hold — scope_orphan_free drops it */
             }
-            pthread_mutex_unlock(&x->mu);
+            oxl_mu_unlock(&x->mu);
             if (x == t->scope) break;
         }
         /* wake parked tasks so they observe cancel at resume instead
@@ -985,12 +1001,12 @@ void rt_trap(int64_t code) {
          * sibling subtrees aren't on this task's ancestor chain —
          * without cancelling them they park forever and their pending
          * slots keep the join open */
-        pthread_mutex_lock(&cancel_tree_mu);
+        oxl_mu_lock(&cancel_tree_mu);
         for (RtScope *x = s; x; x = x->parent) {
             scope_cancel_tree(x);
             if (x == t->scope) break;
         }
-        pthread_mutex_unlock(&cancel_tree_mu);
+        oxl_mu_unlock(&cancel_tree_mu);
         /* drop the temp refs: a drained orphan tears down here (its
          * owner hold drops with it); live ones drain later under their
          * last child's scope_done */
@@ -1009,7 +1025,7 @@ void rt_trap(int64_t code) {
     if (!t) {
         /* trap on a non-task thread (main/foreign) — no joiner exists to
          * consume it; defers on the thread stack still unwind, then fail
-         * loudly instead of pthread_exit's silent exit-0 */
+         * loudly instead of oxl_thread_exit's silent exit-0 */
         while (tls_defers) {
             RtDefer *d = tls_defers;
             tls_defers = d->next;
@@ -1031,11 +1047,11 @@ void rt_trap(int64_t code) {
      * dangling. The checker bans `scope {}` in non-susp fns, so past
      * t->scope the chain is empty in practice. */
     for (RtScope *x = s; x; x = x->parent) {
-        pthread_mutex_lock(&x->mu);
+        oxl_mu_lock(&x->mu);
         if (!x->trapped) { x->trapped = 1; x->err = code; }
         x->cancel = 1;
         if (x != t->scope) { x->orphan = 1; x->pending++; }
-        pthread_mutex_unlock(&x->mu);
+        oxl_mu_unlock(&x->mu);
         if (x == t->scope) break;
     }
     for (RtScope *x = s; x; x = x->parent) {
@@ -1044,20 +1060,20 @@ void rt_trap(int64_t code) {
     }
     /* descendant cancel, same as the frame path — nested scopes below
      * the chain belong to other tasks' frames (heap), safe to walk */
-    pthread_mutex_lock(&cancel_tree_mu);
+    oxl_mu_lock(&cancel_tree_mu);
     for (RtScope *x = s; x; x = x->parent) {
         scope_cancel_tree(x);
         if (x == t->scope) break;
     }
-    pthread_mutex_unlock(&cancel_tree_mu);
+    oxl_mu_unlock(&cancel_tree_mu);
     for (RtScope *x = s; x; ) {
         /* capture pre-drop: teardown NULLs x->parent (see frame path) */
         RtScope *up = x->parent;
         if (x != t->scope) {
             int drain = 0;
-            pthread_mutex_lock(&x->mu);
+            oxl_mu_lock(&x->mu);
             if (--x->pending <= 0) { x->dead = 1; drain = 1; }
-            pthread_mutex_unlock(&x->mu);
+            oxl_mu_unlock(&x->mu);
             if (drain) scope_teardown(x); /* stack scope, still live */
             else {
                 fprintf(stderr, "trap: thread task abandoned live stack scope\n");
@@ -1103,18 +1119,31 @@ int64_t rt_sadd(RtShared *s, int64_t delta) {
 /* ---------------- time ---------------- */
 int64_t rt_now(void) { return (int64_t)time(NULL); }
 int64_t rt_now_ms(void) {
+#ifdef _WIN32
+    /* FILETIME: 100ns ticks since 1601; PreciseAsFileTime tracks the
+     * system clock at sub-ms resolution (plain AsFileTime quantizes) */
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return (int64_t)((t - UINT64_C(116444736000000000)) / 10000);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
 }
 /* usleep(3) is obsolescent (gone in POSIX.1-2008) and fails EINVAL past
  * 1e6us — silent no-sleep; useconds_t truncation corrupts longer waits. */
 static void sleep_us(int64_t us) {
     if (us <= 0)
         return;
+#ifdef _WIN32
+    Sleep((DWORD)((us + 999) / 1000));
+#else
     struct timespec ts = {us / 1000000, (us % 1000000) * 1000};
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
     }
+#endif
 }
 void rt_usleep(int64_t usecs) { sleep_us(usecs); }
 
@@ -1158,8 +1187,8 @@ static void sel_unref(struct RtSel *s) {
 }
 
 struct RtChan {
-    pthread_mutex_t mu;
-    pthread_cond_t cv_send, cv_recv;
+    oxl_mutex_t mu;
+    oxl_cond_t cv_send, cv_recv;
     int64_t *buf;       /* ring storage — NULL when cap==0 */
     int64_t cap;        /* buffered capacity (mkchan(n)) */
     int64_t head;       /* ring pop index; tail = (head+count)%cap */
@@ -1205,7 +1234,7 @@ static int sel_fire(RtChan *ch, int64_t v) {
         s->t->chan_res = v;
         s->t->sel_arm = w->slot;
         RtTask *t = s->t;
-        pthread_mutex_unlock(&ch->mu);
+        oxl_mu_unlock(&ch->mu);
         rt_task_wake(t);
         task_unref(t);
         return 1;
@@ -1249,9 +1278,9 @@ static SendReq *chan_pop_send(RtChan *ch) {
 
 RtChan *rt_mkchan(int64_t cap) {
     RtChan *c = xcalloc(1, sizeof *c);
-    pthread_mutex_init(&c->mu, NULL);
-    pthread_cond_init(&c->cv_send, NULL);
-    pthread_cond_init(&c->cv_recv, NULL);
+    oxl_mu_init(&c->mu, NULL);
+    oxl_cv_init(&c->cv_send, NULL);
+    oxl_cv_init(&c->cv_recv, NULL);
     c->cap = cap < 0 ? 0 : cap;
     if (c->cap > 0) c->buf = xcalloc((size_t)c->cap, sizeof(int64_t));
     return c;
@@ -1260,7 +1289,7 @@ RtChan *rt_mkchan(int64_t cap) {
 void rt_send(RtChan *ch, int64_t v) {
     if (rt_cancelled()) task_unwind();
     RtTask *me = tls_task;
-    pthread_mutex_lock(&ch->mu);
+    oxl_mu_lock(&ch->mu);
     park_add(me, me ? me->scope : NULL, ch, WK_TSEND);
     for (;;) {
         /* cancelled() checked under ch->mu: the cancel pass sets the flag
@@ -1268,13 +1297,13 @@ void rt_send(RtChan *ch, int64_t v) {
          * landed before we locked still shows the flag here — without the
          * under-lock test that cancel is lost and we cond_wait forever */
         while (ch->has && !ch->closed && !rt_cancelled())
-            pthread_cond_wait(&ch->cv_send, &ch->mu);
+            oxl_cv_wait(&ch->cv_send, &ch->mu);
         if (ch->closed) break;
         if (rt_cancelled()) goto cancelled; /* cancel-wake must not re-wait */
         RtTask *r = chan_pop_recv(ch);
         if (r) { /* hand directly to a parked frame receiver */
             r->chan_res = v;
-            pthread_mutex_unlock(&ch->mu);
+            oxl_mu_unlock(&ch->mu);
             rt_task_wake(r);
             task_unref(r); /* the recvq node ref we inherited */
             goto done;
@@ -1283,16 +1312,16 @@ void rt_send(RtChan *ch, int64_t v) {
         if (ch->count < ch->cap) { /* buffered: drop in the ring */
             ch->buf[(ch->head + ch->count) % ch->cap] = v;
             ch->count++;
-            pthread_cond_broadcast(&ch->cv_recv);
-            pthread_mutex_unlock(&ch->mu);
+            oxl_cv_broadcast(&ch->cv_recv);
+            oxl_mu_unlock(&ch->mu);
             goto done;
         }
         ch->val = v;
         ch->has = 1;
         ch->slot_owner = me;
-        pthread_cond_broadcast(&ch->cv_recv);
+        oxl_cv_broadcast(&ch->cv_recv);
         while (ch->has && !ch->closed && !rt_cancelled())
-            pthread_cond_wait(&ch->cv_send, &ch->mu);
+            oxl_cv_wait(&ch->cv_send, &ch->mu);
         if (rt_cancelled()) {
             /* retract our own unclaimed slot only — a 1 here could be
              * another thread sender's fresh deposit */
@@ -1303,12 +1332,12 @@ void rt_send(RtChan *ch, int64_t v) {
          * under the v0 send-on-closed rule */
         break;
     }
-    pthread_mutex_unlock(&ch->mu);
+    oxl_mu_unlock(&ch->mu);
 done:
     if (me && park_claim(me)) park_del(me);
     return;
 cancelled:
-    pthread_mutex_unlock(&ch->mu);
+    oxl_mu_unlock(&ch->mu);
     if (me && park_claim(me)) park_del(me);
     task_unwind();
 }
@@ -1319,11 +1348,11 @@ int64_t rt_recv(RtChan *ch) {
     int64_t v = 0;
     park_add(me, me ? me->scope : NULL, ch, WK_TRECV);
     for (;;) {
-        pthread_mutex_lock(&ch->mu);
+        oxl_mu_lock(&ch->mu);
         if (ch->count > 0) { /* buffered: drain oldest, refill from sendq */
             RtTask *w = NULL;
             v = chan_ring_pop(ch, &w);
-            pthread_mutex_unlock(&ch->mu);
+            oxl_mu_unlock(&ch->mu);
             if (w) { rt_task_wake(w); task_unref(w); }
             goto done;
         }
@@ -1332,7 +1361,7 @@ int64_t rt_recv(RtChan *ch) {
             v = r->v;
             RtTask *st = r->t;
             free(r);
-            pthread_mutex_unlock(&ch->mu);
+            oxl_mu_unlock(&ch->mu);
             rt_task_wake(st);
             task_unref(st); /* the sendq node ref we inherited */
             goto done;
@@ -1341,14 +1370,14 @@ int64_t rt_recv(RtChan *ch) {
         /* same under-lock cancel test as rt_send — a claim+broadcast
          * that landed before the lock left the flag set, not a wake */
         if (rt_cancelled()) {
-            pthread_mutex_unlock(&ch->mu);
+            oxl_mu_unlock(&ch->mu);
             if (me && park_claim(me)) park_del(me);
             task_unwind();
         }
         ch->trecv++;
-        pthread_cond_wait(&ch->cv_recv, &ch->mu);
+        oxl_cv_wait(&ch->cv_recv, &ch->mu);
         ch->trecv--;
-        pthread_mutex_unlock(&ch->mu);
+        oxl_mu_unlock(&ch->mu);
         if (rt_cancelled()) {
             if (me && park_claim(me)) park_del(me);
             task_unwind();
@@ -1359,8 +1388,8 @@ int64_t rt_recv(RtChan *ch) {
     ch->val = 0;
     /* broadcast, not signal: with racing senders a lone wakeup can land
      * on the *completing* send instead of the queued one and strand it */
-    pthread_cond_broadcast(&ch->cv_send);
-    pthread_mutex_unlock(&ch->mu);
+    oxl_cv_broadcast(&ch->cv_send);
+    oxl_mu_unlock(&ch->mu);
 done:
     if (me && park_claim(me)) park_del(me);
     return v;
@@ -1369,11 +1398,11 @@ done:
 /* frame-task recv: READY delivers via task->chan_res (uniform for the
  * immediate and the woken paths); PENDING parks on recvq */
 int rt_recv_poll(RtChan *ch, RtTask *t) {
-    pthread_mutex_lock(&ch->mu);
+    oxl_mu_lock(&ch->mu);
     if (ch->count > 0) { /* buffered: drain oldest, refill from sendq */
         RtTask *w = NULL;
         t->chan_res = chan_ring_pop(ch, &w);
-        pthread_mutex_unlock(&ch->mu);
+        oxl_mu_unlock(&ch->mu);
         if (w) { rt_task_wake(w); task_unref(w); }
         return RT_READY;
     }
@@ -1382,7 +1411,7 @@ int rt_recv_poll(RtChan *ch, RtTask *t) {
         t->chan_res = r->v;
         RtTask *st = r->t;
         free(r);
-        pthread_mutex_unlock(&ch->mu);
+        oxl_mu_unlock(&ch->mu);
         rt_task_wake(st);
         task_unref(st);
         return RT_READY;
@@ -1391,21 +1420,21 @@ int rt_recv_poll(RtChan *ch, RtTask *t) {
         t->chan_res = ch->has ? ch->val : 0;
         ch->has = 0;
         ch->val = 0;
-        pthread_cond_broadcast(&ch->cv_send);
-        pthread_mutex_unlock(&ch->mu);
+        oxl_cv_broadcast(&ch->cv_send);
+        oxl_mu_unlock(&ch->mu);
         return RT_READY;
     }
     chan_park_recv(ch, t);
-    pthread_mutex_unlock(&ch->mu);
+    oxl_mu_unlock(&ch->mu);
     return RT_PENDING;
 }
 
 int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
-    pthread_mutex_lock(&ch->mu);
+    oxl_mu_lock(&ch->mu);
     RtTask *r = chan_pop_recv(ch);
     if (r) {
         r->chan_res = v;
-        pthread_mutex_unlock(&ch->mu);
+        oxl_mu_unlock(&ch->mu);
         rt_task_wake(r);
         task_unref(r);
         return RT_READY;
@@ -1414,12 +1443,12 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
     if (ch->count < ch->cap) { /* buffered: drop in the ring */
         ch->buf[(ch->head + ch->count) % ch->cap] = v;
         ch->count++;
-        pthread_cond_broadcast(&ch->cv_recv);
-        pthread_mutex_unlock(&ch->mu);
+        oxl_cv_broadcast(&ch->cv_recv);
+        oxl_mu_unlock(&ch->mu);
         return RT_READY;
     }
     if (ch->closed) {
-        pthread_mutex_unlock(&ch->mu);
+        oxl_mu_unlock(&ch->mu);
         return RT_READY; /* send on closed completes silently (v0 rule) */
     }
     /* a thread receiver is committed inside cv_wait — but only plant
@@ -1430,8 +1459,8 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
         ch->val = v;
         ch->has = 1;
         ch->slot_owner = NULL; /* frame deposit: no thread owner */
-        pthread_cond_broadcast(&ch->cv_recv);
-        pthread_mutex_unlock(&ch->mu);
+        oxl_cv_broadcast(&ch->cv_recv);
+        oxl_mu_unlock(&ch->mu);
         return RT_READY;
     }
     SendReq *sr = xmalloc(sizeof *sr);
@@ -1441,15 +1470,15 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
     ch->sendq = sr;
     task_ref(t); /* the sendq node's ref — leaves with the node */
     park_add(t, t->scope, ch, WK_SEND);
-    pthread_mutex_unlock(&ch->mu);
+    oxl_mu_unlock(&ch->mu);
     return RT_PENDING;
 }
 
 void rt_close(RtChan *ch) {
-    pthread_mutex_lock(&ch->mu);
+    oxl_mu_lock(&ch->mu);
     ch->closed = 1;
-    pthread_cond_broadcast(&ch->cv_send);
-    pthread_cond_broadcast(&ch->cv_recv);
+    oxl_cv_broadcast(&ch->cv_send);
+    oxl_cv_broadcast(&ch->cv_recv);
     /* drain parked frame tasks: receivers complete with the slot value
      * (matching the thread path); senders complete silently. Each wake
      * still races the parked claim — dead nodes are skipped. */
@@ -1466,7 +1495,7 @@ void rt_close(RtChan *ch) {
     int64_t val = ch->has ? ch->val : 0;
     ch->has = 0;
     ch->val = 0;
-    pthread_mutex_unlock(&ch->mu);
+    oxl_mu_unlock(&ch->mu);
     while (r) {
         RtTask *n = r->next;
         if (park_claim(r)) {
@@ -1521,7 +1550,7 @@ typedef struct RtSleep {
 static void *sleep_tick(void *p) {
     RtSleep *tm = p;
     if (tm->usec) { if (tm->delay > 0) sleep_us(tm->delay); }
-    else if (tm->delay > 0) sleep((unsigned)tm->delay);
+    else if (tm->delay > 0) sleep_us(tm->delay * 1000000);
     RtTask *w = tm->t;
     free(tm);
     if (park_claim(w)) {
@@ -1539,9 +1568,9 @@ static int sleep_poll(int64_t delay, int usec, RtTask *t) {
      * whole delay for a sibling trap that should exit fast */
     RtScope *s = t->scope;
     if (s) {
-        pthread_mutex_lock(&s->mu);
+        oxl_mu_lock(&s->mu);
         if (s->cancel) {
-            pthread_mutex_unlock(&s->mu);
+            oxl_mu_unlock(&s->mu);
             return RT_READY; /* the post-poll rt_cancelled check dies */
         }
         task_ref(t);
@@ -1551,7 +1580,7 @@ static int sleep_poll(int64_t delay, int usec, RtTask *t) {
         t->waitkind = WK_SLEEP;
         t->pnext = s->parked;
         s->parked = t;
-        pthread_mutex_unlock(&s->mu);
+        oxl_mu_unlock(&s->mu);
     } else {
         park_add(t, NULL, NULL, WK_SLEEP);
     }
@@ -1563,15 +1592,15 @@ static int sleep_poll(int64_t delay, int usec, RtTask *t) {
     /* register BEFORE creating the thread: a timer that fires
      * instantly must find parked==1 to claim; waitobj stays NULL —
      * nothing to unlink, the timer self-cleans on a lost claim */
-    pthread_t th;
-    if (pthread_create(&th, NULL, sleep_tick, tm) != 0) {
+    oxl_thread_t th;
+    if (oxl_thread_spawn(&th, NULL, sleep_tick, tm) != 0) {
         /* no thread: retract the registration and run inline */
         if (park_claim(t)) park_del(t);
         task_unref(t);
         free(tm);
         return RT_READY;
     }
-    pthread_detach(th);
+    oxl_thread_detach(th);
     return RT_PENDING;
 }
 
@@ -1613,7 +1642,7 @@ static int sel_ready(RtChan *ch, int64_t *v, RtTask **wake_me) {
         *v = ch->has ? ch->val : 0;
         ch->has = 0;
         ch->val = 0;
-        pthread_cond_broadcast(&ch->cv_send);
+        oxl_cv_broadcast(&ch->cv_send);
         return 1;
     }
     return 0;
@@ -1646,26 +1675,26 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
     for (int attempt = 0; attempt < 4; attempt++) {
         int nready = 0;
         for (int i = 0; i < n; i++) {
-            pthread_mutex_lock(&chs[i]->mu);
+            oxl_mu_lock(&chs[i]->mu);
             if (chs[i]->count > 0 || chs[i]->sendq || chs[i]->has || chs[i]->closed)
                 nready++;
-            pthread_mutex_unlock(&chs[i]->mu);
+            oxl_mu_unlock(&chs[i]->mu);
         }
         if (nready == 0)
             break;
         int target = nready > 1 ? (int)(rand() % (unsigned)nready) : 0;
         int seen = 0;
         for (int i = 0; i < n; i++) {
-            pthread_mutex_lock(&chs[i]->mu);
+            oxl_mu_lock(&chs[i]->mu);
             int rd = chs[i]->count > 0 || chs[i]->sendq || chs[i]->has || chs[i]->closed;
             if (!rd || seen++ != target) {
-                pthread_mutex_unlock(&chs[i]->mu);
+                oxl_mu_unlock(&chs[i]->mu);
                 continue;
             }
             int64_t v = 0;
             RtTask *wm = NULL;
             int fired = sel_ready(chs[i], &v, &wm);
-            pthread_mutex_unlock(&chs[i]->mu);
+            oxl_mu_unlock(&chs[i]->mu);
             if (fired) {
                 if (wm) { rt_task_wake(wm); task_unref(wm); }
                 t->chan_res = v;
@@ -1679,17 +1708,17 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
         /* else must never park — after the bounded retries take any
          * arm that still fires, and else only when none does */
         for (int i = 0; i < n; i++) {
-            pthread_mutex_lock(&chs[i]->mu);
+            oxl_mu_lock(&chs[i]->mu);
             int64_t v = 0;
             RtTask *wm = NULL;
             if (sel_ready(chs[i], &v, &wm)) {
-                pthread_mutex_unlock(&chs[i]->mu);
+                oxl_mu_unlock(&chs[i]->mu);
                 if (wm) { rt_task_wake(wm); task_unref(wm); }
                 t->chan_res = v;
                 t->sel_arm = i;
                 return RT_READY;
             }
-            pthread_mutex_unlock(&chs[i]->mu);
+            oxl_mu_unlock(&chs[i]->mu);
         }
         t->sel_arm = RT_SEL_ELSE;
         return RT_READY;
@@ -1704,7 +1733,7 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
      * each distinct address once or the re-lock self-deadlocks */
     for (int i = 0; i < n; i++)
         if (i == 0 || sorted[i] != sorted[i - 1])
-            pthread_mutex_lock(&sorted[i]->mu);
+            oxl_mu_lock(&sorted[i]->mu);
 
     /* re-check: a send may have landed between the sweep and the lock.
      * Peek the ready set — sel_ready consumes (pops ring/sendq, claims
@@ -1727,7 +1756,7 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
         }
         for (int i = 0; i < n; i++)
             if (i == 0 || sorted[i] != sorted[i - 1])
-                pthread_mutex_unlock(&sorted[i]->mu);
+                oxl_mu_unlock(&sorted[i]->mu);
         free(sorted);
         if (wm) { rt_task_wake(wm); task_unref(wm); }
         t->chan_res = v;
@@ -1756,12 +1785,12 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
     }
     for (int i = 0; i < n; i++)
         if (i == 0 || sorted[i] != sorted[i - 1])
-            pthread_mutex_unlock(&sorted[i]->mu);
+            oxl_mu_unlock(&sorted[i]->mu);
     free(sorted);
     if (tmo_ms >= 0) {
-        pthread_t th;
-        if (pthread_create(&th, NULL, sel_timer, s) == 0) {
-            pthread_detach(th);
+        oxl_thread_t th;
+        if (oxl_thread_spawn(&th, NULL, sel_timer, s) == 0) {
+            oxl_thread_detach(th);
         } else {
             /* no timer thread: fire the timeout arm ourselves so the
              * task isn't parked forever; drop the ref we pre-armed */
@@ -1790,13 +1819,13 @@ int64_t rt_select_arm(RtTask *t) {
     for (int i = 0; i < s->n; i++) {
         RtChan *ch = s->w[i].ch;
         int unlinked = 0;
-        pthread_mutex_lock(&ch->mu);
+        oxl_mu_lock(&ch->mu);
         SelW **pp = &ch->selq;
         while (*pp) {
             if (*pp == &s->w[i]) { *pp = s->w[i].next; unlinked = 1; break; }
             pp = &(*pp)->next;
         }
-        pthread_mutex_unlock(&ch->mu);
+        oxl_mu_unlock(&ch->mu);
         /* a node already popped (waker/close-drain) carries its ref
          * to whoever removed it — only ours to drop when we unlink */
         if (unlinked) task_unref(t);
@@ -1812,10 +1841,10 @@ int64_t rt_select_arm(RtTask *t) {
  * unwind on their own cancel check. */
 static void scope_cancel_wake(RtScope *s) {
     for (;;) {
-        pthread_mutex_lock(&s->mu);
+        oxl_mu_lock(&s->mu);
         RtTask *t = s->parked;
         if (t) s->parked = t->pnext;
-        pthread_mutex_unlock(&s->mu);
+        oxl_mu_unlock(&s->mu);
         if (!t) return;
         /* the pop hands us the node's parked-list ref: t stays valid
          * through our claim+wake and the ref drops at loop bottom */
@@ -1827,20 +1856,20 @@ static void scope_cancel_wake(RtScope *s) {
             case WK_RECV: {
                 RtChan *ch = t->waitobj;
                 int unlinked = 0;
-                pthread_mutex_lock(&ch->mu);
+                oxl_mu_lock(&ch->mu);
                 RtTask **pp = &ch->recvq;
                 while (*pp) {
                     if (*pp == t) { *pp = t->next; unlinked = 1; break; }
                     pp = &(*pp)->next;
                 }
-                pthread_mutex_unlock(&ch->mu);
+                oxl_mu_unlock(&ch->mu);
                 if (unlinked) task_unref(t); /* recvq node ref */
                 break;
             }
             case WK_SEND: {
                 RtChan *ch = t->waitobj;
                 int unlinked = 0;
-                pthread_mutex_lock(&ch->mu);
+                oxl_mu_lock(&ch->mu);
                 SendReq **pp = &ch->sendq;
                 while (*pp) {
                     if ((*pp)->t == t) {
@@ -1852,7 +1881,7 @@ static void scope_cancel_wake(RtScope *s) {
                     }
                     pp = &(*pp)->next;
                 }
-                pthread_mutex_unlock(&ch->mu);
+                oxl_mu_unlock(&ch->mu);
                 if (unlinked) task_unref(t); /* sendq node ref */
                 break;
             }
@@ -1864,22 +1893,22 @@ static void scope_cancel_wake(RtScope *s) {
                 for (int i = 0; i < sel->n; i++) {
                     RtChan *ch = sel->w[i].ch;
                     int unlinked = 0;
-                    pthread_mutex_lock(&ch->mu);
+                    oxl_mu_lock(&ch->mu);
                     SelW **pp = &ch->selq;
                     while (*pp) {
                         if (*pp == &sel->w[i]) { *pp = sel->w[i].next; unlinked = 1; break; }
                         pp = &(*pp)->next;
                     }
-                    pthread_mutex_unlock(&ch->mu);
+                    oxl_mu_unlock(&ch->mu);
                     if (unlinked) task_unref(t); /* selq node ref */
                 }
                 break;
             }
             case WK_JOIN: {
                 RtScope *js = t->waitobj;
-                pthread_mutex_lock(&js->mu);
+                oxl_mu_lock(&js->mu);
                 if (js->join_task == t) js->join_task = NULL;
-                pthread_mutex_unlock(&js->mu);
+                oxl_mu_unlock(&js->mu);
                 break;
             }
             case WK_SLEEP:
@@ -1888,10 +1917,10 @@ static void scope_cancel_wake(RtScope *s) {
                 break;
             case WK_TRECV: case WK_TSEND: {
                 RtChan *ch = t->waitobj;
-                pthread_mutex_lock(&ch->mu);
-                pthread_cond_broadcast(&ch->cv_recv);
-                pthread_cond_broadcast(&ch->cv_send);
-                pthread_mutex_unlock(&ch->mu);
+                oxl_mu_lock(&ch->mu);
+                oxl_cv_broadcast(&ch->cv_recv);
+                oxl_cv_broadcast(&ch->cv_send);
+                oxl_mu_unlock(&ch->mu);
                 task_unref(t);
                 continue; /* thread wakes on its cv, exits on cancel check */
             }
@@ -1994,7 +2023,7 @@ void rt_println_f64(double v) { printf("%.15g\n", v); fflush(stdout); }
 
 void rt_sleep(int64_t secs) {
     if (rt_cancelled()) task_unwind();
-    sleep((unsigned)secs);
+    sleep_us(secs * 1000000);
 }
 
 /* ms-granularity variant — same suspend contract as rt_sleep */
@@ -2099,7 +2128,7 @@ void rt_exit(int64_t code) { exit((int)code); }
  * on BSD-derived systems), so they can't be spelled in oxl source */
 int64_t rt_set_reuseaddr(int64_t fd) {
     int one = 1;
-    return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    return setsockopt((oxl_sock_t)fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
 }
 
 int64_t rt_bind_any(int64_t fd, int64_t port) {
@@ -2108,24 +2137,81 @@ int64_t rt_bind_any(int64_t fd, int64_t port) {
     a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)port);
     a.sin_addr.s_addr = htonl(INADDR_ANY);
-    return bind((int)fd, (struct sockaddr *)&a, sizeof a);
+    return bind((oxl_sock_t)fd, (struct sockaddr *)&a, sizeof a);
 }
 
 /* portable receive timeout — SO_RCVTIMEO's constant differs by OS */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
+#ifdef _WIN32
+    DWORD tv = (DWORD)(secs * 1000); /* ms granularity on WinSock */
+    return setsockopt((oxl_sock_t)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+#else
     struct timeval tv;
     tv.tv_sec = (time_t)secs;
     tv.tv_usec = 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#endif
 }
 
 /* portable send timeout — pairs with rcvtimo: a client that stops
  * reading must not pin a connection slot inside write() */
 int64_t rt_set_sndtimo(int64_t fd, int64_t secs) {
+#ifdef _WIN32
+    DWORD tv = (DWORD)(secs * 1000);
+    return setsockopt((oxl_sock_t)fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
+#else
     struct timeval tv;
     tv.tv_sec = (time_t)secs;
     tv.tv_usec = 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#endif
+}
+
+/* file readability probe — readfile()'s "" result can't tell an
+ * empty file from an unreadable one; callers that care probe first.
+ * fopen("rb") is the portable open(O_RDONLY) — no read needed */
+int64_t rt_file_readable(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+/* socket fd I/O — POSIX read/write/close have no socket counterpart
+ * on Win32 (recv/send/closesocket live in ws2_32), so .oxl code names
+ * these instead of libc directly */
+int64_t rt_sock_read(int64_t fd, void *buf, int64_t n) {
+#ifdef _WIN32
+    return recv((SOCKET)fd, (char *)buf, (int)n, 0);
+#else
+    return read((int)fd, buf, (size_t)n);
+#endif
+}
+
+int64_t rt_sock_write(int64_t fd, const char *buf, int64_t n) {
+#ifdef _WIN32
+    return send((SOCKET)fd, (const char *)buf, (int)n, 0);
+#else
+    return write((int)fd, buf, (size_t)n);
+#endif
+}
+
+int64_t rt_sock_close(int64_t fd) {
+#ifdef _WIN32
+    return closesocket((SOCKET)fd);
+#else
+    return close((int)fd);
+#endif
+}
+
+/* process-wide runtime init — WinSock needs WSAStartup before the
+ * first socket call; POSIX has no equivalent */
+void rt_init(void) {
+#ifdef _WIN32
+    WSADATA wd;
+    if (WSAStartup(MAKEWORD(2, 2), &wd) != 0)
+        fprintf(stderr, "oxl: WSAStartup failed\n");
+#endif
 }
 
 /* ---------------- sqlite3 shims ----------------
@@ -2217,9 +2303,10 @@ void rt_sqlite_close(void *db) { sqlite3_close((sqlite3 *)db); }
 /* ---------------- entry ---------------- */
 
 int main(int argc, char **argv) {
+    rt_init();
     /* select's uniform pick draws on rand() — seed per-process or every
      * run replays the same arm-pick sequence */
-    srand((unsigned)(time(NULL) ^ (long)getpid()));
+    srand((unsigned)(time(NULL) ^ oxl_pid()));
     rt_set_args(argc, argv);
     RtScope base;
     rt_scope_enter(&base);

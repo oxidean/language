@@ -598,6 +598,39 @@ fn mk_scratch_dir(prefix: &str) -> Option<PathBuf> {
     None
 }
 
+// LANG_CC wins unconditionally; else the first compiler that spawns.
+// POSIX finds cc; Windows finds mingw gcc or LLVM clang (MSVC's cl can't
+// take this C — _Thread_local, __sync builtins).
+fn pick_cc() -> String {
+    if let Ok(cc) = std::env::var("LANG_CC") {
+        return cc;
+    }
+    for c in ["cc", "gcc", "clang"] {
+        if Command::new(c)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return c.into();
+        }
+    }
+    "cc".into() // let the spawn error name a binary that isn't there
+}
+
+// cc names its product after -o; on Windows the runnable artifact needs
+// .exe spelled out or CreateProcess can't resolve it
+fn exe_out_name(out: PathBuf) -> PathBuf {
+    if cfg!(windows) && out.extension().map_or(true, |e| e != "exe") {
+        out.with_extension("exe")
+    } else {
+        out
+    }
+}
+
 fn emit_and_cc(c_src: &str, out: &Path) -> bool {
     // intermediates go in a private scratch dir — never beside the
     // user's -o where they could clobber existing out.c/rt.c/rt.h
@@ -622,7 +655,7 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
             return false;
         }
     }
-    let cc = std::env::var("LANG_CC").unwrap_or_else(|_| "cc".into());
+    let cc = pick_cc();
     // Link (and compile) SQLite only when the emitted program uses it:
     // -lsqlite3 fails outright where libsqlite3-dev isn't installed,
     // which would break every build — including `oxl run hello.oxl` —
@@ -632,14 +665,29 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
         .map(|s| s.contains("rt_sqlite_"))
         .unwrap_or(false);
     let mut cmd = Command::new(&cc);
-    cmd.args(["-O2", "-pthread", "-o"])
-        .arg(out)
-        .arg(&c_file)
-        .arg(dir.join("rt.c"));
+    cmd.arg("-O2");
+    #[cfg(not(windows))]
+    cmd.arg("-pthread");
+    cmd.arg("-o").arg(out).arg(&c_file).arg(dir.join("rt.c"));
+    // rt.c's socket shims reference WinSock unconditionally on Windows —
+    // ws2_32 must reach the link even when nothing else pulls it
+    #[cfg(windows)]
+    cmd.arg("-lws2_32");
     if needs_sqlite {
         // -D before sources, -l after: --as-needed linkers (Ubuntu gcc
         // default) drop libs seen before the undefined refs they resolve
-        cmd.arg("-DOXL_SQLITE").arg("-lsqlite3");
+        cmd.arg("-DOXL_SQLITE");
+        // a stock Windows box has no sqlite dev package — LANG_SQLITE_SRC
+        // points at an amalgamation sqlite3.c to compile in its place
+        if let Ok(src) = std::env::var("LANG_SQLITE_SRC") {
+            let sp = Path::new(&src);
+            if let Some(d) = sp.parent() {
+                cmd.arg(format!("-I{}", d.display()));
+            }
+            cmd.arg(sp);
+        } else {
+            cmd.arg("-lsqlite3");
+        }
     }
     // extra link inputs (FFI shim objects, libs) — e.g. the gui pilot's
     // LANG_LDFLAGS="gui_shim.o $(pkg-config --libs gtk4)"
@@ -664,7 +712,7 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
 
 fn cmd_build(args: &[String]) {
     let file = &args[2];
-    let out = out_arg(args).unwrap_or_else(|| PathBuf::from("a.out"));
+    let out = exe_out_name(out_arg(args).unwrap_or_else(|| PathBuf::from("a.out")));
     match compile(file) {
         Ok(c) => {
             if !emit_and_cc(&c, &out) {
@@ -682,7 +730,7 @@ fn cmd_run(args: &[String]) {
             let Some(dir) = mk_scratch_dir("oxl-run") else {
                 exit(1);
             };
-            let out = dir.join("a.out");
+            let out = exe_out_name(dir.join("a.out"));
             if !emit_and_cc(&c, &out) {
                 exit(1);
             }
@@ -706,7 +754,7 @@ fn cmd_test(args: &[String]) {
             let Some(dir) = mk_scratch_dir("oxl-test") else {
                 exit(1);
             };
-            let out = dir.join("a.out");
+            let out = exe_out_name(dir.join("a.out"));
             if !emit_and_cc(&c, &out) {
                 exit(1);
             }

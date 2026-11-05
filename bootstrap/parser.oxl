@@ -13,10 +13,8 @@ import "lexlib"
 import "std/json"
 
 // readfile signals failure as "" — the same result a legitimately
-// empty file produces — so probe open() first to tell them apart
-extern fn open(path: cstr, flags: int) -> int
-
-extern fn close(fd: int) -> int
+// empty file produces — so probe readability first to tell them apart
+extern fn rt_file_readable(path: cstr) -> int
 
 struct PCur {
     t: own lexlib.Tok,
@@ -1226,12 +1224,10 @@ fn main() {
         println("usage: parser <file.oxl>")
         exit(1)
     }
-    fd := open(cstr(argv(1)), 0) // O_RDONLY
-    if fd < 0 {
+    if rt_file_readable(cstr(argv(1))) == 0 {
         println("cannot read " + argv(1))
         exit(1)
     }
-    v := close(fd)
     src := readfile(argv(1))
     // empty source is fine: lex just yields the EOF token
     ast := parse(lexlib.lex(src))

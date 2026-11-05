@@ -4,7 +4,90 @@
  * unbuffered ownership-transfer channels.
  */
 #pragma once
+/* ---- platform compat: sync/thread veneer ----
+ * One contract over two host APIs — POSIX maps to pthreads, Win32 to
+ * SRWLOCK + CONDITION_VARIABLE (Vista+). Either side: mutexes take a
+ * static initializer (OXL_MUTEX_INIT) or dynamic init/destroy; waits
+ * release the mutex and reacquire on wake (spurious wakes allowed);
+ * Win32 destroys are no-ops (SRW primitives hold no kernel resources).
+ * oxl_thread_* keeps the POSIX `void *(*)(void *)` spawn shape; Win32
+ * routes through _beginthreadex so spawned fns get proper CRT TLS. */
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <process.h>
+
+typedef SRWLOCK oxl_mutex_t;
+typedef CONDITION_VARIABLE oxl_cond_t;
+typedef HANDLE oxl_thread_t;
+typedef SOCKET oxl_sock_t;
+#define OXL_MUTEX_INIT SRWLOCK_INIT
+#define OXL_CV_INIT CONDITION_VARIABLE_INIT
+
+static inline int oxl_mu_init(oxl_mutex_t *m, const void *attr) { (void)attr; InitializeSRWLock(m); return 0; }
+static inline int oxl_mu_lock(oxl_mutex_t *m)   { AcquireSRWLockExclusive(m); return 0; }
+static inline int oxl_mu_unlock(oxl_mutex_t *m) { ReleaseSRWLockExclusive(m); return 0; }
+static inline int oxl_mu_destroy(oxl_mutex_t *m){ (void)m; return 0; }
+
+static inline int oxl_cv_init(oxl_cond_t *c, const void *attr) { (void)attr; InitializeConditionVariable(c); return 0; }
+static inline int oxl_cv_wait(oxl_cond_t *c, oxl_mutex_t *m)   { return SleepConditionVariableSRW(c, m, INFINITE, 0) ? 0 : (int)GetLastError(); }
+static inline int oxl_cv_signal(oxl_cond_t *c)    { WakeConditionVariable(c); return 0; }
+static inline int oxl_cv_broadcast(oxl_cond_t *c) { WakeAllConditionVariable(c); return 0; }
+static inline int oxl_cv_destroy(oxl_cond_t *c)   { (void)c; return 0; }
+
+typedef struct { void *(*fn)(void *); void *arg; } OxlWinStart;
+static unsigned __stdcall oxl_win_thunk(void *p) {
+    OxlWinStart *w = (OxlWinStart *)p;
+    void *(*fn)(void *) = w->fn;
+    void *arg = w->arg;
+    free(w);
+    fn(arg);
+    return 0;
+}
+static inline int oxl_thread_spawn(oxl_thread_t *t, const void *attr,
+                                   void *(*fn)(void *), void *arg) {
+    (void)attr;
+    OxlWinStart *w = (OxlWinStart *)malloc(sizeof *w);
+    if (!w) return -1;
+    w->fn = fn;
+    w->arg = arg;
+    uintptr_t h = _beginthreadex(NULL, 0, oxl_win_thunk, w, 0, NULL);
+    if (!h) { free(w); return -1; }
+    *t = (HANDLE)h;
+    return 0;
+}
+static inline int oxl_thread_detach(oxl_thread_t t) { CloseHandle(t); return 0; }
+static inline void oxl_thread_exit(void *r) { (void)r; _endthreadex(0); }
+
+static inline long oxl_pid(void) { return (long)_getpid(); }
+
+#else /* POSIX */
 #include <pthread.h>
+#include <unistd.h>
+
+typedef pthread_mutex_t oxl_mutex_t;
+typedef pthread_cond_t oxl_cond_t;
+typedef pthread_t oxl_thread_t;
+typedef int oxl_sock_t;
+#define OXL_MUTEX_INIT PTHREAD_MUTEX_INITIALIZER
+#define OXL_CV_INIT PTHREAD_COND_INITIALIZER
+#define oxl_mu_init pthread_mutex_init
+#define oxl_mu_lock pthread_mutex_lock
+#define oxl_mu_unlock pthread_mutex_unlock
+#define oxl_mu_destroy pthread_mutex_destroy
+#define oxl_cv_init pthread_cond_init
+#define oxl_cv_wait pthread_cond_wait
+#define oxl_cv_signal pthread_cond_signal
+#define oxl_cv_broadcast pthread_cond_broadcast
+#define oxl_cv_destroy pthread_cond_destroy
+#define oxl_thread_spawn pthread_create
+#define oxl_thread_detach pthread_detach
+#define oxl_thread_exit pthread_exit
+
+static inline long oxl_pid(void) { return (long)getpid(); }
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -53,8 +136,8 @@ struct RtScope {
     volatile int cancel;
     int64_t err;
     struct RtScope *parent;
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
+    oxl_mutex_t mu;
+    oxl_cond_t cv;
     RtTask *join_task; /* frame suspended at join, if any */
     RtTask *parked;    /* tasks suspended inside this scope (pnext chain) */
     /* inner scopes live in the owning task's frame — if the owner dies
@@ -223,6 +306,11 @@ OxlStr rt_bufstr(void *buf, int64_t n);
 void rt_poke8(void *buf, int64_t off, int64_t v);
 void rt_poke16(void *buf, int64_t off, int64_t v);
 void rt_poke32(void *buf, int64_t off, int64_t v);
+void rt_init(void);                                    /* proc init (WinSock); main() calls it */
+int64_t rt_sock_read(int64_t fd, void *buf, int64_t n);  /* read | recv, portable */
+int64_t rt_sock_write(int64_t fd, const char *buf, int64_t n); /* write | send */
+int64_t rt_sock_close(int64_t fd);                       /* close | closesocket */
+int64_t rt_file_readable(const char *path);            /* open+close probe */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs);      /* SO_RCVTIMEO, portable */
 int64_t rt_set_sndtimo(int64_t fd, int64_t secs);      /* SO_SNDTIMEO, portable */
 int64_t rt_set_reuseaddr(int64_t fd);                  /* SO_REUSEADDR, portable */
