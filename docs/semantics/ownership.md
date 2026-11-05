@@ -18,8 +18,10 @@ contract the typechecker, codegen, and runtime are built against.
 - **Scope arena (default).** Plain allocations inside a scope —
   params, locals, temporaries — come from the enclosing scope's arena.
   Arena memory is bulk-freed when the scope closes. Arena objects may
-  NOT escape their scope — the typechecker rejects returning, storing
-  into outer structures, or sending arena references up-scope.
+  NOT escape their scope — the typechecker rejects returning arena
+  references or sending them up-scope. Assigning a scope-backed slice
+  to an outer struct field is NOT currently checked — storing one and
+  accessing it after the scope closes reads freed storage.
   `new(T)` is the exception: it allocates via `rt_alloc_own` (owned
   heap), so the result is NOT scope-tracked and is NOT bulk-freed when
   the scope closes — it lives until `rt_free` or the owning handle's

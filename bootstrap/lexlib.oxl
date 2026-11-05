@@ -32,6 +32,10 @@ fn k_eof() -> int {
     return 0
 }
 
+fn k_err() -> int {
+    return 7
+}
+
 struct Tok { kind: int, text: str, ln: int, next: own Tok }
 
 fn is_alpha(c: int) -> bool {
@@ -93,10 +97,14 @@ fn lex(src: str) -> own Tok {
                 i = i + 1
             }
             // unterminated comments end the scan without walking past
-            // the source — same clamp as the Rust lexer
-            i = i + 2
-            if i > len(src) {
+            // the source — same clamp as the Rust lexer — but surface
+            // as an err token so the parser/checker fail instead of
+            // silently parsing a truncated stream
+            if i + 1 >= len(src) {
+                tail = push(tail, k_err(), "unterminated block comment", ln)
                 i = len(src)
+            } else {
+                i = i + 2
             }
             continue
         }
@@ -177,6 +185,9 @@ fn kind_name(k: int) -> str {
     }
     if k == 6 {
         return "float"
+    }
+    if k == 7 {
+        return "err"
     }
     return "eof"
 }

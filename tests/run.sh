@@ -286,13 +286,21 @@ echo "== a2 select =="
 out=$("$OXL" run tests/select.oxl)
 [ "$(tail -1 <<<"$out")" = "select done" ] || { echo "FAIL select: $out"; exit 1; }
 # parked select must unwedge on sibling trap — exits nonzero, not a hang.
-# 124 = with_timeout expiry = the hang this test exists to catch; a
-# compile error also returns nonzero, so accept only a fast trap exit
+# 124 = with_timeout expiry = the hang this test exists to catch. Build
+# first so a compile error fails the check instead of passing as a
+# non-124 nonzero exit.
+"$OXL" build tests/select_cancel.oxl -o "$scratch/select_cancel" || {
+    echo "FAIL select_cancel: compile failed"; exit 1; }
 rc=0
-with_timeout 10 "$OXL" run tests/select_cancel.oxl >/dev/null 2>&1 || rc=$?
+with_timeout 10 "$scratch/select_cancel" >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
     echo "FAIL select_cancel: expected trap exit, got rc=$rc"; exit 1
 fi
+
+# orphan drain: a frame task returning inside an open scope orphans it;
+# its teardown must not lock the joined scope's destroyed mutex.
+out=$(with_timeout 30 "$OXL" run tests/orphan_join.oxl)
+[ "$(tail -1 <<<"$out")" = "orphan-join ok" ] || { echo "FAIL orphan_join: $out"; exit 1; }
 
 echo "== a3 buffered channels =="
 out=$("$OXL" run tests/chanbuf.oxl)

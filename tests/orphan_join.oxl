@@ -1,0 +1,29 @@
+// Regression: a frame task that returns while still inside an inner
+// scope orphans that scope; a task spawned inside it keeps the orphan
+// alive past the spawner's join. The orphan's teardown must find its
+// parent link already detached (link_mu) — before the fix it locked
+// the joined scope's destroyed mutex. Looped to shake the race.
+import "std/time"
+
+fn leaf() {
+    time.sleep_ms(30)
+}
+
+fn child() {
+    scope {
+        spawn leaf()
+        return
+    }
+}
+
+fn main() {
+    i := 0
+    for i < 200 {
+        scope {
+            spawn child()
+            // join fires when child settles — racing leaf's drain
+        }
+        i = i + 1
+    }
+    println("orphan-join ok")
+}

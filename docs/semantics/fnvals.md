@@ -42,7 +42,11 @@ Caveat — slice captures: a non-`own` slice copies only its header
 scope's arena and is bulk-freed when that scope closes. A closure that
 captures such a slice must not be called after the scope ends — the
 elements dangle. Copy the slice into `own` storage (`new(slice)`)
-before capturing, or keep the closure inside the creating scope.
+before capturing, or keep the closure inside the creating scope. Note
+that `new(slice)` copies the slice's own backing array only — storage
+referenced *by* the elements (e.g. the buffers behind concatenated
+strings held in the slice) is not copied and must likewise outlive the
+closure.
 
 ## Representation
 

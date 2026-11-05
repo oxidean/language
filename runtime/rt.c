@@ -99,6 +99,15 @@ void rt_unborrow(void *obj) {
 
 /* ---------------- scopes, tasks, traps ---------------- */
 
+/* serializes scope-tree membership: every parent link write and every
+ * children-list traversal runs under link_mu. Children hold no pending
+ * ref on their parent, so a parent can tear down under a live child —
+ * teardown detaches its children under link_mu BEFORE its mutex dies,
+ * and a surviving child's later unlink sees parent==NULL instead of
+ * locking destroyed memory. Lock order: link_mu first, at most one
+ * scope mu nested inside; never two scope mutexes under it. */
+static pthread_mutex_t link_mu = PTHREAD_MUTEX_INITIALIZER;
+
 void rt_scope_enter(RtScope *s) {
     memset(s, 0, sizeof *s);
     s->parent = tls_scope;
@@ -111,12 +120,19 @@ void rt_scope_enter(RtScope *s) {
         /* link into the parent's descendant list so rt_trap can cancel
          * the whole subtree; a scope born under an already-cancelled
          * parent starts cancelled — its first suspend point dies
-         * instead of outliving the trap that spawned it */
+         * instead of outliving the trap that spawned it. A dead parent
+         * (teardown already committed) takes no new children: stay
+         * unlinked so our own unlink can't touch freed memory */
+        pthread_mutex_lock(&link_mu);
         pthread_mutex_lock(&s->parent->mu);
-        if (s->parent->cancel) s->cancel = 1;
-        s->sib = s->parent->children;
-        s->parent->children = s;
+        if (s->parent->cancel || s->parent->dead) s->cancel = 1;
+        if (s->parent->dead) s->parent = NULL;
+        else {
+            s->sib = s->parent->children;
+            s->parent->children = s;
+        }
         pthread_mutex_unlock(&s->parent->mu);
+        pthread_mutex_unlock(&link_mu);
     }
     tls_scope = s;
 }
@@ -253,24 +269,46 @@ static void scope_heap_free(RtScope *s);
  * and the scope-tracked heap blocks. Sync objects die too — pending==0
  * means no thread can still be holding or waiting on them. The scope
  * struct itself is frame (or stack) memory — not freed here. */
-/* drop s from its parent's descendant list — idempotent. The list is
- * only walked by rt_trap's cancel propagation under the parent's mu,
- * so an unlinked scope is invisible to in-flight traps. */
+/* drop s from its parent's descendant list — idempotent. Membership
+ * lives under link_mu, never p->mu: p's teardown may already have run
+ * (it NULLs our parent link first under the same mutex), so a NULL
+ * here means "already detached — the struct is gone, touch nothing". */
 static void scope_unlink(RtScope *s) {
+    pthread_mutex_lock(&link_mu);
     RtScope *p = s->parent;
-    if (!p) return;
-    pthread_mutex_lock(&p->mu);
-    RtScope **pp = &p->children;
-    while (*pp) {
-        if (*pp == s) { *pp = s->sib; break; }
-        pp = &(*pp)->sib;
+    if (p) {
+        RtScope **pp = &p->children;
+        while (*pp) {
+            if (*pp == s) { *pp = s->sib; break; }
+            pp = &(*pp)->sib;
+        }
     }
+    s->parent = NULL;
     s->sib = NULL;
-    pthread_mutex_unlock(&p->mu);
+    pthread_mutex_unlock(&link_mu);
+}
+
+/* detach every child of s under link_mu: each survives with parent==NULL
+ * so its later teardown/walk can never lock s's about-to-die mutex.
+ * Runs before sync destruction in every teardown path. */
+static void scope_detach_children(RtScope *s) {
+    pthread_mutex_lock(&link_mu);
+    for (RtScope *c = s->children; c; ) {
+        RtScope *n = c->sib;
+        c->parent = NULL;
+        c->sib = NULL;
+        c = n;
+    }
+    s->children = NULL;
+    pthread_mutex_unlock(&link_mu);
 }
 
 static void scope_teardown(RtScope *s) {
+    pthread_mutex_lock(&s->mu);
+    s->dead = 1; /* teardown commits here: trap walks must skip us */
+    pthread_mutex_unlock(&s->mu);
     scope_unlink(s);
+    scope_detach_children(s);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->cv);
     scope_heap_free(s);
@@ -343,14 +381,14 @@ int64_t rt_scope_join_free(void *sv) {
 static pthread_mutex_t cancel_tree_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* cancel every scope below s and force-wake their parked tasks.
- * Lock order is parent->child only: while s->mu is held, no linked
- * child can unlink or finish teardown, so c->mu is safe to take. A
- * child that already committed teardown (dead) is skipped; a live one
+ * The children list lives under link_mu: while it is held no child can
+ * detach or be detached, so c->mu is safe to take (link_mu -> c->mu).
+ * A child that already committed teardown (dead) is skipped; a live one
  * gets a temp pending hold so its join/drain can't complete between
  * our unlock and the wake — dropped after its subtree is done. */
 static void scope_cancel_tree(RtScope *s) {
     RtScope *list = NULL;
-    pthread_mutex_lock(&s->mu);
+    pthread_mutex_lock(&link_mu);
     for (RtScope *c = s->children; c; c = c->sib) {
         pthread_mutex_lock(&c->mu);
         if (!c->dead) {
@@ -361,7 +399,7 @@ static void scope_cancel_tree(RtScope *s) {
         }
         pthread_mutex_unlock(&c->mu);
     }
-    pthread_mutex_unlock(&s->mu);
+    pthread_mutex_unlock(&link_mu);
     while (list) {
         RtScope *c = list;
         list = c->wnext;
@@ -757,12 +795,14 @@ static int join_scope(RtScope *s) {
     int err = s->trapped ? (int)s->err : 0;
     s->dead = 1; /* teardown commits here: trap walks must skip us */
     pthread_mutex_unlock(&s->mu);
+    RtScope *up = s->parent; /* captured pre-detach for tls_scope restore */
     scope_unlink(s);
+    scope_detach_children(s);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->cv);
     scope_heap_free(s);
     free(s->arena_buf); /* bulk-free: the arena story */
-    tls_scope = s->parent;
+    tls_scope = up;
     return err;
 }
 
@@ -785,12 +825,14 @@ int rt_scope_finish(RtScope *s) {
     int err = s->trapped ? (int)s->err : 0;
     s->dead = 1;
     pthread_mutex_unlock(&s->mu);
+    RtScope *up = s->parent;
     scope_unlink(s);
+    scope_detach_children(s);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->cv);
     scope_heap_free(s);
     free(s->arena_buf);
-    tls_scope = s->parent;
+    tls_scope = up;
     return err;
 }
 

@@ -16,6 +16,7 @@ struct PCur {
     t: own lexlib.Tok,
     nolit: int, // 1 while parsing if/for conditions — `{` is a block, not a literal
     pln: int, // line of the last consumed token — `x[i]` only binds when adjacent
+    lex_err: int, // 1 once an err token was consumed — parse() returns nil
 }
 
 // ---------- typed AST ----------
@@ -388,6 +389,16 @@ fn next(c: mut PCur) {
     if c.t != nil {
         c.pln = c.t.ln
         c.t = c.t.next
+        // lexical errors arrive as err tokens (kind 7) — report once and
+        // truncate the stream: parsing a truncated tail as real tokens
+        // silently mis-shapes the AST (kind-agnostic token reads)
+        if c.t != nil && c.t.kind == lexlib.k_err() {
+            if c.lex_err == 0 {
+                println("lex: " + c.t.text + " (line " + itoa(c.t.ln) + ")")
+            }
+            c.lex_err = 1
+            c.t = nil
+        }
     }
 }
 
@@ -1181,9 +1192,13 @@ fn parse(toks: own lexlib.Tok) -> own Node {
     c.t = toks
     c.nolit = 0
     c.pln = 0
+    c.lex_err = 0
     let items: own NList = nil
     for pkind(c) != 0 {
         items = ncons(p_item(c), items)
+    }
+    if c.lex_err != 0 {
+        return nil
     }
     return b(Node.Root{items: nrev(items)})
 }
@@ -1199,5 +1214,8 @@ fn main() {
         exit(1)
     }
     ast := parse(lexlib.lex(src))
+    if ast == nil {
+        exit(1)
+    }
     println(json.tojson(to_json(ast)))
 }

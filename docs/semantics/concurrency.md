@@ -111,7 +111,18 @@ select {
   suspends or completes — cooperative, not preemptive.
 - `spawnBlocking` tasks run on a separate blocking pool so they cannot
   starve task threads. Plain `extern` calls are NOT re-routed — they
-  run inline on the caller; wrap them in `spawnBlocking` yourself.
+  run inline on the caller. To offload a blocking extern, wrap it in an
+  OXL function and pass the wrapper to `spawnBlocking`:
+
+  ```oxl
+  extern fn foreign_fn(fd: int) -> int
+
+  fn blocking_call(fd: int) -> int {
+      return foreign_fn(fd)
+  }
+
+  spawnBlocking blocking_call(fd)
+  ```
 - Scale: a parked task costs one small heap block, not a thread.
   Measured ~1.9 MB RSS with 10k parked tasks; ~2x faster than the
   thread-pool executor at 1k+ tasks on the rendezvous bench

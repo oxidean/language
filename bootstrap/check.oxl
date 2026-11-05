@@ -4793,7 +4793,11 @@ fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
         return
     }
     ast := parser.parse(lexlib.lex(src))
-    if ast == nil || nk(ast) != 28 {
+    if ast == nil {
+        diag(ck, "lex", "lexical error — see lex output above")
+        return
+    }
+    if nk(ast) != 28 {
         return
     }
     match ast {
