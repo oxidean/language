@@ -567,6 +567,23 @@ static void run_task(RtTask *t) {
     task_release_frame(t, trapped);
 }
 
+/* pthread_create refused: spawn must never silently drop caller-owned
+ * state packed into the arg frame (fds, slots — their cleanup only
+ * exists inside the fn). Drive the fn task on the calling thread
+ * instead: run_task does the full settle (defers, scope_done, run-ref
+ * drop). TLS and the jump buffer are saved first — run_task installs
+ * its own setjmp target and leaves tls_* pointing at the dead task. */
+static void run_inline(RtTask *t) {
+    RtTask *pt = tls_task;
+    RtScope *ps = tls_scope;
+    jmp_buf pj;
+    memcpy(pj, tls_jb, sizeof pj);
+    run_task(t);
+    memcpy(tls_jb, pj, sizeof pj);
+    tls_task = pt;
+    tls_scope = ps;
+}
+
 static void *worker(void *_p) {
     (void)_p;
     for (;;) {
@@ -705,7 +722,7 @@ void rt_spawn(void *(*fn)(void *), void *arg) {
         t->fn = fn; t->arg = arg;
         pthread_t th;
         if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
-        else task_unref(t);
+        else run_inline(t); /* no thread: run it here — never drop the task */
         return;
     }
     RtTask *t = xmalloc(sizeof *t);
@@ -726,7 +743,7 @@ void rt_spawnb(void *(*fn)(void *), void *arg) {
     t->fn = fn; t->arg = arg; t->scope = s;
     pthread_t th;
     if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
-    else { scope_done(s); task_unref(t); } /* don't leak the pending slot */
+    else run_inline(t); /* run_task itself settles scope_done + the run ref */
 }
 
 /* one allocation per task: [RtTask][frame bytes]. Generated code gets
@@ -759,7 +776,16 @@ void rt_spawnb_task(RtFrame *fr) {
     t->external = 1;
     pthread_t th;
     if (pthread_create(&th, NULL, task_wrap_frame, t) == 0) pthread_detach(th);
-    else { scope_done(t->scope); task_unref(t); } /* don't leak the pending slot */
+    else {
+        /* admission holds a pending slot AND caller-owned params inside
+         * the frame — settling without running leaks both. Drive the
+         * frame on this thread: the slot stays held across the run so a
+         * parked join can't tear the scope down under the live task
+         * (rt_run_root drops the run ref — capture the scope first) */
+        RtScope *sc = t->scope;
+        rt_run_root(fr);
+        scope_done(sc);
+    }
 }
 
 /* drive one frame task to completion on the calling thread — the root
@@ -777,6 +803,10 @@ int rt_run_root(RtFrame *fr) {
     RtScope *prev_scope = tls_scope; /* a trapping frame task unwinds past
         every scope_leave — the caller's scope must come back or later
         rt_scope_enter/rt_alloc on this thread walk freed scope memory */
+    jmp_buf prev_jb; /* same for the caller's setjmp target: a nested
+        driver (spawn-failure fallback) must not leave traps landing
+        in this frame's dead stack */
+    memcpy(prev_jb, tls_jb, sizeof prev_jb);
     tls_task = t;
     tls_scope = t->scope;
     volatile int trapped = 0;
@@ -798,6 +828,7 @@ int rt_run_root(RtFrame *fr) {
         trapped = 1;
     }
     task_defers_drain(t);
+    memcpy(tls_jb, prev_jb, sizeof prev_jb);
     tls_task = prev;
     tls_scope = prev_scope;
     if (t->sel) rt_select_arm(t);
