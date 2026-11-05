@@ -148,8 +148,12 @@ fn lex(src: str) -> own Tok {
                 } // escape
                 i = i + 1
             }
-            tail = push(tail, k_str(), substr(src, a, i), ln)
-            i = i + 1
+            if i >= len(src) {
+                tail = push(tail, k_err(), "unterminated string", ln)
+            } else {
+                tail = push(tail, k_str(), substr(src, a, i), ln)
+                i = i + 1
+            }
             continue
         }
         // two-char punct first (:= == != <= >= && || ->)

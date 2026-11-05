@@ -2,43 +2,34 @@
 // not over arm positions. With a never-ready third arm, a random-start
 // first-ready sweep lands on arm a with P=2/3 (starts at a, or wraps
 // through empty c back to a) — the fair pick is 1/2 each.
-import "std/time"
-
-fn producer(c: chan, v: int, n: int) {
-    i := 0
-    for i < n {
-        send(c, v) // parks when full; close() completes the rest
-        i = i + 1
-    }
-}
-
+//
+// Both arms are PRELOADED so every measured pick sees two ready arms:
+// live producers can lag behind the buffer and leave one arm empty,
+// and those correct single-ready picks would skew the count.
 fn main() {
     n := 10000
-    a := mkchan(16)
-    b := mkchan(16)
+    a := mkchan(n)
+    b := mkchan(n)
     c := mkchan() // never sends: keeps the ready set partial
+    i := 0
+    for i < n {
+        send(a, 1)
+        send(b, 2)
+        i = i + 1
+    }
     na := 0
-    scope {
-        spawn producer(a, 1, n)
-        spawn producer(b, 2, n)
-        i := 0
-        for i < n {
-            select {
-                v := recv(a) => {
-                    na = na + v // v is always 1: na counts a-picks
-                }
-                w := recv(b) => {}
-                x := recv(c) => {
-                    na = na - x // unreachable — silences unused binding
-                }
+    i = 0
+    for i < n {
+        select {
+            v := recv(a) => {
+                na = na + v // v is always 1: na counts a-picks
             }
-            i = i + 1
+            w := recv(b) => {}
+            x := recv(c) => {
+                na = na - x // unreachable — silences unused binding
+            }
         }
-        // producers oversupplied (2n for n picks): close completes
-        // their parked sends silently so the join can't hang
-        close(a)
-        close(b)
-        close(c)
+        i = i + 1
     }
     println("na=" + itoa(na))
     // fair: na ≈ n/2; the positional sweep gives ≈ 2n/3 and fails

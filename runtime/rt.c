@@ -748,6 +748,9 @@ int rt_run_root(RtFrame *fr) {
     t->external = 1;
     t->wk = &wk;
     RtTask *prev = tls_task;
+    RtScope *prev_scope = tls_scope; /* a trapping frame task unwinds past
+        every scope_leave — the caller's scope must come back or later
+        rt_scope_enter/rt_alloc on this thread walk freed scope memory */
     tls_task = t;
     tls_scope = t->scope;
     volatile int trapped = 0;
@@ -767,6 +770,7 @@ int rt_run_root(RtFrame *fr) {
     }
     task_defers_drain(t);
     tls_task = prev;
+    tls_scope = prev_scope;
     if (t->sel) rt_select_arm(t);
     t->wk = NULL;
     pthread_mutex_destroy(&wk.mu);
@@ -837,21 +841,24 @@ int rt_scope_finish(RtScope *s) {
     return err;
 }
 
-static void scope_propagate(RtScope *s, int err) {
-    if (s->parent) {
-        pthread_mutex_lock(&s->parent->mu);
-        s->parent->trapped = 1;
-        s->parent->err = err; /* keep the code — propagation must not swallow it */
-        pthread_mutex_unlock(&s->parent->mu);
+/* propagate to the PARENT: the scope that just left is already
+ * unlinked (its parent field is NULL), so callers pass the scope
+ * join_scope/rt_scope_finish restored to tls_scope */
+void rt_scope_propagate(RtScope *p, int64_t err) {
+    if (p) {
+        pthread_mutex_lock(&p->mu);
+        p->trapped = 1;
+        p->err = err; /* keep the code — propagation must not swallow it */
+        pthread_mutex_unlock(&p->mu);
     } else {
-        fprintf(stderr, "trap %d escaped top scope\n", err);
+        fprintf(stderr, "trap %lld escaped top scope\n", (long long)err);
         abort();
     }
 }
 
 void rt_scope_leave(RtScope *s) {
     int err = join_scope(s);
-    if (err) scope_propagate(s, err);
+    if (err) rt_scope_propagate(tls_scope, err);
 }
 
 int rt_scope_try(RtScope *s) { return join_scope(s); }
@@ -1175,7 +1182,12 @@ void rt_send(RtChan *ch, int64_t v) {
     pthread_mutex_lock(&ch->mu);
     park_add(me, me ? me->scope : NULL, ch, WK_TSEND);
     for (;;) {
-        while (ch->has && !ch->closed) pthread_cond_wait(&ch->cv_send, &ch->mu);
+        /* cancelled() checked under ch->mu: the cancel pass sets the flag
+         * before claiming the park entry and broadcasting, so a wake that
+         * landed before we locked still shows the flag here — without the
+         * under-lock test that cancel is lost and we cond_wait forever */
+        while (ch->has && !ch->closed && !rt_cancelled())
+            pthread_cond_wait(&ch->cv_send, &ch->mu);
         if (ch->closed) break;
         if (rt_cancelled()) goto cancelled; /* cancel-wake must not re-wait */
         RtTask *r = chan_pop_recv(ch);
@@ -1198,7 +1210,8 @@ void rt_send(RtChan *ch, int64_t v) {
         ch->has = 1;
         ch->slot_owner = me;
         pthread_cond_broadcast(&ch->cv_recv);
-        while (ch->has && !ch->closed) pthread_cond_wait(&ch->cv_send, &ch->mu);
+        while (ch->has && !ch->closed && !rt_cancelled())
+            pthread_cond_wait(&ch->cv_send, &ch->mu);
         if (rt_cancelled()) {
             /* retract our own unclaimed slot only — a 1 here could be
              * another thread sender's fresh deposit */
@@ -1244,6 +1257,13 @@ int64_t rt_recv(RtChan *ch) {
             goto done;
         }
         if (ch->has || ch->closed) break;
+        /* same under-lock cancel test as rt_send — a claim+broadcast
+         * that landed before the lock left the flag set, not a wake */
+        if (rt_cancelled()) {
+            pthread_mutex_unlock(&ch->mu);
+            if (me && park_claim(me)) park_del(me);
+            task_unwind();
+        }
         ch->trecv++;
         pthread_cond_wait(&ch->cv_recv, &ch->mu);
         ch->trecv--;
@@ -1916,6 +1936,23 @@ int64_t rt_writefile(OxlStr path, OxlStr data) {
 
 void rt_exit(int64_t code) { exit((int)code); }
 
+/* portable socket setup — SOL_SOCKET/SO_REUSEADDR constants and the
+ * sockaddr_in layout differ across Linux/macOS/BSD (sin_len exists only
+ * on BSD-derived systems), so they can't be spelled in oxl source */
+int64_t rt_set_reuseaddr(int64_t fd) {
+    int one = 1;
+    return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+}
+
+int64_t rt_bind_any(int64_t fd, int64_t port) {
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    return bind((int)fd, (struct sockaddr *)&a, sizeof a);
+}
+
 /* portable receive timeout — SO_RCVTIMEO's constant differs by OS */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
     struct timeval tv;
@@ -1935,7 +1972,15 @@ int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
 
 void *rt_sqlite_open(const char *path) {
     sqlite3 *db = NULL;
-    if (sqlite3_open(path, &db) != SQLITE_OK) return NULL;
+    if (sqlite3_open(path, &db) != SQLITE_OK) {
+        /* sqlite3_open can allocate a handle even on failure — it owns
+         * the error text, so report through it before closing */
+        if (db) {
+            fprintf(stderr, "sqlite open failed: %s\n", sqlite3_errmsg(db));
+            sqlite3_close(db);
+        }
+        return NULL;
+    }
     sqlite3_busy_timeout(db, 5000); /* serialize concurrent writers */
     sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
     return db;

@@ -3348,7 +3348,7 @@ impl<'a> Gen<'a> {
                 self.state_ctr += 1;
                 self.state_labels.push(k);
                 let _ = writeln!(self.out,
-                    "    fr->state = {k};\n    if (rt_scope_join_poll(&fr->sc{i}, task) == RT_PENDING) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }}\n    s{k}: ;\n    {{ int64_t _e = rt_scope_finish(&fr->sc{i});\n      if (_e) {{ if (fr->sc{i}.parent) {{ fr->sc{i}.parent->trapped = 1; fr->sc{i}.parent->err = _e; }} else {{ fprintf(stderr, \"trap %lld escaped top scope\\n\", (long long)_e); abort(); }} }} }}");
+                    "    fr->state = {k};\n    if (rt_scope_join_poll(&fr->sc{i}, task) == RT_PENDING) {{ fr->cur_scope = tls_scope; tls_scope = saved; return RT_PENDING; }}\n    s{k}: ;\n    {{ int64_t _e = rt_scope_finish(&fr->sc{i});\n      if (_e) rt_scope_propagate(tls_scope, _e); }}");
             }
             Stmt::Spawn { call, blocking, .. } => self.spawn(call, *blocking),
             Stmt::Select { arms, .. } => self.fselect(arms),

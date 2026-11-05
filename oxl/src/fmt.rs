@@ -501,7 +501,7 @@ impl<'a> Fmt<'a> {
                 }
             }
             Stmt::If { cond, then, els, .. } => {
-                let c = self.expr(cond, 0, ind);
+                let c = self.cond(cond, ind);
                 self.out.push_str(&format!("if {c} {{"));
                 self.block(then, ind);
                 match els {
@@ -518,7 +518,7 @@ impl<'a> Fmt<'a> {
                 }
             }
             Stmt::For { cond, body, .. } => {
-                let c = self.expr(cond, 0, ind);
+                let c = self.cond(cond, ind);
                 self.out.push_str(&format!("for {c} {{"));
                 self.block(body, ind);
             }
@@ -568,6 +568,13 @@ impl<'a> Fmt<'a> {
             Stmt::Break { .. } => self.out.push_str("break"),
             Stmt::Continue { .. } => self.out.push_str("continue"),
         }
+    }
+
+    /// if/for/match head: the parser reads it with no_lit, so a bare
+    /// struct literal must stay parenthesized to round-trip
+    fn cond(&mut self, e: &Expr, ind: usize) -> String {
+        let s = self.expr(e, 0, ind);
+        if bare_lit(e) { format!("({s})") } else { s }
     }
 
     // ---- expressions: precedence-aware, parens re-inserted ----
@@ -681,7 +688,7 @@ impl<'a> Fmt<'a> {
                 format!("{inner} as {}", self.ty(ty))
             }
             ExprKind::Match { e: scrut, arms } => {
-                let mut s = format!("match {} {{", self.expr(scrut, 0, ind));
+                let mut s = format!("match {} {{", self.cond(scrut, ind));
                 for a in arms {
                     // comments before the arm attach inside the match
                     self.drain_into(&mut s, a.span.lo, ind + 1, false);
@@ -806,6 +813,21 @@ const UNARY: u8 = 10;
 const POSTFIX: u8 = 11;
 
 /// binding-power table mirroring the parser's Pratt levels
+/// struct literal reachable without crossing a `(`/`[` delimiter —
+/// only that chain sits in the parser's no_lit head position
+fn bare_lit(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::StructLit { .. } => true,
+        ExprKind::Bin { l, r, .. } => bare_lit(l) || bare_lit(r),
+        ExprKind::Un { e, .. } | ExprKind::As { e, .. } => bare_lit(e),
+        ExprKind::Field { obj, .. }
+        | ExprKind::Index { obj, .. }
+        | ExprKind::Slice { obj, .. } => bare_lit(obj),
+        ExprKind::Call { f, .. } => bare_lit(f),
+        _ => false,
+    }
+}
+
 fn prec(op: BinOp) -> u8 {
     match op {
         BinOp::Or => 1,

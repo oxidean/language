@@ -87,6 +87,7 @@ void rt_scope_leave(RtScope *s);
 int rt_scope_try(RtScope *s); /* join; return trap code without propagating */
 int rt_scope_join_poll(RtScope *s, RtTask *t); /* frame join: READY/PENDING */
 int rt_scope_finish(RtScope *s);              /* post-join teardown -> err */
+void rt_scope_propagate(RtScope *p, int64_t err); /* trap err -> parent (or abort) */
 void rt_sigpipe_ignore(void);                 /* SIGPIPE -> SIG_IGN (server write path) */
 void *rt_scope_new(void);                     /* heap scope: opaque size for lib code */
 int64_t rt_scope_join_free(void *s);          /* try-join + free: swallow trap code */
@@ -221,6 +222,8 @@ void rt_poke8(void *buf, int64_t off, int64_t v);
 void rt_poke16(void *buf, int64_t off, int64_t v);
 void rt_poke32(void *buf, int64_t off, int64_t v);
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs);      /* SO_RCVTIMEO, portable */
+int64_t rt_set_reuseaddr(int64_t fd);                  /* SO_REUSEADDR, portable */
+int64_t rt_bind_any(int64_t fd, int64_t port);         /* bind INADDR_ANY, portable */
 int64_t rt_htons(int64_t v);
 int64_t rt_htonl(int64_t v);
 OxlStr rt_readfile(OxlStr path);

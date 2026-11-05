@@ -10,7 +10,10 @@
 // is sent as text/plain.
 extern fn socket(domain: int, ty: int, proto: int) -> int
 
-extern fn bind(fd: int, addr: ref sockaddr, len: int) -> int
+// SO_REUSEADDR + sockaddr_in layout differ per OS — runtime owns both
+extern fn rt_set_reuseaddr(fd: int) -> int
+
+extern fn rt_bind_any(fd: int, port: int) -> int
 
 extern fn listen(fd: int, backlog: int) -> int
 
@@ -21,8 +24,6 @@ extern fn read(fd: int, buf: mut void, n: int) -> int
 extern fn write(fd: int, buf: cstr, n: int) -> int
 
 extern fn close(fd: int) -> int
-
-extern fn setsockopt(fd: int, lvl: int, opt: int, v: ref intp, n: int) -> int
 
 // explicit release for `own ?` buffers (mkbuf) — scope arenas don't
 // reclaim them, so a per-request scratch must be freed by hand
@@ -225,6 +226,12 @@ fn read_request(fd: int) -> ReqRead {
         rt_free(scratch)
         return ReqRead{status: 400, req: "", body: ""}
     }
+    // no chunked decoding: a TE body has no length to drain, so the
+    // chunk bytes stay on the wire and desync the next request — refuse
+    if find_from(lwr(substr(req, 0, hdr_end)), "\r\ntransfer-encoding:", 0) >= 0 {
+        rt_free(scratch)
+        return ReqRead{status: 400, req: "", body: ""}
+    }
     if cl > MAX_BODY {
         rt_free(scratch)
         return ReqRead{status: 413, req: "", body: ""}
@@ -283,22 +290,33 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
             resp := http_resp(rr.status, status_text(rr.status) + "\n")
             write(fd, cstr(resp), len(resp))
         } else {
-            // "METHOD PATH HTTP/1.x" — split on the first two spaces
+            // "METHOD PATH HTTP/1.x" — split on the first two spaces; a
+            // line missing either (or opening with one) is malformed —
+            // substr on a -1/0 hit would dispatch a garbage route
             sp1 := find(rr.req, " ")
-            rest := substr(rr.req, sp1 + 1, len(rr.req))
-            sp2 := find(rest, " ")
-            path := substr(rest, 0, sp2)
-            method := substr(rr.req, 0, sp1)
-
-            // per-conn trap containment: route_serve runs as a nested
-            // task inside a heap try-scope. Its trap stops at
-            // rt_scope_join_free instead of propagating through serve's
-            // shared spawn scope and cancelling sibling handlers
-            rsc := rt_scope_new()
-            spawnBlocking route_serve(h, method, path, rr.body, fd)
-            if rt_scope_join_free(rsc) != 0 {
-                resp := http_resp(500, "handler trapped\n")
+            sp2 := -1
+            rest := ""
+            if sp1 > 0 {
+                rest = substr(rr.req, sp1 + 1, len(rr.req))
+                sp2 = find(rest, " ")
+            }
+            if sp1 <= 0 || sp2 <= 0 {
+                resp := http_resp(400, "malformed request line\n")
                 write(fd, cstr(resp), len(resp))
+            } else {
+                path := substr(rest, 0, sp2)
+                method := substr(rr.req, 0, sp1)
+
+                // per-conn trap containment: route_serve runs as a nested
+                // task inside a heap try-scope. Its trap stops at
+                // rt_scope_join_free instead of propagating through serve's
+                // shared spawn scope and cancelling sibling handlers
+                rsc := rt_scope_new()
+                spawnBlocking route_serve(h, method, path, rr.body, fd)
+                if rt_scope_join_free(rsc) != 0 {
+                    resp := http_resp(500, "handler trapped\n")
+                    write(fd, cstr(resp), len(resp))
+                }
             }
         }
     }
@@ -308,17 +326,10 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
 fn serve(port: int, h: Handler) {
     rt_sigpipe_ignore() // reset clients must not kill us on write
     srv := socket(2, 1, 0) // AF_INET, SOCK_STREAM
-    one := new(intp)
-    one.v = 1
-    setsockopt(srv, 1, 2, one, 4) // SOL_SOCKET, SO_REUSEADDR
-
     addr := new(sockaddr)
-    // sockaddr_in: family (host order) | port (network order) | addr | zero
-    poke8(addr, 0, 2) // sin_family = AF_INET (LE pair 02 00)
-    poke8(addr, 1, 0)
-    poke16(addr, 2, port) // sin_port = htons(port)
-    poke32(addr, 4, 0) // sin_addr = INADDR_ANY
-    if bind(srv, addr, 16) != 0 || listen(srv, 64) != 0 {
+    one := new(intp)
+    one.v = 16 // peer-addr buffer size for accept()
+    if rt_set_reuseaddr(srv) != 0 || rt_bind_any(srv, port) != 0 || listen(srv, 64) != 0 {
         // a failed bind/listen makes every accept return -1 at once:
         // the serve loop would spin at 100% CPU serving nothing
         close(srv)

@@ -20,7 +20,7 @@ passes, `sort`/`map`/`filter` in stdlib, and callback APIs (the HTTP
 ## Acceptance
 
 - `let f = add` then `f(1,2)`; pass fn as arg; store in struct field
-- Closure captures a local by value: `n:=0; inc := {|| n+1 }; n=9;
+- Closure captures a local by value: `n:=0; inc := { | | return n + 1 }; n=9;
   inc()` returns 1 — the copy is taken at closure creation (re-binding
   a captured name inside the closure is rejected; the Go-vs-Rust
   distinction collapses to copy — predictable, no escape analysis)

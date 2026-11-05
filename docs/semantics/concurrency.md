@@ -92,9 +92,9 @@ select {
 ```
 
 - recv arms only; send arms are rejected (cut for v0.2).
-- Multiple ready arms: the poll starts from a random arm and takes
-  the FIRST ready arm it finds — ready arms are not picked uniformly
-  (an arm right after the start point wins over equally-ready others).
+- Multiple ready arms: the poll picks uniformly at random over the
+  ready set — a random-start first-ready sweep is NOT uniform (an arm
+  right after the start point wins over equally-ready others).
   `else` fires when no arm is ready. `timeout` fires once after `ms`
   and never with `else`.
 - A parked `select` holds one waiter node per arm chan; the first

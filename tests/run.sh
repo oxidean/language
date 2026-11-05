@@ -106,12 +106,15 @@ grep -q "missing B" <<<"$diag" || { echo "FAIL: missing-variant diagnostic: $dia
 echo "== slices (b3) =="
 out=$("$OXL" run tests/slices.oxl)
 [ "$(tail -1 <<<"$out")" = "slices ok" ] || { echo "FAIL slices: $out"; exit 1; }
-# out-of-range index must trap, not corrupt
-if "$OXL" run tests/slice_oob.oxl >/dev/null 2>&1; then
+# out-of-range index must trap, not corrupt — build first so a compile
+# break can't pass as a runtime trap
+"$OXL" build tests/slice_oob.oxl -o "$scratch/slice_oob" || { echo "FAIL: slice_oob did not compile"; exit 1; }
+if "$scratch/slice_oob" >/dev/null 2>&1; then
     echo "FAIL slice_oob: expected nonzero exit"; exit 1
 fi
 # inverted view range must trap, not corrupt
-if "$OXL" run tests/slice_range.oxl >/dev/null 2>&1; then
+"$OXL" build tests/slice_range.oxl -o "$scratch/slice_range" || { echo "FAIL: slice_range did not compile"; exit 1; }
+if "$scratch/slice_range" >/dev/null 2>&1; then
     echo "FAIL slice_range: expected nonzero exit"; exit 1
 fi
 
@@ -155,7 +158,8 @@ fn willtrap() {
 }
 fn main() { willtrap() }
 EOF
-trapout=$(with_timeout 10 "$OXL" run "$scratch/d5trap.oxl" 2>&1 || true)
+"$OXL" build "$scratch/d5trap.oxl" -o "$scratch/d5trap" || { echo "FAIL: d5trap did not compile"; exit 1; }
+trapout=$(with_timeout 10 "$scratch/d5trap" 2>&1 || true)
 grep -q "^5$" <<<"$trapout" || { echo "FAIL defer trap drain: $trapout"; exit 1; }
 grep -q "^6$" <<<"$trapout" || { echo "FAIL defer trap drain order: $trapout"; exit 1; }
 

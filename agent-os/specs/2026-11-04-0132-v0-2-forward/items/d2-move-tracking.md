@@ -33,7 +33,8 @@ that catches the actual bug class (use-after-move) statically.
 ## Acceptance
 
 - `spawn worker(c)` twice on the same `own` → compile error naming `c`
-- `v := own_thing(); use(v)` → error; `v = new_own(); use(v)` → ok
+- `v := own_thing(); use(v); use(v)` → error on the second call;
+  `v = new_own(); use(v)` → ok (reinit clears the moved mark)
 - if/else merge: moved-in-both-branches → moved after; moved-in-one →
   moved after (later reads error); the mark clears only when every
   fall-through path re-initializes the binding

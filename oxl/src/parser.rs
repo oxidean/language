@@ -879,11 +879,12 @@ impl<'a> Parser<'a> {
             // `}`, return type is inferred from `return` statements
             Tok::P(P::LBrace) => {
                 self.bump();
-                if !self.expect_p(P::Pipe, "`|` — closures are `{ |args| stmts }`") {
+                let empty = self.eat_p(P::Or); // `{ || stmts }` — `||` lexes as Or
+                if !empty && !self.expect_p(P::Pipe, "`|` — closures are `{ |args| stmts }`") {
                     return None;
                 }
                 let mut params = Vec::new();
-                while !self.eat_p(P::Pipe) && !self.at_eof() {
+                while !empty && !self.eat_p(P::Pipe) && !self.at_eof() {
                     let (pname, psp) = self.ident()?;
                     self.expect_p(P::Colon, "`:`");
                     let ty = self.ty()?;

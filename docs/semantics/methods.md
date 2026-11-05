@@ -33,7 +33,8 @@ position) calls the same fn as `p.norm()`.
 
 Receiver adaptation mirrors Go: `p.shift(..)` on a value `p` passes
 `&p` (requires an lvalue — `f().shift(..)` is an error, bind first);
-`(&p).norm()`-style pointer receivers dereference for a value receiver.
+`p.norm()` on a pointer `p` dereferences for a value receiver — there is
+no unary `&` expression in the syntax, the adaptation is compiler-side.
 
 ## Interfaces as types
 

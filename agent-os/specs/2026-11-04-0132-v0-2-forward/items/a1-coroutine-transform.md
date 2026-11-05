@@ -13,7 +13,8 @@ reclamation and trap isolation, at near-zero per-task cost.
 The transform is a codegen-level lowering of *suspendable* fns:
 
 - **Suspend set** (already computed in `check.rs` `suspend_set`):
-  transitive callees of `recv`/scope-join/`sleep`. Everything else
+  functions that can transitively *call* a suspend operation —
+  `recv`/`send`, `select`, `scope`-join, `sleep`. Everything else
   stays plain C fns — zero cost.
 - Each suspendable fn lowers to a **frame struct** (params + live
   locals + state counter + result slot) and a **driver fn**

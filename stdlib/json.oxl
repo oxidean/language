@@ -193,33 +193,53 @@ fn jescape(s: str) -> str {
     return out
 }
 
-fn tojson(j: ref Json) -> str {
-    if j == nil {
-        return "null"
-    }
-    if j.kind == 0 {
-        return "null"
+// linear-time writer: `out = out + piece` re-copies the whole prefix
+// per field and scope arenas never reclaim the dead copies — quadratic
+// on real payloads. Push pieces on a reversed list and fill one sized
+// buffer at the end instead.
+struct JPart { s: str, next: own JPart }
+
+struct JBuf { h: own JPart, n: int }
+
+fn jpush(b: mut JBuf, s: str) {
+    p := new(JPart)
+    p.s = s
+    p.next = b.h // newest part heads the chain — the list is reversed
+    b.h = p
+    b.n = b.n + len(s)
+}
+
+fn jemit(j: ref Json, b: mut JBuf) {
+    if j == nil || j.kind == 0 {
+        jpush(b, "null")
+        return
     }
     if j.kind == 1 {
         if j.b {
-            return "true"
+            jpush(b, "true")
+        } else {
+            jpush(b, "false")
         }
-        return "false"
+        return
     }
     if j.kind == 2 {
-        return itoa(j.i)
+        jpush(b, itoa(j.i))
+        return
     }
     if j.kind == 6 {
-        return ftoa(j.f)
+        jpush(b, ftoa(j.f))
+        return
     }
     if j.kind == 3 {
-        return "\"" + jescape(j.s) + "\""
+        jpush(b, "\"")
+        jpush(b, jescape(j.s))
+        jpush(b, "\"")
+        return
     }
-    out := ""
     if j.kind == 4 {
-        out = "{"
+        jpush(b, "{")
     } else {
-        out = "["
+        jpush(b, "[")
     }
     m := j.child
     first := true
@@ -227,21 +247,44 @@ fn tojson(j: ref Json) -> str {
         if first {
             first = false
         } else {
-            out = out + ","
+            jpush(b, ",")
         }
         if j.kind == 4 {
-            out = out + "\"" + jescape(m.key) + "\":" + tojson(m)
+            jpush(b, "\"")
+            jpush(b, jescape(m.key))
+            jpush(b, "\":")
+            jemit(m, b)
         } else {
-            out = out + tojson(m)
+            jemit(m, b)
         }
         m = m.next
     }
     if j.kind == 4 {
-        out = out + "}"
+        jpush(b, "}")
     } else {
-        out = out + "]"
+        jpush(b, "]")
     }
-    return out
+}
+
+fn tojson(j: ref Json) -> str {
+    b := new(JBuf)
+    b.h = nil
+    b.n = 0
+    jemit(j, b)
+    // the part list is reversed — fill the buffer back to front
+    buf := mkbuf(b.n + 1)
+    off := b.n
+    m := b.h
+    for m != nil {
+        off = off - len(m.s)
+        i := 0
+        for i < len(m.s) {
+            poke8(buf, off + i, byteat(m.s, i))
+            i = i + 1
+        }
+        m = m.next
+    }
+    return bufstr(buf, b.n)
 }
 
 // ---------- parse ----------

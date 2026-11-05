@@ -1333,6 +1333,18 @@ impl<'a> Checker<'a> {
                             format!("closure local `{n}` shadows a captured variable — rename one")));
                     }
                 }
+                // captures are copied by value into a heap env struct —
+                // a borrowed ref/mut would outlive its borrow region, so
+                // reject them like ref/mut fields in heap objects
+                for n in scan.refs.union(&scan.callees) {
+                    if pnames.contains(n) {
+                        continue;
+                    }
+                    if let Some(t @ (Ty::Ref(_) | Ty::Mut(_))) = env.get(n) {
+                        self.diags.push(Diag::err(e.span, "check",
+                            format!("closure captures `{n}` (`{}`) — borrowed refs may not be stored in heap objects (v0)", t.name())));
+                    }
+                }
                 self.closure_checks.push((e.span, scan.callees, scan.seeded));
                 let saved = std::mem::replace(&mut self.closure_ret, Some(None));
                 env.push();
@@ -2245,9 +2257,9 @@ impl<'a> Checker<'a> {
                 };
                 self.assignable(&want, &got, a.span);
                 self.move_for(a, &want, env);
-                if sp && matches!(want, Ty::Slice(_)) {
+                if sp && matches!(want, Ty::Slice(_) | Ty::Ref(_) | Ty::Mut(_)) {
                     self.diags.push(Diag::err(a.span, "check",
-                        "`spawn` arg of `[]T` escapes into the task — arena backing dies with the scope; pass `own []T`"));
+                        "`spawn` arg of `[]T`/`ref`/`mut` escapes into the task — the backing dies with the scope; pass `own` or a value"));
                 }
             }
             let ret = subst_ret(&sig.ret, &bind);
@@ -2288,9 +2300,9 @@ impl<'a> Checker<'a> {
             self.in_spawn = sp;
             self.assignable(want, &got, a.span);
             self.move_for(a, want, env);
-            if sp && matches!(want, Ty::Slice(_)) {
+            if sp && matches!(want, Ty::Slice(_) | Ty::Ref(_) | Ty::Mut(_)) {
                 self.diags.push(Diag::err(a.span, "check",
-                    "`spawn` arg of `[]T` escapes into the task — arena backing dies with the scope; pass `own []T`"));
+                    "`spawn` arg of `[]T`/`ref`/`mut` escapes into the task — the backing dies with the scope; pass `own` or a value"));
             }
         }
         r.clone()

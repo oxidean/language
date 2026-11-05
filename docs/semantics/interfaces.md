@@ -51,8 +51,10 @@ The rest of this section is the boundary the backend design expects —
 not yet emitted by the checker:
 
 - Every `Expr` node annotated with `Ty`.
-- `Ty = Int | Bool | Str | CStr | Void | Err | Struct(Id) | Own(Box<Ty>) |
-  Ref(Box<Ty>) | Mut(Box<Ty>) | Chan(Box<Ty>) | Shared(Box<Ty>)`
+- `Ty = Int | Float | Bool | Str | CStr | Void | Err | Struct(Id) |
+  Enum(Id) | Own(Box<Ty>) | Ref(Box<Ty>) | Mut(Box<Ty>) | Slice(Box<Ty>) |
+  Fn(Vec<Ty>, Box<Ty>) | Var(Id) | Chan | Shared | Iface(Id)`
+  (the checker also carries an internal `Unknown` for error recovery).
 - Function signatures fully resolved (boundary annotations required —
   inference is locals-only).
 - Multi-return `[T, err]` lowered to `Ret2 { val: Ty, err: Err }`.

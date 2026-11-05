@@ -2,8 +2,10 @@
 
 A lean, fast language for CLI tools and services — Go-shaped DX on a
 runtime with no tracing GC. Memory safety comes from dynamic
-ownership/borrow checking; concurrency is structured (`scope`, `spawn`,
-channels); everything compiles ahead-of-time to native binaries through
+ownership/borrow checking — with two v0 gaps: arena-backed slices stored
+in outer fields may be read after their scope closes, and ordinary `own`
+dereferences don't yet receive dangling checks; concurrency is
+structured (`scope`, `spawn`, channels); everything compiles ahead-of-time to native binaries through
 one toolchain binary.
 
 **Status: v0.0.1 bootstrap.** The compiler works end to end: programs in
