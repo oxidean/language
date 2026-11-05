@@ -31,7 +31,7 @@ Windows next. "Runs on the user's machine" is an adoption blocker.
 
 ## Landed (PR #3)
 
-- CI matrix: ubuntu + macOS + **windows-latest**, suite green on all
+- CI matrix: ubuntu + macOS + **windows-latest** (per-leg status lives in CI, not here)
 - Portability: `rt.h` `oxl_*` veneer (SRWLOCK + CONDITION_VARIABLE +
   `_beginthreadex` on Win32, pthread aliases on POSIX — ~190 call
   sites share one contract, no `rt_windows.c` fork)
