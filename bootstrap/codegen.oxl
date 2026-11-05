@@ -1279,7 +1279,7 @@ fn gbuiltin(name: str, argvs: ref GAv) -> str {
     if name == "byteat" || name == "substr" || name == "find" || name == "bufstr" || name == "poke8" || name == "poke16" || name == "poke32" || name == "sqlite_exec" || name == "sqlite_query" {
         return "rt_" + name + "(" + j + ")"
     }
-    if name == "atoi" || name == "mkbuf" || name == "htons" || name == "htonl" || name == "cstr" || name == "str" || name == "sqlite_open" || name == "sqlite_close" || name == "sqlite_exec_bind" || name == "set_rcvtimo" || name == "readfile" || name == "writefile" || name == "exit" || name == "mkshared" || name == "sget" || name == "sset" || name == "scas" || name == "sadd" || name == "now" || name == "now_ms" || name == "usleep" || name == "atof" || name == "ftoa" {
+    if name == "atoi" || name == "mkbuf" || name == "htons" || name == "htonl" || name == "cstr" || name == "str" || name == "sqlite_open" || name == "sqlite_close" || name == "sqlite_exec_bind" || name == "set_rcvtimo" || name == "set_sndtimo" || name == "readfile" || name == "writefile" || name == "exit" || name == "mkshared" || name == "sget" || name == "sset" || name == "scas" || name == "sadd" || name == "now" || name == "now_ms" || name == "usleep" || name == "atof" || name == "ftoa" {
         return "rt_" + name + "(" + j + ")"
     }
     if name == "ftoi" {

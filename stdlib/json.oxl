@@ -84,6 +84,33 @@ fn jadd(parent: mut Json, key: str, val: own Json) {
     last.next = val
 }
 
+/// O(1) append builder for loops adding many members/elements — jadd
+/// rescans child->end on every call, so building N nodes that way is
+/// O(N^2). JArrB keeps the last node and links at it directly.
+struct JArrB { arr: own Json, tail: own Json }
+
+fn jarrb() -> own JArrB {
+    b := new(JArrB)
+    b.arr = jarr()
+    return b
+}
+
+/// append v to b's array in O(1)
+fn jarrb_add(b: mut JArrB, v: own Json) {
+    if b.arr.child == nil {
+        b.arr.child = v
+        b.tail = b.arr.child
+    } else {
+        b.tail.next = v
+        b.tail = b.tail.next
+    }
+}
+
+/// the finished array
+fn jarrb_arr(b: own JArrB) -> own Json {
+    return b.arr
+}
+
 /// deep copy of a tree — the result is unlinked and owned outright
 fn jclone(j: ref Json) -> own Json {
     c := jnull()
@@ -94,8 +121,19 @@ fn jclone(j: ref Json) -> own Json {
     c.f = j.f
     c.b = j.b
     m := j.child
+    // link at a tracked tail — jadd rescans child->end per call, which
+    // makes cloning an N-member container O(N^2)
+    let tail: own Json = nil
     for m != nil {
-        jadd(c, m.key, jclone(m))
+        v := jclone(m)
+        v.key = m.key
+        if tail == nil {
+            c.child = v
+            tail = c.child
+        } else {
+            tail.next = v
+            tail = tail.next
+        }
         m = m.next
     }
     return c
@@ -577,6 +615,7 @@ fn jparse_val(p: mut JCur) -> own Json {
     }
     if c == 123 { // {
         o := jobj()
+        let otail: own Json = nil
         p.pos = p.pos + 1
         for p.pos < len(p.src) {
             jskipws(p)
@@ -599,7 +638,15 @@ fn jparse_val(p: mut JCur) -> own Json {
                 return o
             }
             p.pos = p.pos + 1
-            jadd(o, k, jparse_nested(p))
+            v := jparse_nested(p)
+            v.key = k
+            if otail == nil {
+                o.child = v
+                otail = o.child
+            } else {
+                otail.next = v
+                otail = otail.next
+            }
             if p.err != 0 {
                 return o
             }
@@ -625,6 +672,7 @@ fn jparse_val(p: mut JCur) -> own Json {
     }
     if c == 91 { // [
         a := jarr()
+        let atail: own Json = nil
         p.pos = p.pos + 1
         for p.pos < len(p.src) {
             jskipws(p)
@@ -632,7 +680,14 @@ fn jparse_val(p: mut JCur) -> own Json {
                 p.pos = p.pos + 1
                 return a
             }
-            jadd(a, "", jparse_nested(p))
+            v := jparse_nested(p)
+            if atail == nil {
+                a.child = v
+                atail = a.child
+            } else {
+                atail.next = v
+                atail = atail.next
+            }
             if p.err != 0 {
                 return a
             }

@@ -27,8 +27,9 @@ The parser and LSP checks also invoke `python3`, so have Python 3 on
 
 ## Rules of the road
 
-- The C backend is interim — keep the codegen seam clean for the
-  state-machine transform (see `docs/semantics/interfaces.md`).
+- The C backend is interim — keep the codegen seam clean behind the
+  emitted state machines for suspend-capable functions (see
+  `docs/semantics/concurrency.md`).
 - Stdlib code goes in `stdlib/*.oxl`, written in the language.
 - Commits use your configured git identity (see `AGENTS.md`).
 - Bugs: file an issue with the smallest `.oxl` repro you can make.

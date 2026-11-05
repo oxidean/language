@@ -17,7 +17,7 @@ source ──▶ lexer ──▶ parser ──▶ AST ──▶ typecheck ──
 ```rust
 struct Diag { span: Span, sev: Sev, code: &'static str, msg: String }
 enum Sev { Error, Warning }
-struct Span { file: u16, lo: u32, hi: u32 }
+struct Span { lo: u32, hi: u32 }   // the file name lives on Diags.file
 ```
 
 No stage panics on bad input; it emits `Diag`s and the pipeline stops

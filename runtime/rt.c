@@ -19,6 +19,24 @@
 _Thread_local RtScope *tls_scope;
 static _Thread_local RtTask *tls_task;
 
+/* raw-allocation policy: runtime internals abort on OOM like alloc_in —
+ * no NULL returns to unchecked call sites */
+static void *xmalloc(size_t n) {
+    void *p = malloc(n);
+    if (!p && n) { fprintf(stderr, "oxl: out of memory (%zu bytes)\n", n); abort(); }
+    return p;
+}
+static void *xcalloc(size_t n, size_t sz) {
+    void *p = calloc(n, sz);
+    if (!p && n && sz) { fprintf(stderr, "oxl: out of memory (%zu bytes)\n", n * sz); abort(); }
+    return p;
+}
+static void *xrealloc(void *p, size_t n) {
+    void *q = realloc(p, n);
+    if (!q && n) { fprintf(stderr, "oxl: out of memory (%zu bytes)\n", n); abort(); }
+    return q;
+}
+
 static ObjHdr *hdr_of(void *obj) { return ((ObjHdr *)obj) - 1; }
 
 static void *alloc_in(RtScope *s, int64_t size, int own) {
@@ -113,7 +131,7 @@ void rt_scope_enter(RtScope *s) {
     s->parent = tls_scope;
     pthread_mutex_init(&s->mu, NULL);
     pthread_cond_init(&s->cv, NULL);
-    s->arena_buf = malloc(ARENA_CAP);
+    s->arena_buf = xmalloc(ARENA_CAP);
     s->arena_cap = ARENA_CAP;
     s->owner = tls_task;
     if (s->parent) {
@@ -431,7 +449,7 @@ static RtDefer **defer_head(void) {
 RtDefer *rt_defer_mark(void) { return *defer_head(); }
 
 void rt_defer_push(void (*fp)(void *), void *env) {
-    RtDefer *d = malloc(sizeof *d);
+    RtDefer *d = xmalloc(sizeof *d);
     d->fp = fp;
     d->env = env;
     RtDefer **hp = defer_head();
@@ -538,6 +556,10 @@ static void run_task(RtTask *t) {
         /* cancel-unwound (task_unwind) lands here */
     }
     /* defers of unwound fns still run — the task dies either way */
+    /* a trap/unwind may have left tls_task NULL and tls_scope on a
+     * torn-down inner scope: run defers in the task's spawn scope */
+    tls_task = t;
+    tls_scope = t->scope;
     task_defers_drain(t);
     tls_task = NULL;
     if (t->sel) rt_select_arm(t); /* dropped select wait: reclaim it */
@@ -677,7 +699,7 @@ void rt_spawn(void *(*fn)(void *), void *arg) {
     RtScope *s = tls_scope;
     scope_pending_up(s);
     if (!s) { /* outside scope: dedicated thread, nothing to join */
-        RtTask *t = malloc(sizeof *t);
+        RtTask *t = xmalloc(sizeof *t);
         memset(t, 0, sizeof *t);
         task_ref(t); /* run ref — dropped at settle */
         t->fn = fn; t->arg = arg;
@@ -686,7 +708,7 @@ void rt_spawn(void *(*fn)(void *), void *arg) {
         else task_unref(t);
         return;
     }
-    RtTask *t = malloc(sizeof *t);
+    RtTask *t = xmalloc(sizeof *t);
     memset(t, 0, sizeof *t);
     task_ref(t); /* run ref — dropped at settle */
     t->fn = fn; t->arg = arg; t->scope = s;
@@ -698,7 +720,7 @@ void rt_spawn(void *(*fn)(void *), void *arg) {
 void rt_spawnb(void *(*fn)(void *), void *arg) {
     RtScope *s = tls_scope;
     scope_pending_up(s);
-    RtTask *t = malloc(sizeof *t);
+    RtTask *t = xmalloc(sizeof *t);
     memset(t, 0, sizeof *t);
     task_ref(t); /* run ref — dropped at settle */
     t->fn = fn; t->arg = arg; t->scope = s;
@@ -711,7 +733,7 @@ void rt_spawnb(void *(*fn)(void *), void *arg) {
  * the frame pointer and fills param slots before rt_spawn_task /
  * rt_spawnb_task / rt_run_root take the task live. */
 RtFrame *rt_task_new(RtPoll poll, int64_t bytes) {
-    RtTask *t = malloc(sizeof(RtTask) + (size_t)bytes);
+    RtTask *t = xmalloc(sizeof(RtTask) + (size_t)bytes);
     memset(t, 0, sizeof(RtTask) + (size_t)bytes);
     t->poll = poll;
     t->is_frame = 1;
@@ -999,7 +1021,7 @@ void rt_trap(int64_t code) {
 /* ---------------- Shared<T>: atomic word cell ---------------- */
 
 RtShared *rt_mkshared(int64_t v) {
-    RtShared *s = malloc(sizeof *s);
+    RtShared *s = xmalloc(sizeof *s);
     s->val = v;
     s->writer = 0;
     return s;
@@ -1174,12 +1196,12 @@ static SendReq *chan_pop_send(RtChan *ch) {
 }
 
 RtChan *rt_mkchan(int64_t cap) {
-    RtChan *c = calloc(1, sizeof *c);
+    RtChan *c = xcalloc(1, sizeof *c);
     pthread_mutex_init(&c->mu, NULL);
     pthread_cond_init(&c->cv_send, NULL);
     pthread_cond_init(&c->cv_recv, NULL);
     c->cap = cap < 0 ? 0 : cap;
-    if (c->cap > 0) c->buf = malloc(sizeof(int64_t) * (size_t)c->cap);
+    if (c->cap > 0) c->buf = xcalloc((size_t)c->cap, sizeof(int64_t));
     return c;
 }
 
@@ -1360,7 +1382,7 @@ int rt_send_poll(RtChan *ch, int64_t v, RtTask *t) {
         pthread_mutex_unlock(&ch->mu);
         return RT_READY;
     }
-    SendReq *sr = malloc(sizeof *sr);
+    SendReq *sr = xmalloc(sizeof *sr);
     sr->t = t;
     sr->v = v;
     sr->next = ch->sendq;
@@ -1603,7 +1625,7 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
 
     /* slow path: lock every arm chan in address order, re-check under
      * all locks, then push a waiter node on each still-unready chan */
-    RtChan **sorted = malloc(sizeof *sorted * (size_t)n);
+    RtChan **sorted = xmalloc(sizeof *sorted * (size_t)n);
     memcpy(sorted, chs, sizeof *sorted * (size_t)n);
     qsort(sorted, (size_t)n, sizeof *sorted, addr_cmp);
     /* two arms may name the same chan — it sorts adjacent, so lock
@@ -1642,7 +1664,7 @@ int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t)
     }
 
     /* park: claim a pending flag first, then hang a node on every arm */
-    struct RtSel *s = malloc(sizeof *s + sizeof(SelW) * (size_t)n);
+    struct RtSel *s = xmalloc(sizeof *s + sizeof(SelW) * (size_t)n);
     s->winner = -1;
     s->refs = 1 + (tmo_ms >= 0 ? 1 : 0);
     s->n = n;
@@ -1957,8 +1979,14 @@ OxlStr rt_bufstr(void *buf, int64_t n) {
     return (OxlStr){ p, n };
 }
 void rt_poke8(void *buf, int64_t off, int64_t v) { ((uint8_t *)buf)[off] = (uint8_t)v; }
-void rt_poke16(void *buf, int64_t off, int64_t v) { ((uint16_t *)buf)[off / 2] = htons((uint16_t)v); }
-void rt_poke32(void *buf, int64_t off, int64_t v) { ((uint32_t *)buf)[off / 4] = htonl((uint32_t)v); }
+void rt_poke16(void *buf, int64_t off, int64_t v) {
+    uint16_t x = htons((uint16_t)v);
+    memcpy((uint8_t *)buf + off, &x, sizeof x);
+}
+void rt_poke32(void *buf, int64_t off, int64_t v) {
+    uint32_t x = htonl((uint32_t)v);
+    memcpy((uint8_t *)buf + off, &x, sizeof x);
+}
 int64_t rt_htons(int64_t v) { return htons((uint16_t)v); }
 int64_t rt_htonl(int64_t v) { return htonl((uint32_t)v); }
 
@@ -2017,6 +2045,15 @@ int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
     tv.tv_sec = (time_t)secs;
     tv.tv_usec = 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+
+/* portable send timeout — pairs with rcvtimo: a client that stops
+ * reading must not pin a connection slot inside write() */
+int64_t rt_set_sndtimo(int64_t fd, int64_t secs) {
+    struct timeval tv;
+    tv.tv_sec = (time_t)secs;
+    tv.tv_usec = 0;
+    return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 }
 
 /* ---------------- sqlite3 shims ----------------
@@ -2079,7 +2116,7 @@ OxlStr rt_sqlite_query(void *db, const char *sql) {
      * long result sets. Accumulate in a doubling scratch, then pay one
      * copy into scope memory for the result. */
     size_t cap = 4096, n = 0;
-    char *buf = malloc(cap);
+    char *buf = xmalloc(cap);
     while (sqlite3_step(st) == SQLITE_ROW) {
         int cols = sqlite3_column_count(st);
         for (int c = 0; c < cols; c++) {
@@ -2087,7 +2124,7 @@ OxlStr rt_sqlite_query(void *db, const char *sql) {
             size_t tl = t ? strlen((const char *)t) : 0;
             if (n + tl + 2 > cap) { /* field + separator + slack */
                 while (n + tl + 2 > cap) cap *= 2;
-                buf = realloc(buf, cap);
+                buf = xrealloc(buf, cap);
             }
             if (tl) { memcpy(buf + n, t, tl); n += tl; }
             if (c + 1 < cols) buf[n++] = '|';

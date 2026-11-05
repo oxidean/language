@@ -51,8 +51,10 @@ assert(w.write("abc") == 13)   // vtable dispatch
 ```
 
 Satisfaction is structural: a type satisfies an interface iff a
-non-generic `T.name` fn exists for each declared method with matching
-params (after the receiver) and return. Interfaces with only ops keep
+`T.name` fn exists for each declared method with matching params
+(after the receiver) and return. A generic method on a non-generic
+receiver qualifies too — the vtab slot pins the instantiation the
+interface's declared signature implies (see Generics). Interfaces with only ops keep
 their old role as generic constraints; interfaces with methods are
 additionally *types*.
 

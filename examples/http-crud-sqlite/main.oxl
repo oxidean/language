@@ -73,7 +73,7 @@ fn valid_utf8(s: str) -> bool {
 
 fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
     status := 404
-    body := "oxl http server — try /items\n"
+    body := "{\"error\":\"not found — try /items\"}\n"
     if path == "/items" {
         if method == "POST" {
             status = 201
@@ -106,7 +106,9 @@ fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
                 // the remaining suffix at each delimiter — O(n²) on a
                 // large table.
                 qrows := sqlite_query(db, cstr("SELECT rowid, name FROM items"))
-                items := json.jarr()
+                // jadd rescans child->end per call — the JArrB builder
+                // keeps the tail so listing N rows stays O(N)
+                items := json.jarrb()
                 pos := 0
                 for pos < len(qrows) {
                     e := pos
@@ -126,11 +128,11 @@ fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
                         }
                         json.jadd(item, "id", json.jint(atoi(idstr)))
                         json.jadd(item, "name", json.jstr(nm))
-                        json.jadd(items, "", item)
+                        json.jarrb_add(items, item)
                     }
                 }
                 res := json.jobj()
-                json.jadd(res, "items", items)
+                json.jadd(res, "items", json.jarrb_arr(items))
                 body = json.tojson(res) + "\n"
             }
         } else {
@@ -140,7 +142,7 @@ fn (a App) route(method: str, path: str, reqbody: str) -> http.Resp {
             body = "{\"error\":\"method not allowed\"}\n"
         }
     }
-    return http.Resp{status: status, body: body}
+    return http.Resp{status: status, body: body, ctype: "application/json"}
 }
 
 fn main() {

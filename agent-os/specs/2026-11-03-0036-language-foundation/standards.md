@@ -14,7 +14,10 @@ truth: `docs/superpowers/specs/2026-11-03-language-design.md`.
   or outlives its scope. Escaping data is explicit.
 - **Memory safety is dynamic.** Ownership/borrow rules are enforced at
   runtime — both mutable-aliasing and dangling checks — on by default;
-  `unsafe` only via explicit opt-out. Violations trap.
+  `unsafe` only via explicit opt-out. Violations trap. One gap: an
+  ordinary arena-backed `[]T` stored into an outer struct can still
+  dangle past scope close with no general runtime check (the B3 spec
+  scopes this out) — `own []T` or heap backing is the escape hatch.
 - **Traps are scope-contained.** A trap kills the task, cancels siblings,
   unwinds the scope, propagates to parent. Process abort only outside
   any scope or for corruption a scope cannot unwind.

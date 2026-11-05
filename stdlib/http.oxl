@@ -46,7 +46,8 @@ struct sockaddr { a: int, b: int } // 16 bytes: sockaddr_in fits
 struct intp { v: int }
 
 /// handler result: the HTTP status code plus the text/plain body
-struct Resp { status: int, body: str }
+/// ctype selects content-type; empty falls back to text/plain
+struct Resp { status: int, body: str, ctype: str }
 
 /// read_request result — status 0 ok · 400 malformed/never-terminated ·
 /// 413 body over cap; on non-0 the caller writes the status and returns
@@ -81,8 +82,16 @@ fn status_text(status: int) -> str {
     return "Status"
 }
 
+fn http_resp_ct(status: int, body: str, ctype: str) -> str {
+    ct := ctype
+    if len(ct) == 0 {
+        ct = "text/plain"
+    }
+    return "HTTP/1.1 " + itoa(status) + " " + status_text(status) + "\r\ncontent-type: " + ct + "\r\ncontent-length: " + itoa(len(body)) + "\r\nconnection: close\r\n\r\n" + body
+}
+
 fn http_resp(status: int, body: str) -> str {
-    return "HTTP/1.1 " + itoa(status) + " " + status_text(status) + "\r\ncontent-type: text/plain\r\ncontent-length: " + itoa(len(body)) + "\r\n\r\n" + body
+    return http_resp_ct(status, body, "")
 }
 
 /// in-flight connection cap — accept()s past it are closed at once so
@@ -125,7 +134,7 @@ fn write_all(fd: int, s: str) {
 /// survive a bad handler
 fn route_serve(h: Handler, method: str, path: str, body: str, fd: int) {
     r := h.route(method, path, body)
-    resp := http_resp(r.status, r.body)
+    resp := http_resp_ct(r.status, r.body, r.ctype)
     write_all(fd, resp)
 }
 
@@ -299,6 +308,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
     // handler returns instead of accumulating in the serve scope
     scope {
         set_rcvtimo(fd, 10) // slowloris guard: reads give up after 10s
+        set_sndtimo(fd, 10) // a client that stops reading can't pin the conn in write()
         rr := read_request(fd)
         if rr.status != 0 {
             resp := http_resp(rr.status, status_text(rr.status) + "\n")
@@ -306,12 +316,16 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
         } else {
             // "METHOD PATH HTTP/1.x" — split on the first two spaces; a
             // line missing either (or opening with one) is malformed —
-            // substr on a -1/0 hit would dispatch a garbage route
-            sp1 := find(rr.req, " ")
+            // substr on a -1/0 hit would dispatch a garbage route.
+            // search inside the request LINE only: a space in a header
+            // value (e.g. Host: a b) would otherwise split the block
+            eol := find(rr.req, "\r\n")
+            line := substr(rr.req, 0, eol)
+            sp1 := find(line, " ")
             sp2 := -1
             rest := ""
             if sp1 > 0 {
-                rest = substr(rr.req, sp1 + 1, len(rr.req))
+                rest = substr(line, sp1 + 1, len(line))
                 sp2 = find(rest, " ")
             }
             if sp1 <= 0 || sp2 <= 0 {
@@ -319,7 +333,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
                 write_all(fd, resp)
             } else {
                 path := substr(rest, 0, sp2)
-                method := substr(rr.req, 0, sp1)
+                method := substr(line, 0, sp1)
 
                 // per-conn trap containment: route_serve runs as a nested
                 // task inside a heap try-scope. Its trap stops at

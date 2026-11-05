@@ -59,7 +59,10 @@ Bounds may be omitted: `s[:b]`, `s[a:]`, `s[:]`. The invariant
 
 - `own []T` (written `new(slice)`) deep-copies header **and** backing to
   the heap via `rt_slice_own`: the `own` value may outlive the scope
-  that produced the source slice. Indexing, `len`, and view slicing
+  that produced the source slice. The copy is one level deep — for
+  reference-like elements (`[]str` copies the `OxlStr` headers, not
+  their byte buffers) the referenced storage must still outlive the
+  owned slice. Indexing, `len`, and view slicing
   auto-deref the handle, and views/growth of a heap slice keep the heap
   domain (`push` reallocs with `malloc`, never into the arena).
 - Ordinary (non-`own`) slices keep arena backing: escaping one past its

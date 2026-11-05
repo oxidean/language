@@ -81,8 +81,8 @@ Types `int bool str cstr err chan` + user structs; `own T` / `ref T` /
 `mut T` handles with runtime borrow checks; `[v, err]` returns with
 dropped-error-as-compile-error; `extern fn` C FFI; `scope`/`spawn`/`go`
 + `spawnBlocking` structured concurrency on a worker pool + blocking
-pool (the state-machine transform lands behind the same semantics, see
-`docs/semantics/concurrency.md`); `break`/`continue`; `interface` op
+pool (suspend-capable functions compile to stackless state machines,
+see `docs/semantics/concurrency.md`); `break`/`continue`; `interface` op
 constraints; generics `fn f[T ordered](a: T, b: T)` monomorphized per
 call site; `import "std/strings"` modules; top-level `let` globals
 (process-wide state, initialized before `main`); builtin surface: `print`,
