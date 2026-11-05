@@ -2255,7 +2255,12 @@ void rt_init(void) {
      * byte-identical across platforms and piped binary I/O intact */
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
-    _setmode(_fileno(stdin), _O_BINARY);
+    /* console stdin stays in text mode: in binary the CRT passes
+     * Ctrl-Z through as data instead of signaling EOF, and an
+     * interactive read-until-EOF would never end. Piped and
+     * redirected input still gets byte-identical binary mode. */
+    if (!_isatty(_fileno(stdin)))
+        _setmode(_fileno(stdin), _O_BINARY);
 #endif
 }
 
