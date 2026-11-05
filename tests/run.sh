@@ -311,16 +311,22 @@ cmp "$cgen_dir/chain.c" "$cgen_dir/direct.c" || { echo "FAIL bootstrap chain"; e
 
 echo "== a1 coroutine scale =="
 # spec bar: 10k spawned tasks parked on recv under 5 MB RSS — measure
-# VmRSS during the parked window instead of trusting a "done" exit
+# peak RSS during the parked window instead of trusting a "done" exit
 "$OXL" build tests/conc_scale.oxl -o "$scratch/conc_scale" || {
     echo "FAIL conc_scale: compile failed"; exit 1; }
-"$scratch/conc_scale" 10000 1 2000 > "$scratch/scale.out" 2>&1 &
+"$scratch/conc_scale" 10000 1 2500 > "$scratch/scale.out" 2>&1 &
 scale_pid=$!
-sleep 1
-rss=$(awk '/VmRSS/{print $2}' "/proc/$scale_pid/status" 2>/dev/null || echo 0)
+# peak matters, not a point sample: poll RSS until exit and take the
+# max. `ps -o rss=` is the portable form (/proc is Linux-only)
+rss=0
+while kill -0 $scale_pid 2>/dev/null; do
+    r=$(ps -o rss= -p $scale_pid 2>/dev/null | tr -d ' ')
+    [ -n "$r" ] && [ "$r" -gt "$rss" ] && rss=$r
+    sleep 0.2
+done
 wait $scale_pid
 [ "$(tail -1 "$scratch/scale.out")" = "done" ] || { echo "FAIL scale: $(cat "$scratch/scale.out")"; exit 1; }
-[ -n "$rss" ] && [ "$rss" -gt 0 ] || { echo "FAIL scale: no VmRSS sample"; exit 1; }
+[ -n "$rss" ] && [ "$rss" -gt 0 ] || { echo "FAIL scale: no RSS sample"; exit 1; }
 [ "$rss" -lt 5120 ] || { echo "FAIL scale: ${rss}kB RSS at 10k parked (spec < 5120kB)"; exit 1; }
 echo "  10k parked tasks RSS: ${rss}kB"
 out=$("$OXL" run tests/conc_ping.oxl -- 5000)
