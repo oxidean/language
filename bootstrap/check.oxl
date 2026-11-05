@@ -4093,6 +4093,30 @@ fn sel_stmt(ck: mut Ck, arms: ref parser.NList, env: mut Env) {
                         diag(ck, "check", "select arm must be `recv(ch)`, `timeout(ms)`, or `else`")
                     } else {
                         assignable(ck, t_int(ck), expr(ck, ms, env))
+                        // a negative wait can never fire —
+                        // rt_select_poll reads tmo < 0 as "no timer"
+                        neg := false
+                        match ms {
+                            parser.Node.JInt(v) => {
+                                neg = v < 0
+                            }
+                            parser.Node.Un{op, e} => {
+                                if op == "-" {
+                                    match e {
+                                        parser.Node.JInt(v) => {
+                                            neg = v > 0
+                                        }
+                                        _ => {
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                            }
+                        }
+                        if neg {
+                            diag(ck, "check", "timeout(ms): a negative duration never fires")
+                        }
                     }
                 }
                 if kind == "send" {

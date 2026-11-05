@@ -143,6 +143,8 @@ out=$("$OXL" run tests/collections_test.oxl)
 [ "$(tail -1 <<<"$out")" = "collections ok" ] || { echo "FAIL collections: $out"; exit 1; }
 
 echo "== defer (b5) =="
+out=$("$OXL" run tests/defer_order.oxl)
+grep -q "defer order ok" <<<"$out" || { echo "FAIL defer order: $out"; exit 1; }
 out=$("$OXL" run tests/defer_test.oxl)
 # fixed sequence: LIFO drain (3 2 1), error-path defer (9), per-iteration
 # loop defers (2 1 0), the untaken branch registering nothing (7 only)
@@ -257,6 +259,12 @@ if "$OXL" build "$scratch/d5unqual.oxl" -o "$scratch/d5unqual" 2>/dev/null; then
     echo "FAIL: unqualified import call compiled"; exit 1
 fi
 diag=$("$OXL" build "$scratch/d5unqual.oxl" -o "$scratch/d5unqual" 2>&1 || true)
+# an unresolved import emits "undefined `trim`" too — without it the
+# probe tests nothing. Fail on resolution diags so the check really
+# exercises qualification, not import fallback.
+if grep -q "cannot resolve import" <<<"$diag"; then
+    echo "FAIL unqual probe: stdlib unresolved: $diag"; exit 1
+fi
 grep -q "undefined \`trim\`" <<<"$diag" || { echo "FAIL unqual diag: $diag"; exit 1; }
 
 echo "== bootstrap lexer =="
@@ -316,14 +324,24 @@ echo "== a1 coroutine scale =="
     echo "FAIL conc_scale: compile failed"; exit 1; }
 "$scratch/conc_scale" 10000 1 2500 > "$scratch/scale.out" 2>&1 &
 scale_pid=$!
+# watchdog: a wedged channel/task regression must not hang the whole
+# suite — kill the measured binary at the deadline; the "done" check
+# below then reports the failure instead of blocking forever
+( sleep 120; kill -KILL $scale_pid 2>/dev/null;   echo "watchdog: killed after 120s" >> "$scratch/scale.out" ) >/dev/null 2>&1 &
+scale_dog=$!
 # peak matters, not a point sample: poll RSS until exit and take the
-# max. `ps -o rss=` is the portable form (/proc is Linux-only)
+# max. `ps -o rss=` is the portable form (/proc is Linux-only).
+# The process can exit between kill -0 and ps — under pipefail a failed
+# ps makes the substitution nonzero and `set -e` would abort the suite
+# before `wait` can report the real result; `|| true` pins it.
 rss=0
 while kill -0 $scale_pid 2>/dev/null; do
-    r=$(ps -o rss= -p $scale_pid 2>/dev/null | tr -d ' ')
+    r=$(ps -o rss= -p $scale_pid 2>/dev/null | tr -d ' ' || true)
     [ -n "$r" ] && [ "$r" -gt "$rss" ] && rss=$r
     sleep 0.2
 done
+kill "$scale_dog" 2>/dev/null || true
+wait "$scale_dog" 2>/dev/null || true
 wait $scale_pid
 [ "$(tail -1 "$scratch/scale.out")" = "done" ] || { echo "FAIL scale: $(cat "$scratch/scale.out")"; exit 1; }
 [ -n "$rss" ] && [ "$rss" -gt 0 ] || { echo "FAIL scale: no RSS sample"; exit 1; }

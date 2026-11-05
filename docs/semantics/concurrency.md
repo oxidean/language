@@ -97,7 +97,10 @@ select {
   ready set — a random-start first-ready sweep is NOT uniform (an arm
   right after the start point wins over equally-ready others).
   `else` fires when no arm is ready. `timeout` fires once after `ms`
-  and never with `else`.
+  and never with `else`. Edge cases: a negative literal `ms` is a
+  compile error; if timer-thread creation fails, the `timeout` arm
+  fires immediately; and a cancelled timed `select` keeps its timer
+  thread, `RtSel`, and task ref alive until the deadline.
 - A parked `select` holds one waiter node per arm chan; the first
   delivery wins via an atomic claim — losers unlink on resume.
 - Scope cancellation force-wakes parked `select`/`recv`/`send` waiters;

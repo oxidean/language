@@ -467,6 +467,7 @@ impl<'a> Fmt<'a> {
 
     fn stmt(&mut self, s: &Stmt, ind: usize) {
         match s {
+            Stmt::ExitBoundary { .. } => unreachable!("codegen-internal marker"),
             Stmt::Let { name, ty, init, .. } => {
                 let t = ty.as_ref().map(|t| self.ty(t));
                 let init = self.expr(init, 0, ind);
@@ -946,7 +947,8 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::Defer { span, .. }
         | Stmt::Unsafe { span, .. }
         | Stmt::Break { span }
-        | Stmt::Continue { span } => *span,
+        | Stmt::Continue { span }
+        | Stmt::ExitBoundary { span } => *span,
         Stmt::Expr(e) => e.span,
     }
 }

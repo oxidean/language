@@ -245,6 +245,7 @@ fn qualify_block(
     locals.push(std::collections::HashSet::new());
     for s in &mut b.stmts {
         match s {
+            ast::Stmt::ExitBoundary { .. } => unreachable!("codegen-internal marker"),
             ast::Stmt::Let { name, ty, init, .. } => {
                 if let Some(t) = ty {
                     qualify_ty(t, renames, aliases);

@@ -239,6 +239,12 @@ pub enum Stmt {
     Select { arms: Vec<SelectArm>, span: Span },
     Defer { call: Expr, span: Span },
     Unsafe { body: Block, span: Span },
+    /// codegen-internal: emitted by the AST hoist before the hoisted
+    /// operand statements of a `return` whose operands suspend — the
+    /// frame emitter drains scopes+defers here so operand evaluation
+    /// (including its suspends) starts only after the drain, per the
+    /// B5 return-operand timing rule
+    ExitBoundary { span: Span },
     Break { span: Span },
     Continue { span: Span },
 }

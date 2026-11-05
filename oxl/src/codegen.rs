@@ -121,6 +121,9 @@ struct Gen<'a> {
     fscope_stack: Vec<usize>,
     /// resume states used (for the switch prologue)
     state_labels: Vec<usize>,
+    /// set by Stmt::ExitBoundary — the next Return skips its own
+    /// drain+defers (they already ran at the boundary)
+    exit_drained: bool,
     state_ctr: usize,
     label_ctr: usize,
     /// (continue-label, break-label, open-scope depth) per enclosing loop
@@ -181,6 +184,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         scope_decls: Vec::new(),
         fscope_stack: Vec::new(),
         state_labels: Vec::new(),
+        exit_drained: false,
         state_ctr: 1,
         label_ctr: 0,
         loop_labels: Vec::new(),
@@ -1240,8 +1244,15 @@ impl<'a> Gen<'a> {
             Stmt::Defer { call, .. } => {
                 self.stmt_defer(call);
             }
-            Stmt::Return { vals, .. } => {
+            Stmt::ExitBoundary { .. } => {
                 self.emit_defers();
+                self.exit_drained = true;
+            }
+            Stmt::Return { vals, .. } => {
+                if !self.exit_drained {
+                    self.emit_defers();
+                }
+                self.exit_drained = false;
                 if vals.is_empty() {
                     let _ = writeln!(self.out, "    return;");
                 } else if self.cur_ret_pair && vals.len() == 2 {
@@ -2850,6 +2861,11 @@ impl<'a> Gen<'a> {
                 out.push(Stmt::Expr(e2));
             }
             Stmt::Return { vals, span } => {
+                // susp operands evaluate AFTER the scope/defer drain
+                // (B5 timing) — the boundary marks where that drain runs
+                if vals.iter().any(|v| self.expr_has_susp(v)) {
+                    out.push(Stmt::ExitBoundary { span: *span });
+                }
                 // `return suspPair()` forwards as [v, err] — desugar to let2
                 if vals.len() == 1 && self.call_is_susp(&vals[0]) {
                     if let ExprKind::Call { f, .. } = &vals[0].kind {
@@ -2954,6 +2970,9 @@ impl<'a> Gen<'a> {
             }
             Stmt::Break { span } => out.push(Stmt::Break { span: *span }),
             Stmt::Continue { span } => out.push(Stmt::Continue { span: *span }),
+            Stmt::ExitBoundary { span } => {
+                out.push(Stmt::ExitBoundary { span: *span })
+            }
         }
     }
 
@@ -3341,9 +3360,17 @@ impl<'a> Gen<'a> {
             Stmt::Defer { call, .. } => {
                 self.stmt_defer(call);
             }
-            Stmt::Return { vals, .. } => {
+            Stmt::ExitBoundary { .. } => {
                 self.fscope_drain(0);
                 self.emit_defers();
+                self.exit_drained = true;
+            }
+            Stmt::Return { vals, .. } => {
+                if !self.exit_drained {
+                    self.fscope_drain(0);
+                    self.emit_defers();
+                }
+                self.exit_drained = false;
                 if !vals.is_empty() {
                     if self.cur_ret_pair && vals.len() == 2 {
                         let v = self.expr(&vals[0]);

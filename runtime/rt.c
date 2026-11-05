@@ -1481,8 +1481,29 @@ static void *sleep_tick(void *p) {
 }
 
 static int sleep_poll(int64_t delay, int usec, RtTask *t) {
-    RtSleep *tm = malloc(sizeof *tm);
-    if (!tm) return RT_READY;
+    /* cancel check + registration under one s->mu hold: a wake pass
+     * that runs before park_add leaves no wake behind, and the timer
+     * becomes the only waker — scope completion would wait out the
+     * whole delay for a sibling trap that should exit fast */
+    RtScope *s = t->scope;
+    if (s) {
+        pthread_mutex_lock(&s->mu);
+        if (s->cancel) {
+            pthread_mutex_unlock(&s->mu);
+            return RT_READY; /* the post-poll rt_cancelled check dies */
+        }
+        task_ref(t);
+        t->parked = 1;
+        t->park_scope = s;
+        t->waitobj = NULL;
+        t->waitkind = WK_SLEEP;
+        t->pnext = s->parked;
+        s->parked = t;
+        pthread_mutex_unlock(&s->mu);
+    } else {
+        park_add(t, NULL, NULL, WK_SLEEP);
+    }
+    RtSleep *tm = xmalloc(sizeof *tm);
     tm->t = t;
     tm->delay = delay;
     tm->usec = usec;
@@ -1490,7 +1511,6 @@ static int sleep_poll(int64_t delay, int usec, RtTask *t) {
     /* register BEFORE creating the thread: a timer that fires
      * instantly must find parked==1 to claim; waitobj stays NULL —
      * nothing to unlink, the timer self-cleans on a lost claim */
-    park_add(t, t->scope, NULL, WK_SLEEP);
     pthread_t th;
     if (pthread_create(&th, NULL, sleep_tick, tm) != 0) {
         /* no thread: retract the registration and run inline */

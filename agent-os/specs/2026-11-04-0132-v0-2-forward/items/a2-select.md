@@ -39,6 +39,10 @@ Semantics (Go-shaped, deliberately):
   threads undercut A1's per-task-cost story at scale.
 - Inside a `scope`, sibling-cancel propagates: a cancelled scope
   unblocks `select` with the scope trap (same as `recv` today).
+- Timer edge cases, disclosed: if `pthread_create` fails, the `timeout`
+  arm fires *immediately* rather than parking timerless; and a
+  cancelled timed `select` keeps its detached timer thread, `RtSel`,
+  and task ref alive until the deadline would have fired.
 
 Not in v0.2: `send` arms inside `select` on unbuffered channels
 (pick a winner or wait — same semantics as Go; just flag complexity in

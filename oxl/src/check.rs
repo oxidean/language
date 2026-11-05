@@ -648,6 +648,7 @@ impl<'a> Checker<'a> {
 
     fn stmt(&mut self, s: &Stmt, env: &mut Env) {
         match s {
+            Stmt::ExitBoundary { .. } => unreachable!("codegen-internal marker"),
             Stmt::Let { name, ty, init, span } => {
                 let it = self.expr(init, env);
                 let t = if let Some(tr) = ty {
@@ -880,6 +881,20 @@ impl<'a> Checker<'a> {
                             tmo_count += 1;
                             let t = self.expr(ms, env);
                             self.assignable(&Ty::Int, &t, ms.span);
+                            // a negative wait can never fire —
+                            // rt_select_poll reads tmo < 0 as "no
+                            // timer" and the arm would park forever
+                            let neg_lit = match &ms.kind {
+                                ExprKind::Int(v) => *v < 0,
+                                ExprKind::Un { op: UnOp::Neg, e } => {
+                                    matches!(e.kind, ExprKind::Int(v) if v > 0)
+                                }
+                                _ => false,
+                            };
+                            if neg_lit {
+                                self.diags.push(Diag::err(ms.span, "check",
+                                    "timeout(ms): a negative duration never fires"));
+                            }
                         }
                         SelKind::Else { .. } => {
                             has_else = true;
@@ -2313,6 +2328,7 @@ impl<'a> Checker<'a> {
         let mut seeds: HashSet<String> = HashSet::new();
         fn block_has(b: &Block) -> bool {
             b.stmts.iter().any(|s| match s {
+                Stmt::ExitBoundary { .. } => false,
                 Stmt::Scope { .. } => true,
                 // spawn doesn't suspend the caller — but its args might
                 Stmt::Spawn { call, .. } => expr_susp(call),
@@ -2438,6 +2454,7 @@ impl<'a> Checker<'a> {
         }
         fn blk_susp(b: &Block, susp: &HashSet<String>) -> bool {
             b.stmts.iter().any(|s| match s {
+                Stmt::ExitBoundary { .. } => false,
                 Stmt::Scope { .. } | Stmt::Select { .. } => true,
                 Stmt::Expr(e) | Stmt::Assign { val: e, .. } | Stmt::Let { init: e, .. }
                 | Stmt::Defer { call: e, .. } | Stmt::Spawn { call: e, .. } => {
@@ -2532,6 +2549,7 @@ impl<'a> Checker<'a> {
         fn walk_block(b: &Block, susp: &HashSet<String>, diags: &mut Diags) {
             for s in &b.stmts {
                 match s {
+                    Stmt::ExitBoundary { .. } => unreachable!("codegen-internal marker"),
                     Stmt::Defer { call, span } => {
                         if expr_has_susp(call, susp) {
                             diags.push(Diag::err(*span, "check",
@@ -2664,6 +2682,7 @@ pub(crate) fn scan_block(b: &Block, s: &mut BodyScan) {
 
 fn scan_stmt(st: &Stmt, s: &mut BodyScan) {
     match st {
+        Stmt::ExitBoundary { .. } => unreachable!("codegen-internal marker"),
         Stmt::Let { name, init, .. } => {
             s.binds.insert(name.clone());
             scan_expr(init, s);
