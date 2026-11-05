@@ -193,8 +193,8 @@ fn willtrap() {
 }
 fn main() { willtrap() }
 EOF
-"$OXL" build "$scratch/d5trap.oxl" -o "$scratch/d5trap" || { echo "FAIL: d5trap did not compile"; exit 1; }
-trapout=$(with_timeout 10 "$scratch/d5trap" 2>&1 || true)
+"$OXL" build "$scratch/d5trap.oxl" -o "$scratch/d5trap$EXE" || { echo "FAIL: d5trap did not compile"; exit 1; }
+trapout=$(with_timeout 10 "$scratch/d5trap$EXE" 2>&1 || true)
 grep -q "^5$" <<<"$trapout" || { echo "FAIL defer trap drain: $trapout"; exit 1; }
 grep -q "^6$" <<<"$trapout" || { echo "FAIL defer trap drain order: $trapout"; exit 1; }
 
