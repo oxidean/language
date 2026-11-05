@@ -195,6 +195,7 @@ OxlStr rt_strcat(OxlStr a, OxlStr b);
 int rt_streq(OxlStr a, OxlStr b);
 OxlStr rt_itoa(int64_t v);
 OxlStr rt_str(const char *s);
+OxlStr rt_str_own(OxlStr s); /* deep-copy backing into own heap (escaping captures) */
 void rt_print_str(OxlStr s);
 void rt_print_i64(int64_t v);
 void rt_println_str(OxlStr s);

@@ -3,27 +3,37 @@
 // alive past the spawner's join. The orphan's teardown must find its
 // parent link already detached (link_mu) — before the fix it locked
 // the joined scope's destroyed mutex. Looped to shake the race.
+// `done` is the teardown completion signal: every leaf increments it
+// on entry and drops it in a defer that runs during its settle — if an
+// orphan drain stalls a leaf mid-flight the count never returns to 0.
 import "std/time"
 
-fn leaf() {
+fn leaf(d: shared) {
+    sadd(d, 1)
+    defer sadd(d, -1)
     time.sleep_ms(30)
 }
 
-fn child() {
+fn child(d: shared) {
     scope {
-        spawn leaf()
+        spawn leaf(d)
         return
     }
 }
 
 fn main() {
+    done := mkshared(0)
     i := 0
     for i < 200 {
         scope {
-            spawn child()
+            spawn child(done)
             // join fires when child settles — racing leaf's drain
         }
         i = i + 1
     }
+    // orphaned drains finish on other threads after the joins above —
+    // the counter returning to 0 is the test-visible teardown signal
+    time.sleep_ms(500)
+    assert(sadd(done, 0) == 0)
     println("orphan-join ok")
 }

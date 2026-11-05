@@ -1731,12 +1731,20 @@ impl<'a> Gen<'a> {
         self.cur_fn = saved_fn;
         // the value: escaping-heap env populated from the enclosing scope
         let mut inits = String::new();
-        for (n, _) in &captures {
+        for (n, t) in &captures {
             let v = self.expr(&Expr {
                 kind: ExprKind::Ident(n.clone()),
                 span: e.span,
             });
-            inits += &format!(" _e->{} = {v};", cname(n));
+            // a str capture copies only the OxlStr header — the backing
+            // stays in the creating scope's arena and dangles once it
+            // closes. Copy the bytes into own storage so the env really
+            // does outlive its creating scope.
+            if matches!(t, Ty::Str) {
+                inits += &format!(" _e->{} = rt_str_own({v});", cname(n));
+            } else {
+                inits += &format!(" _e->{} = {v};", cname(n));
+            }
         }
         format!(
             "({{ struct o_env_{id} *_e = rt_alloc_own(sizeof(struct o_env_{id}));{inits} \

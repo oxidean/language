@@ -49,7 +49,10 @@ Suspend-capable functions compile to **stackless state machines**:
   are freed when the child completes.
 - `spawn f(args)` allocates one block (task header + frame) via
   `rt_task_new` and enqueues it on the work pool's shared queue.
-  Parked tasks hold *no* OS thread: ~10k idle tasks fit in ~2 MB RSS.
+  Parked tasks hold *no* OS thread — ~10k idle tasks fit in ~2 MB RSS.
+  Exception: `sleep` and `select` `timeout` waits each hold one
+  detached timer pthread for the wait's duration, so a program with
+  many concurrent timer waits still holds that many OS threads.
 - `spawnBlocking f(args)` sends the frame task to the blocking pool
   (one thread per task) so blocking FFI can never starve workers.
 
@@ -123,7 +126,8 @@ select {
 
   spawnBlocking blocking_call(fd)
   ```
-- Scale: a parked task costs one small heap block, not a thread.
-  Measured ~1.9 MB RSS with 10k parked tasks; ~2x faster than the
-  thread-pool executor at 1k+ tasks on the rendezvous bench
+- Scale: a channel- or plain-`select`-parked task costs one small heap
+  block, not a thread (timer waits excepted — they hold a detached
+  thread each). Measured ~1.9 MB RSS with 10k parked tasks; ~2x faster
+  than the thread-pool executor at 1k+ tasks on the rendezvous bench
   (`tests/conc_scale.oxl`, `tests/conc_ping.oxl`).

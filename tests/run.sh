@@ -7,11 +7,23 @@ cd "$(dirname "$0")/.."
 case "$OXL" in /*) ;; *) OXL="$PWD/$OXL";; esac
 
 # GNU timeout doesn't exist on stock macOS; fall back to gtimeout
-# (brew coreutils), else run unbounded.
+# (brew coreutils), else a bash watchdog that kills the child at the
+# deadline — a hang must never run unbounded.
 with_timeout() {
     if command -v timeout >/dev/null 2>&1; then timeout "$@"
     elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
-    else shift; "$@"
+    else
+        local secs=$1; shift
+        "$@" & local pid=$!
+        ( sleep "$secs"; kill -KILL "$pid" 2>/dev/null ) & local dog=$!
+        local rc=0
+        wait "$pid" 2>/dev/null || rc=$?
+        if kill -0 "$dog" 2>/dev/null; then
+            kill "$dog" 2>/dev/null; wait "$dog" 2>/dev/null
+        else
+            rc=124 # watchdog fired — same sentinel as GNU timeout
+        fi
+        return "$rc"
     fi
 }
 

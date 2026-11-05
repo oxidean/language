@@ -24,8 +24,9 @@ contract the typechecker, codegen, and runtime are built against.
   accessing it after the scope closes reads freed storage.
   `new(T)` is the exception: it allocates via `rt_alloc_own` (owned
   heap), so the result is NOT scope-tracked and is NOT bulk-freed when
-  the scope closes — it lives until `rt_free` or the owning handle's
-  death (see below).
+  the scope closes — it lives until an explicit `rt_free` (extern C
+  callers, or `rt_free` through the FFI surface) or process exit; the
+  code generator does not emit handle-death reclamation today.
 - **Owned heap.** `own new(T)` (or the `own` keyword on an allocation)
   produces an `own T` handle valid until its owner dies. Ownership moves
   on assignment/argument/return; after a move the old handle is dead —
@@ -78,9 +79,9 @@ through a handle, and are elided where the typechecker proves safety
   scope arena, propagate `ErrTrap` to parent scope's wait point.
 - Trap outside any scope, or metadata corruption detected during unwind:
   `abort()`.
-- Opt-out: `unsafe { }` block suppresses check emission inside it;
-  `--unsafe` build flag suppresses checks globally. Both are greppable
-  and never implicit.
+- Suppression is not implemented: `unsafe { }` parses as a plain
+  scoping block today and silences nothing; there is no global build
+  flag that disables runtime checks.
 
 ## Compile-time rules
 

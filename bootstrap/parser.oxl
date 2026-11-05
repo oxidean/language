@@ -1193,6 +1193,13 @@ fn parse(toks: own lexlib.Tok) -> own Node {
     c.nolit = 0
     c.pln = 0
     c.lex_err = 0
+    // an err token in FIRST position is never reached by next()'s check
+    // (that fires on c.t.next) — a file starting with a lex error would
+    // silently parse as a Skip node and exit 0
+    if c.t != nil && c.t.kind == lexlib.k_err() {
+        println("lex: " + c.t.text + " (line " + itoa(c.t.ln) + ")")
+        return nil
+    }
     let items: own NList = nil
     for pkind(c) != 0 {
         items = ncons(p_item(c), items)

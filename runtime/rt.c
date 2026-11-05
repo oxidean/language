@@ -122,16 +122,20 @@ void rt_scope_enter(RtScope *s) {
          * parent starts cancelled — its first suspend point dies
          * instead of outliving the trap that spawned it. A dead parent
          * (teardown already committed) takes no new children: stay
-         * unlinked so our own unlink can't touch freed memory */
+         * unlinked so our own unlink can't touch freed memory. link_mu
+         * held first pins p: teardown can't reach mutex-destroy until
+         * it wins unlink, so p->mu is alive for this whole section.
+         * The local keeps p valid for the unlock after we detach. */
+        RtScope *p = s->parent;
         pthread_mutex_lock(&link_mu);
-        pthread_mutex_lock(&s->parent->mu);
-        if (s->parent->cancel || s->parent->dead) s->cancel = 1;
-        if (s->parent->dead) s->parent = NULL;
+        pthread_mutex_lock(&p->mu);
+        if (p->cancel || p->dead) s->cancel = 1;
+        if (p->dead) s->parent = NULL;
         else {
-            s->sib = s->parent->children;
-            s->parent->children = s;
+            s->sib = p->children;
+            p->children = s;
         }
-        pthread_mutex_unlock(&s->parent->mu);
+        pthread_mutex_unlock(&p->mu);
         pthread_mutex_unlock(&link_mu);
     }
     tls_scope = s;
@@ -1682,6 +1686,16 @@ static void scope_cancel_wake(RtScope *s) {
         rt_task_wake(t);
         task_unref(t);
     }
+}
+
+/* copy s's backing into own-heap storage — a closure env holds the
+ * header past the creating scope's arena teardown, so the bytes must
+ * live in the same escaping storage the env does */
+OxlStr rt_str_own(OxlStr s) {
+    char *p = rt_alloc_own(s.n + 1);
+    memcpy(p, s.p, (size_t)s.n);
+    p[s.n] = 0;
+    return (OxlStr){ p, s.n };
 }
 
 OxlStr rt_str(const char *s) { return (OxlStr){ s, (int64_t)strlen(s) }; }

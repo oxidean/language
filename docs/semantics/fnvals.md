@@ -37,6 +37,10 @@ creating scope) at closure creation; later writes to the outer variable don't re
 (and vice versa). A closure may not re-bind a captured name — the
 checker reports the shadow instead of silently aliasing.
 
+`str` captures are deep-copied into the env's own storage
+(`rt_str_own`) at closure creation, so the string stays valid after
+the creating scope closes — no caveat.
+
 Caveat — slice captures: a non-`own` slice copies only its header
 (`ptr`, `len`, `cap`); the backing storage stays in the creating
 scope's arena and is bulk-freed when that scope closes. A closure that
