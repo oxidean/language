@@ -1069,7 +1069,7 @@ fn gmangle(g: mut G, t: int) -> str {
         c := byteat(n, i)
         ok := c >= 65 && c <= 90 || c >= 97 && c <= 122 || c >= 48 && c <= 57
         if ok {
-            out = out + substr(n, i, 1)
+            out = out + substr(n, i, i + 1)
         } else {
             out = out + "_"
         }
@@ -3092,7 +3092,7 @@ fn gs(g: mut G, s: ref parser.Node) {
                 tag := gpairsig(g, vals.v)
                 cur := "o_ret_" + cname(g.cur)
                 if len(tag) > 0 && tag != cur {
-                    wln(g, "    return (struct " + cur + "){ (" + v + ").val, (" + v + ").err };")
+                    wln(g, "    { struct " + tag + " _fw = " + v + "; return (struct " + cur + "){ _fw.val, _fw.err }; }")
                 } else {
                     wln(g, "    return " + v + ";")
                 }
@@ -3684,7 +3684,7 @@ fn gfstmt(g: mut G, s: ref parser.Node) {
                     tag := gpairsig(g, vals.v)
                     cur := "o_ret_" + cname(g.cur)
                     if len(tag) > 0 && tag != cur {
-                        wln(g, "    fr->result = (struct " + cur + "){ (" + v + ").val, (" + v + ").err };")
+                        wln(g, "    { struct " + tag + " _fw = " + v + "; fr->result = (struct " + cur + "){ _fw.val, _fw.err }; }")
                     } else {
                         wln(g, "    fr->result = " + v + ";")
                     }
@@ -4526,7 +4526,6 @@ fn genall(g: mut G) -> str {
         i = i + 1
     }
     g.out = g.w
-    gemit_fnv(g)
     // global initializers run inside oxl_main's prologue — before the
     // inst drain: they can still queue insts / record vtab uses
     i = 0
@@ -4570,6 +4569,8 @@ fn genall(g: mut G) -> str {
         }
     }
     g.out = g.w
+    // fn-value wrappers — after every body (incl. insts) registered its uses
+    gemit_fnv(g)
     // concrete vtabs + thunks — after every body so vtab_uses is final
     gemvtab(g)
     oxlmain := ""
