@@ -137,8 +137,10 @@ decls → markdown. Hover/goto remain open (needs position index).
 ### Task 16: OSS plumbing [done]
 
 LICENSE (MIT), README, CONTRIBUTING, `.github/workflows/ci.yml`
-(build + `tests/run.sh` end-to-end suite). Release workflow still open
-(waits on the v0.0.1 tag).
+(build + `tests/run.sh` end-to-end suite), `.github/workflows/release.yml`
+(tag-triggered toolchain tarball). The `v0.0.1` release run failed on the
+runner's missing sqlite link flags — fixed post-tag via conditional link
+flags; publishing awaits the next tag.
 
 ## Phase 3 — Gate
 
