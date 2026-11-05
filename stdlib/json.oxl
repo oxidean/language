@@ -263,6 +263,12 @@ fn jput(b: mut void, pos: int, s: str) -> int {
     return pos + len(s)
 }
 
+// v - v is NaN for inf and nan inputs, 0 for every finite v —
+// JSON has no inf/nan literal, so emitters encode them as null
+fn jfinite(v: float) -> bool {
+    return v - v == 0.0
+}
+
 // upper bound on jemit's output: a string grows at most 6x under
 // jput_esc (one byte -> \uXXXX at worst), numbers measure exactly
 fn jsize(j: ref Json) -> int {
@@ -279,6 +285,9 @@ fn jsize(j: ref Json) -> int {
         return len(itoa(j.i))
     }
     if j.kind == 6 {
+        if !jfinite(j.f) {
+            return 4 // "null" — JSON has no inf/nan literal
+        }
         return len(ftoa(j.f))
     }
     if j.kind == 3 {
@@ -316,6 +325,9 @@ fn jemit(j: ref Json, b: mut void, pos: int) -> int {
         return jput(b, pos, itoa(j.i))
     }
     if j.kind == 6 {
+        if !jfinite(j.f) {
+            return jput(b, pos, "null")
+        }
         return jput(b, pos, ftoa(j.f))
     }
     if j.kind == 3 {

@@ -23,4 +23,7 @@ fn test_json_float() {
     o := json.jobj()
     json.jadd(o, "f", json.jfloat(2.5))
     testing.expect_streq(json.tojson(o), "{\"f\":2.5}", "jfloat emit")
+    // JSON has no inf/nan literal — non-finite floats encode as null
+    testing.expect_streq(json.tojson(json.jfloat(atof("1e999"))), "null", "inf emits null")
+    testing.expect_streq(json.tojson(json.jfloat(atof("nan"))), "null", "nan emits null")
 }
