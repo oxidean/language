@@ -310,9 +310,15 @@ if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
 fi
 
 # orphan drain: a frame task returning inside an open scope orphans it;
-# its teardown must not lock the joined scope's destroyed mutex.
-out=$(with_timeout 30 "$OXL" run tests/orphan_join.oxl)
-[ "$(tail -1 <<<"$out")" = "orphan-join ok" ] || { echo "FAIL orphan_join: $out"; exit 1; }
+# its teardown must not lock the joined scope's destroyed mutex. Build
+# first so a compile error fails the check, and run the binary directly —
+# under `oxl run` the watchdog would kill only the driver while the child
+# keeps the capture pipe and $( ) hangs past the deadline.
+"$OXL" build tests/orphan_join.oxl -o "$scratch/orphan_join" || {
+    echo "FAIL orphan_join: compile failed"; exit 1; }
+rc=0
+out=$(with_timeout 30 "$scratch/orphan_join") || rc=$?
+[ "$(tail -1 <<<"$out")" = "orphan-join ok" ] || { echo "FAIL orphan_join: rc=$rc: $out"; exit 1; }
 
 # joiner lost-wakeup: a trap's descendant cancel temp-holds a scope
 # whose owner is parked joining it; if the temp drop is the pending->0

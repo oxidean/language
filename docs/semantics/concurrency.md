@@ -126,8 +126,11 @@ select {
 
   spawnBlocking blocking_call(fd)
   ```
-- Scale: a channel- or plain-`select`-parked task costs one small heap
-  block, not a thread (timer waits excepted — they hold a detached
-  thread each). Measured ~1.9 MB RSS with 10k parked tasks; ~2x faster
-  than the thread-pool executor at 1k+ tasks on the rendezvous bench
-  (`tests/conc_scale.oxl`, `tests/conc_ping.oxl`).
+- Scale: parking does not hold a thread — a channel-parked task costs
+  only its suspended frame; a parked frame sender additionally holds one
+  `SendReq` on the channel's send queue, and a parked `select` holds one
+  `RtSel` sized by arm count. Timer waits are the exception: each holds
+  a detached thread. On the channel-rendezvous benchmarks 10k parked
+  receivers measured ~1.9 MB RSS and ~2x faster than the thread-pool
+  executor at 1k+ tasks (`tests/conc_scale.oxl`, `tests/conc_ping.oxl`);
+  those numbers do not cover select parking.
