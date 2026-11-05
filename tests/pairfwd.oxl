@@ -1,13 +1,9 @@
 // pair-forward across differing val types: `return f()` where f's
 // pair val ty differs from the caller's — the emitted struct must
 // convert .val (iface rewrap / boxing), not drop it in raw
-
 interface Small { next() -> [int, err] }
 
-interface Big {
-    next() -> [int, err]
-    extra() -> int
-}
+interface Big { next() -> [int, err], extra() -> int }
 
 struct Seq { i: int }
 
