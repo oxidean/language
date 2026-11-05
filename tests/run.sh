@@ -299,6 +299,8 @@ out=$("$OXL" run tests/conc_ping.oxl -- 5000)
 grep -q "bounces=5000" <<<"$out" || { echo "FAIL ping: $out"; exit 1; }
 
 echo "== a2 select =="
+out=$("$OXL" run tests/select_fair.oxl)
+[ "$(tail -1 <<<"$out")" = "select fair ok a=${out##*=}" ] || { echo "FAIL select_fair: $out"; exit 1; }
 out=$("$OXL" run tests/select.oxl)
 [ "$(tail -1 <<<"$out")" = "select done" ] || { echo "FAIL select: $out"; exit 1; }
 # parked select must unwedge on sibling trap — exits nonzero, not a hang.
@@ -340,6 +342,8 @@ fi
 echo "== a3 buffered channels =="
 out=$("$OXL" run tests/chanbuf.oxl)
 [ "$(tail -1 <<<"$out")" = "chanbuf done" ] || { echo "FAIL chanbuf: $out"; exit 1; }
+out=$("$OXL" run tests/chanbuf_close.oxl)
+[ "$(tail -1 <<<"$out")" = "chanbuf close ok" ] || { echo "FAIL chanbuf_close: $out"; exit 1; }
 
 echo "== fmt check =="
 # the whole .oxl corpus must be canonically formatted

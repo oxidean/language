@@ -1475,23 +1475,60 @@ static int addr_cmp(const void *a, const void *b) {
 }
 
 int rt_select_poll(RtChan **chs, int n, int64_t tmo_ms, int has_else, RtTask *t) {
-    /* fast path: single-lock sweep, random start keeps it fair */
-    int start = n > 1 ? (int)(rand() % (unsigned)n) : 0;
-    for (int k = 0; k < n; k++) {
-        int i = (start + k) % n;
-        pthread_mutex_lock(&chs[i]->mu);
-        int64_t v = 0;
-        RtTask *wm = NULL;
-        if (sel_ready(chs[i], &v, &wm)) {
+    /* fast path: peek the ready set under per-chan locks, pick
+     * uniformly from it, then consume just that arm. A random-start
+     * first-ready sweep is NOT uniform — an arm right after the start
+     * point wins over equally-ready others (positional starvation the
+     * spec forbids). Peek vs consume can disagree under contention, so
+     * retries are bounded and the locked slow path settles the rest. */
+    for (int attempt = 0; attempt < 4; attempt++) {
+        int nready = 0;
+        for (int i = 0; i < n; i++) {
+            pthread_mutex_lock(&chs[i]->mu);
+            if (chs[i]->count > 0 || chs[i]->sendq || chs[i]->has || chs[i]->closed)
+                nready++;
             pthread_mutex_unlock(&chs[i]->mu);
-            if (wm) { rt_task_wake(wm); task_unref(wm); }
-            t->chan_res = v;
-            t->sel_arm = i;
-            return RT_READY;
         }
-        pthread_mutex_unlock(&chs[i]->mu);
+        if (nready == 0)
+            break;
+        int target = nready > 1 ? (int)(rand() % (unsigned)nready) : 0;
+        int seen = 0;
+        for (int i = 0; i < n; i++) {
+            pthread_mutex_lock(&chs[i]->mu);
+            int rd = chs[i]->count > 0 || chs[i]->sendq || chs[i]->has || chs[i]->closed;
+            if (!rd || seen++ != target) {
+                pthread_mutex_unlock(&chs[i]->mu);
+                continue;
+            }
+            int64_t v = 0;
+            RtTask *wm = NULL;
+            int fired = sel_ready(chs[i], &v, &wm);
+            pthread_mutex_unlock(&chs[i]->mu);
+            if (fired) {
+                if (wm) { rt_task_wake(wm); task_unref(wm); }
+                t->chan_res = v;
+                t->sel_arm = i;
+                return RT_READY;
+            }
+            break; /* peek lied between passes — recount and repick */
+        }
     }
     if (has_else) {
+        /* else must never park — after the bounded retries take any
+         * arm that still fires, and else only when none does */
+        for (int i = 0; i < n; i++) {
+            pthread_mutex_lock(&chs[i]->mu);
+            int64_t v = 0;
+            RtTask *wm = NULL;
+            if (sel_ready(chs[i], &v, &wm)) {
+                pthread_mutex_unlock(&chs[i]->mu);
+                if (wm) { rt_task_wake(wm); task_unref(wm); }
+                t->chan_res = v;
+                t->sel_arm = i;
+                return RT_READY;
+            }
+            pthread_mutex_unlock(&chs[i]->mu);
+        }
         t->sel_arm = RT_SEL_ELSE;
         return RT_READY;
     }
@@ -1968,6 +2005,9 @@ void rt_sqlite_close(void *db) { sqlite3_close((sqlite3 *)db); }
 /* ---------------- entry ---------------- */
 
 int main(int argc, char **argv) {
+    /* select's uniform pick draws on rand() — seed per-process or every
+     * run replays the same arm-pick sequence */
+    srand((unsigned)(time(NULL) ^ (long)getpid()));
     rt_set_args(argc, argv);
     RtScope base;
     rt_scope_enter(&base);
