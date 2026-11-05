@@ -278,13 +278,15 @@ static int park_claim(RtTask *t) {
 int64_t rt_select_arm(RtTask *t); /* defined with the channel internals */
 static void scope_cancel_wake(RtScope *s);
 static void pool_push(RtTask *t);
+static void pool_start(void);
 
 static struct {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     RtTask *head, *tail;
     int started;
-} pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0 };
+    int workers; /* live detached workers — spawn_fallback checks this */
+} pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0, 0 };
 
 static void scope_heap_free(RtScope *s);
 
@@ -584,6 +586,30 @@ static void run_inline(RtTask *t) {
     tls_scope = ps;
 }
 
+/* pthread_create refused. First fallback: hand the task to the work
+ * pool — the async contract holds (a blocking task must NOT run on the
+ * caller: an HTTP accept loop would stall for the whole request), and
+ * settle still does the full cleanup. Only when the pool has no live
+ * worker at all do we drive the task on this thread — dropping
+ * caller-owned state is never acceptable, and with zero threads an
+ * inline run is the only execution left. */
+static void spawn_fallback(RtTask *t) {
+    t->external = 0; /* a pooled task wakes via pool_push, not a local wk */
+    t->wk = NULL;
+    pool_start();
+    pthread_mutex_lock(&pool.mu);
+    int live = pool.workers > 0;
+    pthread_mutex_unlock(&pool.mu);
+    if (live) { pool_push(t); return; }
+    if (t->is_frame) {
+        RtScope *sc = t->scope; /* run_root drops the run ref — pin sc */
+        rt_run_root((RtFrame *)(t + 1));
+        scope_done(sc);
+    } else {
+        run_inline(t);
+    }
+}
+
 static void *worker(void *_p) {
     (void)_p;
     for (;;) {
@@ -618,13 +644,17 @@ static void *worker(void *_p) {
 
 static void pool_start(void) {
     pthread_mutex_lock(&pool.mu);
-    if (!pool.started) {
+    /* fill once, retry while the pool is dead: a transient create
+     * failure at startup must not pin the pool at zero forever */
+    if (!pool.started || pool.workers == 0) {
         long n = sysconf(_SC_NPROCESSORS_ONLN);
         if (n < 2) n = 2;
         if (n > 32) n = 32;
-        for (long i = 0; i < n; i++) {
+        for (long i = pool.workers; i < n; i++) {
             pthread_t t;
-            if (pthread_create(&t, NULL, worker, NULL) == 0) pthread_detach(t);
+            if (pthread_create(&t, NULL, worker, NULL) != 0) break;
+            pthread_detach(t);
+            pool.workers++;
         }
         pool.started = 1;
     }
@@ -722,7 +752,7 @@ void rt_spawn(void *(*fn)(void *), void *arg) {
         t->fn = fn; t->arg = arg;
         pthread_t th;
         if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
-        else run_inline(t); /* no thread: run it here — never drop the task */
+        else spawn_fallback(t); /* never drop the task — pool or inline */
         return;
     }
     RtTask *t = xmalloc(sizeof *t);
@@ -743,7 +773,7 @@ void rt_spawnb(void *(*fn)(void *), void *arg) {
     t->fn = fn; t->arg = arg; t->scope = s;
     pthread_t th;
     if (pthread_create(&th, NULL, task_wrap, t) == 0) pthread_detach(th);
-    else run_inline(t); /* run_task itself settles scope_done + the run ref */
+    else spawn_fallback(t); /* settle does scope_done + the run ref */
 }
 
 /* one allocation per task: [RtTask][frame bytes]. Generated code gets
@@ -776,16 +806,7 @@ void rt_spawnb_task(RtFrame *fr) {
     t->external = 1;
     pthread_t th;
     if (pthread_create(&th, NULL, task_wrap_frame, t) == 0) pthread_detach(th);
-    else {
-        /* admission holds a pending slot AND caller-owned params inside
-         * the frame — settling without running leaks both. Drive the
-         * frame on this thread: the slot stays held across the run so a
-         * parked join can't tear the scope down under the live task
-         * (rt_run_root drops the run ref — capture the scope first) */
-        RtScope *sc = t->scope;
-        rt_run_root(fr);
-        scope_done(sc);
-    }
+    else spawn_fallback(t); /* pool keeps the pending slot + frame alive */
 }
 
 /* drive one frame task to completion on the calling thread — the root
