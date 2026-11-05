@@ -1091,13 +1091,39 @@ impl<'a> Gen<'a> {
     /// (per execution: loops accumulate, untaken branches register
     /// nothing). The call's local idents are captured by value into a
     /// generated env so the deferred call reads register-time values.
+    /// Per spec b5 the *argument expressions* also evaluate at
+    /// registration — `defer f(g())` must not run `g()` at fn exit — so
+    /// each arg is bound to a temp before the env capture runs.
     fn stmt_defer(&mut self, call: &Expr) {
         let di = self.defers.len();
         self.defers.push(call.clone());
         let fname = cname(&self.cur_fn);
         let denv = format!("o_denv_{fname}_{di}");
         let thunk = format!("o_def_{fname}_{di}");
-        let caps = defer_caps(self, call);
+        // args -> registration temps; the thunk's call reads the temps
+        // through the ordinary env capture. Non-call `defer expr` has
+        // no arguments — it keeps the old eval-at-drain behavior.
+        let rewritten = match &call.kind {
+            ExprKind::Call { f, args } if !args.is_empty() => {
+                let mut temps = Vec::with_capacity(args.len());
+                for (i, a) in args.iter().enumerate() {
+                    let t = self.dt(&self.expr_ty(a));
+                    let an = format!("_da{di}_{i}");
+                    // raw value: call-site conversion (cstr wrap, borrow
+                    // regions) stays part of the deferred call at drain
+                    let v = self.expr(a);
+                    let _ = writeln!(self.out, "    {} {} = {};", self.cty(&t), an, v);
+                    self.env.last_mut().unwrap().insert(an.clone(), t);
+                    temps.push(Expr { kind: ExprKind::Ident(an), span: a.span });
+                }
+                Expr {
+                    kind: ExprKind::Call { f: f.clone(), args: temps },
+                    span: call.span,
+                }
+            }
+            _ => call.clone(),
+        };
+        let caps = defer_caps(self, &rewritten);
         // struct + thunk proto precede all bodies; body goes last
         let mut proto = format!("struct {denv} {{");
         if caps.is_empty() {
@@ -1117,7 +1143,7 @@ impl<'a> Gen<'a> {
         for (n, t) in &caps {
             body += &format!("    {} {} = _e->{};\n", self.cty(t), cname(n), cname(n));
         }
-        let v = self.expr(call);
+        let v = self.expr(&rewritten);
         body += &format!("    (void)({v});\n}}\n");
         self.in_frame = saved_frame;
         self.fslots = saved_fslots;

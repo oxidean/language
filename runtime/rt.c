@@ -199,6 +199,7 @@ struct RtTask {
 #define WK_JOIN 4
 #define WK_TRECV 5
 #define WK_TSEND 6
+#define WK_SLEEP 7
 
 /* task lifetime: `holds` is the allocation's refcount — one "run" ref
  * taken at spawn and dropped at settle, plus one per queue membership
@@ -639,6 +640,9 @@ static void *task_wrap_frame(void *p) {
     volatile int trapped = 0;
     if (setjmp(tls_jb) == 0) {
         while (1) {
+            /* cancelled before it ran: settle like the pool worker
+             * instead of re-polling into a dead scope */
+            if (t->scope && t->scope->cancel) break;
             t->wstate = WS_ONSTACK;
             if (t->poll(t->frame, t) != RT_PENDING) break;
             if (__sync_lock_test_and_set(&t->wstate, WS_PARKED) == WS_WAKEREQ)
@@ -756,6 +760,9 @@ int rt_run_root(RtFrame *fr) {
     volatile int trapped = 0;
     if (setjmp(tls_jb) == 0) {
         while (1) {
+            /* same cancel gate as the pool worker: a cancel-woken task
+             * settles instead of re-polling into a dead scope */
+            if (t->scope && t->scope->cancel) break;
             t->wstate = WS_ONSTACK;
             if (t->poll(fr, t) != RT_PENDING) break;
             if (__sync_lock_test_and_set(&t->wstate, WS_PARKED) == WS_WAKEREQ)
@@ -1423,47 +1430,63 @@ void rt_close(RtChan *ch) {
     }
 }
 
-/* frame-task sleep: a blocking-pool thread holds the delay, then the
- * task is re-enqueued — sleep never occupies a work-pool worker */
+/* frame-task sleep: the delay lives on a detached timer thread so it
+ * never occupies a work-pool worker. The sleeper parks on its scope's
+ * parked list as WK_SLEEP so scope_cancel_wake can claim+wake it — a
+ * sibling trap no longer waits out the timer (the sleep_ms contract).
+ * The timer holds its own task ref and races the cancel claim like a
+ * losing select arm: a failed park_claim means the winner already
+ * dequeued/woke the task, so the timer just drops its ref and exits —
+ * it can never touch freed task memory. */
+typedef struct RtSleep {
+    RtTask *t;     /* sleeper — the timer holds one ref */
+    int64_t delay; /* timer units: seconds or microseconds (usec flag) */
+    int usec;
+} RtSleep;
+
 static void *sleep_tick(void *p) {
-    RtTask *x = p;
-    RtTask *w = x->arg;
-    int64_t s = x->chan_res;
-    free(x);
-    if (s > 0) sleep((unsigned)s);
-    rt_task_wake(w);
+    RtSleep *tm = p;
+    if (tm->usec) { if (tm->delay > 0) sleep_us(tm->delay); }
+    else if (tm->delay > 0) sleep((unsigned)tm->delay);
+    RtTask *w = tm->t;
+    free(tm);
+    if (park_claim(w)) {
+        park_del(w);
+        rt_task_wake(w);
+    }
+    task_unref(w); /* the timer's own ref — w was live through the CAS */
     return 0;
 }
-int rt_sleep_poll(int64_t secs, RtTask *t) {
-    RtTask *timer = malloc(sizeof *timer);
-    memset(timer, 0, sizeof *timer);
-    /* reuse the thread-task slot to carry (secs, woken task) */
-    timer->arg = t;
-    timer->chan_res = secs;
+
+static int sleep_poll(int64_t delay, int usec, RtTask *t) {
+    RtSleep *tm = malloc(sizeof *tm);
+    if (!tm) return RT_READY;
+    tm->t = t;
+    tm->delay = delay;
+    tm->usec = usec;
+    task_ref(t); /* the timer's ref — outlives an early settle */
+    /* register BEFORE creating the thread: a timer that fires
+     * instantly must find parked==1 to claim; waitobj stays NULL —
+     * nothing to unlink, the timer self-cleans on a lost claim */
+    park_add(t, t->scope, NULL, WK_SLEEP);
     pthread_t th;
-    if (pthread_create(&th, NULL, sleep_tick, timer) == 0) pthread_detach(th);
-    else { free(timer); return RT_READY; } /* no timer thread: don't park */
+    if (pthread_create(&th, NULL, sleep_tick, tm) != 0) {
+        /* no thread: retract the registration and run inline */
+        if (park_claim(t)) park_del(t);
+        task_unref(t);
+        free(tm);
+        return RT_READY;
+    }
+    pthread_detach(th);
     return RT_PENDING;
 }
 
-static void *msleep_tick(void *p) {
-    RtTask *x = p;
-    RtTask *w = x->arg;
-    int64_t ms = x->chan_res;
-    free(x);
-    if (ms > 0) sleep_us(ms * 1000);
-    rt_task_wake(w);
-    return 0;
+int rt_sleep_poll(int64_t secs, RtTask *t) {
+    return sleep_poll(secs, 0, t);
 }
+
 int rt_msleep_poll(int64_t ms, RtTask *t) {
-    RtTask *timer = malloc(sizeof *timer);
-    memset(timer, 0, sizeof *timer);
-    timer->arg = t;
-    timer->chan_res = ms;
-    pthread_t th;
-    if (pthread_create(&th, NULL, msleep_tick, timer) == 0) pthread_detach(th);
-    else { free(timer); return RT_READY; }
-    return RT_PENDING;
+    return sleep_poll(ms * 1000, 1, t);
 }
 
 /* ---------------- select ----------------
@@ -1765,6 +1788,10 @@ static void scope_cancel_wake(RtScope *s) {
                 pthread_mutex_unlock(&js->mu);
                 break;
             }
+            case WK_SLEEP:
+                /* nothing to unlink: the timer thread races this same
+                 * claim and self-cleans on the loss */
+                break;
             case WK_TRECV: case WK_TSEND: {
                 RtChan *ch = t->waitobj;
                 pthread_mutex_lock(&ch->mu);

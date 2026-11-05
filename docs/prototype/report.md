@@ -46,8 +46,9 @@ not a requirement.
 
 ## Verdict: GO
 
-- Per-task memory and check overhead both land inside the design doc's
-  bounds; nothing about the ownership/concurrency model needs redesign.
+- Per-task memory and synthetic read-only check overhead both land
+  inside the design doc's bounds; nothing about the
+  ownership/concurrency model needs redesign.
 - The transform's *compile-time* cost is the remaining risk, deferred to
   the production implementation — the prototype measured runtime
   characteristics, which is where the user-facing claims live.
