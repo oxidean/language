@@ -2177,9 +2177,33 @@ int64_t rt_file_readable(const char *path) {
     return 1;
 }
 
-/* socket fd I/O — POSIX read/write/close have no socket counterpart
- * on Win32 (recv/send/closesocket live in ws2_32), so .oxl code names
- * these instead of libc directly */
+/* strlen via the runtime — a raw `extern fn strlen` prototype collides
+ * with <string.h> whenever a platform header pulls it into scope
+ * (WinSock does on Windows): the .oxl decl says int64_t, the real one
+ * says size_t, and C allows no disagreement */
+int64_t rt_strlen(const char *s) { return (int64_t)strlen(s); }
+
+/* socket setup + fd I/O — socket/listen/accept can't be extern'd
+ * directly: on Win32 they're real ws2_32 decls whose signatures clash
+ * with the .oxl-emitted prototypes, and on POSIX they're only safe
+ * while <sys/socket.h> stays out of scope. The runtime owns every
+ * socket-name binding (same reason rt_sigpipe_ignore exists). */
+int64_t rt_sock_open(int64_t domain, int64_t ty, int64_t proto) {
+    return (int64_t)socket((int)domain, (int)ty, (int)proto);
+}
+
+int64_t rt_sock_listen(int64_t fd, int64_t backlog) {
+    return listen((oxl_sock_t)fd, (int)backlog);
+}
+
+/* NULL addr/len: the caller never reads the peer address */
+int64_t rt_sock_accept(int64_t fd) {
+    return (int64_t)accept((oxl_sock_t)fd, NULL, NULL);
+}
+
+/* POSIX read/write/close have no socket counterpart on Win32
+ * (recv/send/closesocket live in ws2_32), so .oxl code names these
+ * instead of libc directly */
 int64_t rt_sock_read(int64_t fd, void *buf, int64_t n) {
 #ifdef _WIN32
     return recv((SOCKET)fd, (char *)buf, (int)n, 0);

@@ -13,6 +13,11 @@
  * oxl_thread_* keeps the POSIX `void *(*)(void *)` spawn shape; Win32
  * routes through _beginthreadex so spawned fns get proper CRT TLS. */
 #ifdef _WIN32
+/* leaner, less macro-polluting <windows.h>: no min()/max() function
+ * macros (they'd eat any .oxl extern with that spelling), no COM/RPC/
+ * multimedia headers the runtime never touches */
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -307,10 +312,14 @@ void rt_poke8(void *buf, int64_t off, int64_t v);
 void rt_poke16(void *buf, int64_t off, int64_t v);
 void rt_poke32(void *buf, int64_t off, int64_t v);
 void rt_init(void);                                    /* proc init (WinSock); main() calls it */
+int64_t rt_sock_open(int64_t domain, int64_t ty, int64_t proto); /* socket() */
+int64_t rt_sock_listen(int64_t fd, int64_t backlog);             /* listen() */
+int64_t rt_sock_accept(int64_t fd);                            /* accept() */
 int64_t rt_sock_read(int64_t fd, void *buf, int64_t n);  /* read | recv, portable */
 int64_t rt_sock_write(int64_t fd, const char *buf, int64_t n); /* write | send */
 int64_t rt_sock_close(int64_t fd);                       /* close | closesocket */
 int64_t rt_file_readable(const char *path);            /* open+close probe */
+int64_t rt_strlen(const char *s);                         /* strlen, name-safe */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs);      /* SO_RCVTIMEO, portable */
 int64_t rt_set_sndtimo(int64_t fd, int64_t secs);      /* SO_SNDTIMEO, portable */
 int64_t rt_set_reuseaddr(int64_t fd);                  /* SO_REUSEADDR, portable */

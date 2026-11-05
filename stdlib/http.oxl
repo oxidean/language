@@ -8,16 +8,16 @@
 // `h.route` is dispatched per request on the blocking pool; it returns a
 // Resp — the status becomes the response's HTTP status line and the body
 // is sent as text/plain.
-extern fn socket(domain: int, ty: int, proto: int) -> int
+extern fn rt_sock_open(domain: int, ty: int, proto: int) -> int
 
 // SO_REUSEADDR + sockaddr_in layout differ per OS — runtime owns both
 extern fn rt_set_reuseaddr(fd: int) -> int
 
 extern fn rt_bind_any(fd: int, port: int) -> int
 
-extern fn listen(fd: int, backlog: int) -> int
+extern fn rt_sock_listen(fd: int, backlog: int) -> int
 
-extern fn accept(fd: int, addr: mut sockaddr, len: mut intp) -> int
+extern fn rt_sock_accept(fd: int) -> int
 
 extern fn rt_sock_read(fd: int, buf: mut void, n: int) -> int
 
@@ -40,10 +40,6 @@ extern fn rt_sigpipe_ignore()
 extern fn rt_scope_new() -> own void
 
 extern fn rt_scope_join_free(s: own void) -> int
-
-struct sockaddr { a: int, b: int } // 16 bytes: sockaddr_in fits
-
-struct intp { v: int }
 
 /// handler result: the HTTP status code plus the text/plain body
 /// ctype selects content-type; empty falls back to text/plain
@@ -368,11 +364,8 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
 /// listen+serve on port; dispatches `h.route` per request
 fn serve(port: int, h: Handler) {
     rt_sigpipe_ignore() // reset clients must not kill us on write
-    srv := socket(2, 1, 0) // AF_INET, SOCK_STREAM
-    addr := new(sockaddr)
-    one := new(intp)
-    one.v = 16 // peer-addr buffer size for accept()
-    if rt_set_reuseaddr(srv) != 0 || rt_bind_any(srv, port) != 0 || listen(srv, 64) != 0 {
+    srv := rt_sock_open(2, 1, 0) // AF_INET, SOCK_STREAM
+    if rt_set_reuseaddr(srv) != 0 || rt_bind_any(srv, port) != 0 || rt_sock_listen(srv, 64) != 0 {
         // a failed bind/listen makes every accept return -1 at once:
         // the serve loop would spin at 100% CPU serving nothing
         rt_sock_close(srv)
@@ -384,7 +377,7 @@ fn serve(port: int, h: Handler) {
     inflight := mkshared(0)
     scope {
         for true {
-            cfd := accept(srv, addr, one)
+            cfd := rt_sock_accept(srv)
             if cfd >= 0 {
                 // claim a slot before spawning; sadd returns the OLD count
                 if sadd(inflight, 1) >= MAX_CONN {
