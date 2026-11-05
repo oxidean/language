@@ -10,3 +10,6 @@ srv.log
 /rt.c
 /rt.h
 examples/gui-todo/todo
+
+# os_test residue (no file-delete builtin yet)
+oxl-ostest-*.txt

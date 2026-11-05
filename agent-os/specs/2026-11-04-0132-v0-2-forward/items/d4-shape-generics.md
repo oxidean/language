@@ -40,3 +40,16 @@ share code per *memory shape*, not per type.
   the win is real but the complexity-per-benefit is low at v0 scale —
   spec honestly says: do it when generic usage is heavy enough to
   measure, not before.
+
+## Deferred (measured 2026-11-05)
+
+Per the risk note's own bar, generic usage was measured before
+building: the entire corpus defines **3** generic fns
+(`first[T any]` in tests/slices.oxl, `use[T Writer]` in
+tests/methods.oxl, `id[T any]` in a run.sh fixture) and emitted C
+contains **zero** shared-shape instantiation groups worth stenciling —
+`first` isn't even instantiated with a concrete arg. Monomorphization
+cost at this volume is nil; dictionaries + shape descriptors would be
+pure complexity. Revisit when generic definitions or emitted
+instantiations reach an order of magnitude more (rough threshold:
+hundreds of mono'd bodies sharing a gcshape in one compile).
