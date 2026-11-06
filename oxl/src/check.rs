@@ -5,6 +5,9 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty {
     Int,
+    /// u8 — the `[]byte` element type; int-compatible both ways (err↔int
+    /// precedent) so byteat/borrowed-int code drops in unconverted */
+    Byte,
     Float,
     Bool,
     Str,
@@ -32,6 +35,7 @@ impl Ty {
     pub fn name(&self) -> String {
         match self {
             Ty::Int => "int".into(),
+            Ty::Byte => "byte".into(),
             Ty::Float => "float".into(),
             Ty::Bool => "bool".into(),
             Ty::Str => "str".into(),
@@ -589,6 +593,7 @@ impl<'a> Checker<'a> {
         match &t.kind {
             TyKind::Named(n) => match n.as_str() {
                 "int" => Ty::Int,
+                "byte" => Ty::Byte,
                 "float" => Ty::Float,
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
@@ -1214,6 +1219,10 @@ impl<'a> Checker<'a> {
             || (*want == Ty::CStr && *got == Ty::Str)
             || (*want == Ty::Err && *got == Ty::Int)
             || (*want == Ty::Int && *got == Ty::Err)
+            // byte narrows/widens through int — C uint8_t truncates on
+            // store, so `b[i] = byteat(s, i)` compiles without a cast
+            || (*want == Ty::Byte && *got == Ty::Int)
+            || (*want == Ty::Int && *got == Ty::Byte)
             // nil (Ty::Err) is the null pointer for owned/borrowed refs
             // and the empty slice
             || (*got == Ty::Err && matches!(want, Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Slice(_) | Ty::Shared))
@@ -1514,6 +1523,10 @@ impl<'a> Checker<'a> {
                 // `e as E.V` on an `own E` dereferences the handle
                 let base = match &ot { Ty::Own(b) => &**b, t => t };
                 match (base, &wt) {
+                    // conversions — `as` also casts, not just extracts
+                    (Ty::Str, Ty::Slice(el)) if **el == Ty::Byte => Ty::Slice(el.clone()),
+                    (Ty::Slice(el), Ty::Str) if **el == Ty::Byte => Ty::Str,
+                    (Ty::Int, Ty::Byte) | (Ty::Byte, Ty::Int) | (Ty::Byte, Ty::Byte) => wt.clone(),
                     (Ty::Enum(en), Ty::Struct(sn)) => {
                         if self.enum_variant(sn).map(|(e2, _, _)| e2) == Some(en.clone()) {
                             Ty::Struct(sn.clone())
@@ -1577,6 +1590,10 @@ impl<'a> Checker<'a> {
                             self.assignable(&Ty::Float, &lt, l.span);
                             self.assignable(&Ty::Float, &rt, r.span);
                             Ty::Float
+                        } else if lt == Ty::Byte && rt == Ty::Byte {
+                            // byte op byte stays byte — chained ops keep
+                            // the mod-256 wrap the type promises
+                            Ty::Byte
                         } else {
                             self.assignable(&Ty::Int, &lt, l.span);
                             self.assignable(&Ty::Int, &rt, r.span);
@@ -1585,15 +1602,22 @@ impl<'a> Checker<'a> {
                     }
                     BinOp::BitAnd | BinOp::BitOr | BinOp::Xor => {
                         // bit ops are int-only — no float promotion
-                        self.assignable(&Ty::Int, &lt, l.span);
-                        self.assignable(&Ty::Int, &rt, r.span);
-                        Ty::Int
+                        if lt == Ty::Byte && rt == Ty::Byte {
+                            Ty::Byte
+                        } else {
+                            self.assignable(&Ty::Int, &lt, l.span);
+                            self.assignable(&Ty::Int, &rt, r.span);
+                            Ty::Int
+                        }
                     }
                     _ => {
                         if lt == Ty::Float || rt == Ty::Float {
                             self.assignable(&Ty::Float, &lt, l.span);
                             self.assignable(&Ty::Float, &rt, r.span);
                             return Ty::Float;
+                        }
+                        if lt == Ty::Byte && rt == Ty::Byte {
+                            return Ty::Byte;
                         }
                         self.assignable(&Ty::Int, &lt, l.span);
                         self.assignable(&Ty::Int, &rt, r.span);
@@ -2232,7 +2256,7 @@ impl<'a> Checker<'a> {
             if sig.is_extern {
                 for a in args {
                     let t = self.expr(a, env);
-                    if !matches!(t, Ty::Int | Ty::Bool | Ty::CStr | Ty::Str | Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Shared | Ty::Fn(..) | Ty::Unknown) {
+                    if !matches!(t, Ty::Int | Ty::Byte | Ty::Err | Ty::Bool | Ty::CStr | Ty::Str | Ty::Slice(_) | Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Shared | Ty::Fn(..) | Ty::Unknown) {
                         self.diags.push(Diag::err(a.span, "ffi",
                             format!("`{}` cannot cross the FFI boundary", t.name())));
                     }
@@ -2367,9 +2391,13 @@ impl<'a> Checker<'a> {
                         &f.kind,
                         ExprKind::Ident(n) if n == "recv" || n == "send" || n == "sleep" || n == "msleep"
                     );
+                    // the callee itself can't suspend: fn values may not
+                    // be susp (B4), iface impls are methods (D3), and a
+                    // `T.m` edge propagates real susp via `calls`. The
+                    // callee's *object* still can — `mksusp().m()`.
                     builtin_susp
+                        || expr_susp(f)
                         || args.iter().any(expr_susp)
-                        || matches!(&f.kind, ExprKind::Call{..} | ExprKind::Field{..})
                 }
                 ExprKind::Bin { l, r, .. } => expr_susp(l) || expr_susp(r),
                 ExprKind::Un { e, .. } => expr_susp(e),
@@ -2431,8 +2459,8 @@ impl<'a> Checker<'a> {
                         ExprKind::Ident(n)
                             if susp.contains(n) || n == "recv" || n == "send" || n == "sleep" || n == "msleep");
                     susp_callee
+                        || expr_has_susp(f, susp)
                         || args.iter().any(|a| expr_has_susp(a, susp))
-                        || matches!(&f.kind, ExprKind::Call { .. } | ExprKind::Field { .. })
                 }
                 ExprKind::Bin { l, r, .. } => {
                     expr_has_susp(l, susp) || expr_has_susp(r, susp)

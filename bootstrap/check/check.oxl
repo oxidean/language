@@ -113,6 +113,10 @@ fn k_iface() -> int {
     return 18
 }
 
+fn k_byte() -> int {
+    return 19
+}
+
 // one pool record; i/r are ty handles (-1 unused), args an int list
 struct T { k: int, i: int, args: own IList, r: int, name: str }
 
@@ -406,6 +410,7 @@ struct Ck {
     modcache: str, // module cache root
     mod_sums: own SumEnt, // oxl.sum lines — cache lookups verify against them
     entry_dir: str, // root package dir — anchors the source-tree std walk
+    root_pkg: str, // root package clause — Rust fires builtin-redefine only on main's bare decls
     fnvals: own SList, // named fns used as values
     cur_fn: str,
     cur_mod: str, // package clause while checking
@@ -1360,6 +1365,10 @@ fn t_err(ck: mut Ck) -> int {
     return tk(ck, k_err())
 }
 
+fn t_byte(ck: mut Ck) -> int {
+    return tk(ck, k_byte())
+}
+
 fn t_void(ck: mut Ck) -> int {
     return tk(ck, k_void())
 }
@@ -1436,6 +1445,9 @@ fn ty_name(ck: ref Ck, t: int) -> str {
     if k == k_err() {
         return "err"
     }
+    if k == k_byte() {
+        return "byte"
+    }
     if k == k_chan() {
         return "chan"
     }
@@ -1499,6 +1511,14 @@ fn assignable(ck: mut Ck, want: int, got: int) {
     }
     if !ok && wk == k_int() {
         ok = gk == k_err()
+    }
+    // byte narrows/widens through int — uint8_t truncates on store, so
+    // `b[i] = byteat(s, i)` compiles without a cast
+    if !ok && wk == k_byte() {
+        ok = gk == k_int()
+    }
+    if !ok && wk == k_int() {
+        ok = gk == k_byte()
     }
     if !ok && gk == k_err() {
         // nil is the null pointer for owned/borrowed refs, chans, slices
@@ -1853,6 +1873,9 @@ fn ty_parse(ck: mut Ck, s: str) -> int {
     }
     if s == "int" {
         return t_int(ck)
+    }
+    if s == "byte" {
+        return t_byte(ck)
     }
     if s == "float" {
         return tk(ck, k_float())
@@ -2215,7 +2238,10 @@ fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, recv: ref parser.Node, typa
     ps = irev(ps)
     cr := ret_sig(ck, ret)
     ck.ty_scope = nil
-    if !ex && is_builtin(qn) {
+    // Rust qualifies every non-main package — its BUILTINS probe only
+    // ever sees bare names for `package main` decls. Root items stay
+    // unqualified here (mod == ""), so gate on the root clause.
+    if !ex && len(mod) == 0 && ck.root_pkg == "main" && is_builtin(name) {
         diag(ck, "check", "`" + name + "` is a builtin and cannot be redefined")
     }
     tl2 := tp
@@ -2528,6 +2554,22 @@ fn as_expr(ck: mut Ck, inner: ref parser.Node, ty: ref parser.Node, env: mut Env
         }
     }
     wk := ck.tyv[wt].k
+    // conversions — `as` also casts, not just extracts; `own T` unwraps
+    // to its payload kind (Rust's `base`)
+    bt := ot
+    if ok == k_own() && ck.tyv[ot].i >= 0 {
+        bt = ck.tyv[ot].i
+    }
+    bok := ck.tyv[bt].k
+    if bok == k_str() && wk == k_slice() && ck.tyv[wt].i >= 0 && ck.tyv[ck.tyv[wt].i].k == k_byte() {
+        return wt
+    }
+    if bok == k_slice() && ck.tyv[bt].i >= 0 && ck.tyv[ck.tyv[bt].i].k == k_byte() && wk == k_str() {
+        return wt
+    }
+    if bok == k_int() && wk == k_byte() || bok == k_byte() && wk == k_int() || bok == k_byte() && wk == k_byte() {
+        return wt
+    }
     if ok == k_enum() && wk == k_struct() {
         // `E.V` payload struct — verify V belongs to the scrutinee's enum
         ei := enum_variant(ck, ck.tyv[wt].name)
@@ -2656,11 +2698,19 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
             assignable(ck, tk(ck, k_float()), rt)
             return tk(ck, k_float())
         }
+        if lk == k_byte() && rk == k_byte() {
+            // byte op byte stays byte — chained ops keep the mod-256
+            // wrap the type promises
+            return t_byte(ck)
+        }
         assignable(ck, t_int(ck), lt)
         assignable(ck, t_int(ck), rt)
         return t_int(ck)
     }
     if op == "&" || op == "|" || op == "^" {
+        if lk == k_byte() && rk == k_byte() {
+            return t_byte(ck)
+        }
         assignable(ck, t_int(ck), lt)
         assignable(ck, t_int(ck), rt)
         return t_int(ck)
@@ -2670,6 +2720,9 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
         assignable(ck, tk(ck, k_float()), lt)
         assignable(ck, tk(ck, k_float()), rt)
         return tk(ck, k_float())
+    }
+    if lk == k_byte() && rk == k_byte() {
+        return t_byte(ck)
     }
     assignable(ck, t_int(ck), lt)
     assignable(ck, t_int(ck), rt)
@@ -3356,7 +3409,7 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             for al != nil {
                 t := expr(ck, al.v, env)
                 tk2 := ck.tyv[t].k
-                if tk2 != k_int() && tk2 != k_bool() && tk2 != k_cstr() && tk2 != k_str() && tk2 != k_own() && tk2 != k_ref() && tk2 != k_mut() && tk2 != k_chan() && tk2 != k_shared() && tk2 != k_fn() && tk2 != k_unk() {
+                if tk2 != k_int() && tk2 != k_byte() && tk2 != k_err() && tk2 != k_bool() && tk2 != k_cstr() && tk2 != k_str() && tk2 != k_slice() && tk2 != k_own() && tk2 != k_ref() && tk2 != k_mut() && tk2 != k_chan() && tk2 != k_shared() && tk2 != k_fn() && tk2 != k_unk() {
                     diag(ck, "ffi", "`" + ty_name(ck, t) + "` cannot cross the FFI boundary")
                 }
                 al = al.next
@@ -3830,13 +3883,10 @@ fn call_seeds(ck: ref Ck, f: ref parser.Node, args: ref parser.NList) -> bool {
     if is_susp_builtin(resolve_named(ck, n)) {
         return true
     }
-    // Rust sees qualified `mod.f` calls as plain Ident callees; a Field
-    // callee here is either that (edge handles it) or an indirect call
-    // through a fn-valued field — the latter may suspend
-    if nk(f) == 8 {
-        return true
-    }
-    if nk(f) == 9 && !collections.map_has(ck.fns, resolve_named(ck, n)) {
+    // the callee itself can't suspend: fn values may not be susp (B4),
+    // iface impls are methods (D3), and a `T.m` edge propagates real
+    // susp via `calls`. The callee's *object* still can — `mksusp().m()`.
+    if expr_susp(ck, f) {
         return true
     }
     return args_susp(ck, args)
@@ -4367,11 +4417,8 @@ fn call_has_susp(ck: mut Ck, f: ref parser.Node, args: ref parser.NList) -> bool
     if is_susp_builtin(qn) || len(n) > 0 && sl_has(ck.susp, qn) {
         return true
     }
-    if nk(f) == 8 {
-        return true
-    }
-    // indirect call through a fn-valued field — may suspend
-    if nk(f) == 9 && !collections.map_has(ck.fns, qn) {
+    // callee can't suspend (B4/D3) — scan its object instead
+    if expr_has_susp(ck, f) {
         return true
     }
     return args_has_susp(ck, args)
@@ -6570,6 +6617,7 @@ fn check_file(path: str, need_main: int) -> own CkRes {
         r.items = ld.items
         return r
     }
+    ck.root_pkg = root_pkg
     if need_main == 1 && len(root_pkg) > 0 && root_pkg != "main" {
         diag(ck, "check", "package `" + root_pkg + "` is not a main package")
         r := new(CkRes)

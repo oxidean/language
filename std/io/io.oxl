@@ -1,0 +1,118 @@
+package io
+
+// std/io — the byte-stream interfaces everything hangs off, Go-shaped.
+// Reader contract: n>0 with e==nil may co-occur; e==io.eof() marks a
+// clean end (not an error); any other e is a real failure. Writers
+// must return e!=nil on failure — a 0/nil write is no progress.
+import "std/errors"
+
+/// Reader is anything yielding bytes into a caller buffer.
+interface Reader { read(b: []byte) -> [int, err] }
+
+/// Writer is anything consuming bytes.
+interface Writer { write(b: []byte) -> [int, err] }
+
+/// Closer is anything releasing a resource.
+interface Closer { close() -> err }
+
+/// ReadWriter is both directions.
+interface ReadWriter {
+    read(b: []byte) -> [int, err],
+    write(b: []byte) -> [int, err],
+}
+
+/// eof returns the shared end-of-stream sentinel — interned, so
+/// `e == io.eof()` is a stable compare across the whole program.
+fn eof() -> err {
+    return errors.new("EOF")
+}
+
+/// noprogress is copy's bail-out when a reader yields 0,nil forever.
+fn noprogress() -> err {
+    return errors.new("io: no progress")
+}
+
+/// shortwrite is copy's bail-out when a writer takes 0,nil.
+fn shortwrite() -> err {
+    return errors.new("io: short write")
+}
+
+/// copy moves bytes src->dst until EOF or error; [written, err].
+fn copy(dst: Writer, src: Reader) -> [int, err] {
+    buf := mkslice(byte, 32768)
+    total := 0
+    dry := 0
+    for true {
+        [n, e] = src.read(buf)
+        if n > 0 {
+            w := 0
+            for w < n {
+                [m, we] = dst.write(buf[w:n])
+                if we != nil {
+                    return total, we
+                }
+                if m <= 0 {
+                    return total, shortwrite()
+                }
+                w = w + m
+            }
+            total = total + n
+            dry = 0
+        }
+        if e == eof() {
+            return total, nil
+        }
+        if e != nil {
+            return total, e
+        }
+        if n <= 0 {
+            dry = dry + 1
+            if dry >= 100 {
+                return total, noprogress()
+            }
+        }
+    }
+    return total, nil
+}
+
+/// readall drains a reader fully; [contents, err].
+fn readall(r: Reader) -> [str, err] {
+    out := "" as []byte
+    buf := mkslice(byte, 4096)
+    for true {
+        [n, e] = r.read(buf)
+        i := 0
+        for i < n {
+            out = push(out, buf[i])
+            i = i + 1
+        }
+        if e == eof() {
+            return out as str, nil
+        }
+        if e != nil {
+            return "", e
+        }
+    }
+    return out as str, nil
+}
+
+// limitReader bounds a reader — reads past `left` report EOF.
+struct LimReader { r: Reader, left: int }
+
+fn (l mut LimReader) read(b: []byte) -> [int, err] {
+    if l.left <= 0 {
+        return 0, eof()
+    }
+    bb := b
+    if len(b) > l.left {
+        bb = b[:l.left]
+    }
+    [n, e] = l.r.read(bb)
+    l.left = l.left - n
+    return n, e
+}
+
+/// limitreader wraps r so at most n bytes come through.
+fn limitreader(r: Reader, n: int) -> Reader {
+    return LimReader{r: r, left: n}
+}

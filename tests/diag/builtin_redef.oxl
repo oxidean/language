@@ -1,0 +1,9 @@
+package main
+
+fn atoi(s: str) -> int {
+    return 0
+}
+
+fn main() {
+    println(itoa(atoi("1")))
+}

@@ -4,7 +4,7 @@ Go-shaped packages, versions, fetching, dead-code elimination, and a
 Go-parity `std/`. Per-item design sketches live in `items/`; this file
 is the order of battle. Milestone-gated, not date-gated.
 
-**Status (2026-11-06): M1 (PR #5), M2 (PR #6), M3 (PR #7) implemented; V1–S5 spec'd.**
+**Status (2026-11-06): M1 (PR #5), M2 (PR #6), M3 (PR #7), G1 (PR #9), G2 (PR #10), V1 (PR #11), S1 (PR #12), V2 (PR #13), V3 (PR #14), S2 implemented; S3–S5 spec'd.**
 Review findings folded into the item files — see threads on the PR.
 
 Execution model: Track M is the critical path — every other track
@@ -50,13 +50,13 @@ migration commit also fixes any newly-illegal imports.
 pseudo-version encode/parse/compare, MVS build-list walk. Pure
 library code — the resolver's foundation.
 
-### Task V2: module cache + `oxl get` + `oxl.sum` [in progress — this PR]
+### Task V2: module cache + `oxl get` + `oxl.sum` [done — PR #13]
 
 `items/v2-module-cache.md`. `OXLMODCACHE` layout, git-based fetch
 (shells out to `git`, like early Go), `h1:`-style tree hashes,
 verify-on-load. `@latest`/`@vX.Y.Z`/`@<ref>` queries.
 
-### Task V3: `oxl mod` commands [not started]
+### Task V3: `oxl mod` commands [done — PR #14]
 
 `items/v3-mod-commands.md`. `init` / `tidy` / `verify` / `list -m`.
 `tidy` is the companion to M3's error: it prunes unused requires and
@@ -88,7 +88,7 @@ existing modules onto Go paths where they map (`json`→`encoding/json`,
 site updates. Lands with the M1 migration commit or immediately behind
 it — same diff family.
 
-### Task S2: io core + byte story [not started]
+### Task S2: io core + byte story [done — this PR]
 
 `items/s2-std-io-core.md`. `std/io` (Reader/Writer/Closer), `std/errors`
 (err carries a message — runtime touch), `std/strconv`, `std/bytes`,

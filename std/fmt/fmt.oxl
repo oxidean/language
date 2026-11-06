@@ -1,0 +1,64 @@
+package fmt
+
+// std/fmt — bounded formatting: no variadics and no runtime `any`, so
+// %v-style reflection stays parked. sprintf substitutes %s verbs with
+// []str args (callers convert via itoa/ftoa/etc.); %% escapes.
+import "std/errors"
+
+/// sprintf — %s takes the next arg in order; %% emits a literal %.
+/// Bad verbs and arg under/over-supply return an err. Output builds
+/// in a []byte (amortized push) — per-byte string concat would be
+/// quadratic on long formats — and converts to str once.
+fn sprintf(f: str, args: []str) -> [str, err] {
+    out := mkslice(byte, 0)
+    ai := 0
+    i := 0
+    for i < len(f) {
+        c := byteat(f, i)
+        if c != 37 {
+            out = push(out, c)
+            i = i + 1
+            continue
+        }
+        i = i + 1
+        if i >= len(f) {
+            return "", errors.new("fmt: dangling % at end")
+        }
+        v := byteat(f, i)
+        if v == 37 {
+            out = push(out, 37)
+            i = i + 1
+            continue
+        }
+        if v == 115 {
+            if ai >= len(args) {
+                return "", errors.new("fmt: not enough args for %s")
+            }
+            a := args[ai]
+            ai = ai + 1
+            j := 0
+            for j < len(a) {
+                out = push(out, byteat(a, j))
+                j = j + 1
+            }
+            i = i + 1
+            continue
+        }
+        return "", errors.new("fmt: unknown verb %" + substr(f, i, i + 1))
+    }
+    if ai < len(args) {
+        return "", errors.new("fmt: " + itoa(len(args) - ai) + " unused arg(s)")
+    }
+    return out as str, nil
+}
+
+/// sprint is a no-op alias for str identity — the %s path without a
+/// format string.
+fn sprint(s: str) -> str {
+    return s
+}
+
+/// sprinti formats an int (itoa alias — the typed %d substitute).
+fn sprinti(v: int) -> str {
+    return itoa(v)
+}

@@ -309,6 +309,10 @@ int64_t rt_atoi(OxlStr s);
 double rt_atof(OxlStr s);
 OxlStr rt_ftoa(double v);
 void *rt_mkbuf(int64_t size);
+RtSlice rt_bytes_str(OxlStr s);        /* arena copy -> []byte      */
+OxlStr  rt_str_bytes(RtSlice b);       /* zero-copy view -> str     */
+int64_t rt_err_new(OxlStr msg);        /* interned -> stable code   */
+OxlStr  rt_err_msg(int64_t code);      /* "" for unknown/0          */
 OxlStr rt_bufstr(void *buf, int64_t n);
 void rt_poke8(void *buf, int64_t off, int64_t v);
 void rt_poke16(void *buf, int64_t off, int64_t v);
@@ -337,6 +341,13 @@ int64_t rt_htonl(int64_t v);
 OxlStr rt_getenv(OxlStr name);
 int64_t rt_fexists(OxlStr path);
 OxlStr rt_fullpath(OxlStr path);
+int64_t rt_open_read(OxlStr path);     /* fd or -1                  */
+int64_t rt_open_write(OxlStr path);    /* create|trunc, fd or -1    */
+int64_t rt_fd_read(int64_t fd, RtSlice b);   /* n or -errno        */
+int64_t rt_fd_write(int64_t fd, RtSlice b);  /* n or -errno        */
+int64_t rt_fd_close(int64_t fd);   /* 0 or -errno              */
+int64_t rt_remove(OxlStr path);      /* unlink, 0 or -errno      */
+OxlStr  rt_errstr(int64_t code);      /* strerror text             */
 OxlStr rt_readfile(OxlStr path);
 int64_t rt_writefile(OxlStr path, OxlStr data);
 void rt_exit(int64_t code);

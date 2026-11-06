@@ -16,6 +16,7 @@
 #include <time.h>
 #ifndef _WIN32
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -2234,6 +2235,216 @@ int64_t rt_islnk(OxlStr path) {
     struct stat st;
     return (lstat(cp, &st) == 0 && S_ISLNK(st.st_mode)) ? 1 : 0;
 #endif
+}
+
+/* --- fd-level I/O: the io.Reader/Writer substrate ---
+ * Thin veneers over OS fds; oxl sees int handles. -1 on open failure,
+ * read/write return byte counts or -1. RtSlice is the natural buffer —
+ * `b: []byte` extern args arrive as the {ptr,len,cap,heap} header */
+/* path externs reject embedded NUL — an OxlStr can carry one, and a
+ * silent C-string truncation would open/remove the wrong file */
+int64_t rt_open_read(OxlStr path) {
+    if (path.n > 0 && memchr(path.p, 0, (size_t)path.n)) return -EINVAL;
+    const char *cp = rt_cstr(path);
+#ifdef _WIN32
+    int fd = _open(cp, _O_RDONLY | _O_BINARY);
+#else
+    int fd = open(cp, O_RDONLY);
+#endif
+    return fd < 0 ? -(int64_t)errno : fd;
+}
+
+int64_t rt_open_write(OxlStr path) {
+    if (path.n > 0 && memchr(path.p, 0, (size_t)path.n)) return -EINVAL;
+    const char *cp = rt_cstr(path);
+#ifdef _WIN32
+    int fd = _open(cp, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, 0666);
+#else
+    int fd = open(cp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+#endif
+    return fd < 0 ? -(int64_t)errno : fd;
+}
+
+/* the read window is the slice's LEN — `b[:n]` sub-slices keep the
+ * parent's cap, and Go's Read(p) contract is len(p) bytes max */
+int64_t rt_fd_read(int64_t fd, RtSlice b) {
+#ifdef _WIN32
+    int n = _read((int)fd, b.ptr, (unsigned)b.len);
+#else
+    ssize_t n = read((int)fd, b.ptr, (size_t)b.len);
+#endif
+    return n < 0 ? -(int64_t)errno : (int64_t)n;
+}
+
+int64_t rt_fd_write(int64_t fd, RtSlice b) {
+#ifdef _WIN32
+    int n = _write((int)fd, b.ptr, (unsigned)b.len);
+#else
+    ssize_t n = write((int)fd, b.ptr, (size_t)b.len);
+#endif
+    return n < 0 ? -(int64_t)errno : (int64_t)n;
+}
+
+OxlStr rt_errstr(int64_t code) {
+    const char *m = strerror((int)code);
+    return m ? rt_str(m) : rt_str("unknown error");
+}
+
+int64_t rt_fd_close(int64_t fd) {
+    /* close can fail — deferred write errors (NFS, full fs) surface
+     * here; callers need the errno, not a void */
+#ifdef _WIN32
+    int r = _close((int)fd);
+#else
+    int r = close((int)fd);
+#endif
+    return r < 0 ? -(int64_t)errno : 0;
+}
+int64_t rt_remove(OxlStr path) {
+    if (path.n > 0 && memchr(path.p, 0, (size_t)path.n)) return -EINVAL;
+    const char *cp = rt_cstr(path);
+#ifdef _WIN32
+    int r = _unlink(cp);
+#else
+    int r = unlink(cp);
+#endif
+    return r < 0 ? -(int64_t)errno : 0;
+}
+
+
+/* --- []byte <-> str conversions (`as` casts) ---
+ * rt_bytes_str copies into the scope arena — a []byte must never
+ * alias string data (strings are immutable views). rt_str_bytes is the
+ * zero-copy view in the other direction; the str dies with the slice's
+ * backing, same lifetime rule as every borrowed view. */
+RtSlice rt_bytes_str(OxlStr s) {
+    RtSlice b;
+    b.ptr = rt_alloc(s.n > 0 ? s.n : 1);
+    memcpy(b.ptr, s.p, (size_t)s.n);
+    b.len = s.n;
+    b.cap = s.n;
+    b.heap = 0;
+    return b;
+}
+
+OxlStr rt_str_bytes(RtSlice b) {
+    return (OxlStr){ (char *)b.ptr, b.len };
+}
+
+/* --- message-carrying err: interned code -> message registry ---
+ * err stays int64 (no ABI retarget — o_ret/scope fields unchanged);
+ * the payload lives out-of-band. rt_err_new interns BY MESSAGE so a
+ * sentinel is stable across calls: errors.new("EOF") issued anywhere
+ * returns the same code, and `e == io.eof()` is a plain int compare.
+ * Codes start high enough to never alias runtime trap codes.
+ *
+ * Lookup: interning walks an FNV-1a bucket chain (tab entries carry
+ * their bucket link), and msg() indexes the table directly since a
+ * code IS the insertion index — O(1) both directions, so io.eof() in
+ * a copy loop stays cheap even with many distinct messages. Entries
+ * are append-only by design: codes must stay stable and messages
+ * immortal for sentinels, so there's nothing safe to reclaim.
+ * Growth is still bounded: the registry holds at most RT_ERR_MAX-1
+ * distinct messages plus one reserved sentinel slot. A program that
+ * interns a unique message per operation (say, a path per request)
+ * would otherwise leak a slot per failure forever — past the cap the
+ * sentinel "error registry full" answers every new message, keeping
+ * memory and the post-cap fast path O(1). */
+#define RT_ERR_BASE (1 << 20)
+#define RT_ERR_BUCKETS 512
+#define RT_ERR_MAX 65536
+
+typedef struct { int64_t next; int64_t mlen; char *msg; } RtErrEnt;
+static RtErrEnt *rt_err_tab;
+static int64_t rt_err_n, rt_err_cap;
+static int64_t rt_err_ovf = -1;
+static int64_t rt_err_bkt[RT_ERR_BUCKETS]; /* index+1 into tab, 0 = empty */
+static oxl_mutex_t rt_err_mu = OXL_MUTEX_INIT;
+
+static uint64_t rt_err_hash(OxlStr s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (int64_t i = 0; i < s.n; i++) {
+        h ^= (unsigned char)s.p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* append without dedupe — mutex held, never hits the cap path */
+static int64_t err_put_locked(OxlStr msg) {
+    if (rt_err_n == rt_err_cap) {
+        rt_err_cap = rt_err_cap ? rt_err_cap * 2 : 64;
+        if (rt_err_cap > RT_ERR_MAX) rt_err_cap = RT_ERR_MAX;
+        rt_err_tab = realloc(rt_err_tab,
+                             (size_t)rt_err_cap * sizeof(RtErrEnt));
+        if (!rt_err_tab) { oxl_mu_unlock(&rt_err_mu); abort(); }
+    }
+    char *m = malloc((size_t)msg.n + 1);
+    if (!m) { oxl_mu_unlock(&rt_err_mu); abort(); }
+    memcpy(m, msg.p, (size_t)msg.n);
+    m[msg.n] = 0;
+    int64_t b = (int64_t)(rt_err_hash(msg) % RT_ERR_BUCKETS);
+    rt_err_tab[rt_err_n].next = rt_err_bkt[b];
+    rt_err_tab[rt_err_n].mlen = msg.n;
+    rt_err_tab[rt_err_n].msg = m;
+    rt_err_bkt[b] = rt_err_n + 1;
+    return RT_ERR_BASE + rt_err_n++;
+}
+
+/* control-flow sentinels must intern before any user message: if the
+ * registry filled first, errors.new("EOF") would collapse to the
+ * overflow code and every later unique error would compare equal to
+ * io.eof() — io.copy would then report truncated data as success.
+ * Seeded once on the first call, so their codes are guaranteed
+ * distinct regardless of registry pressure. The texts are std/io's
+ * stable API strings. */
+static const char *rt_err_seeds[] = {
+    "EOF", "io: no progress", "io: short write"
+};
+
+int64_t rt_err_new(OxlStr msg) {
+    uint64_t h = rt_err_hash(msg);
+    int64_t b = (int64_t)(h % RT_ERR_BUCKETS);
+    oxl_mu_lock(&rt_err_mu);
+    if (!rt_err_tab) {
+        for (size_t i = 0; i < sizeof(rt_err_seeds) / sizeof(*rt_err_seeds); i++)
+            err_put_locked((OxlStr){ (char *)rt_err_seeds[i],
+                                     (int64_t)strlen(rt_err_seeds[i]) });
+    }
+    for (int64_t i = rt_err_bkt[b]; i; i = rt_err_tab[i - 1].next) {
+        RtErrEnt *e = &rt_err_tab[i - 1];
+        if (e->mlen == msg.n && memcmp(e->msg, msg.p, (size_t)msg.n) == 0) {
+            int64_t c = RT_ERR_BASE + (i - 1);
+            oxl_mu_unlock(&rt_err_mu);
+            return c;
+        }
+    }
+    if (rt_err_ovf >= 0) {
+        int64_t c = rt_err_ovf;
+        oxl_mu_unlock(&rt_err_mu);
+        return c;
+    }
+    if (rt_err_n == RT_ERR_MAX - 1) {
+        /* cap reached — the final slot becomes the shared sentinel */
+        static const char om[] = "error registry full";
+        rt_err_ovf = err_put_locked((OxlStr){ (char *)om, sizeof(om) - 1 });
+        oxl_mu_unlock(&rt_err_mu);
+        return rt_err_ovf;
+    }
+    int64_t code = err_put_locked(msg);
+    oxl_mu_unlock(&rt_err_mu);
+    return code;
+}
+
+OxlStr rt_err_msg(int64_t code) {
+    int64_t i = code - RT_ERR_BASE;
+    if (i < 0) return rt_str("");
+    oxl_mu_lock(&rt_err_mu);
+    OxlStr r = i < rt_err_n
+        ? (OxlStr){ rt_err_tab[i].msg, rt_err_tab[i].mlen }
+        : rt_str("");
+    oxl_mu_unlock(&rt_err_mu);
+    return r;
 }
 
 static int name_cmp(const void *a, const void *b) {

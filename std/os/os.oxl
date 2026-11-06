@@ -29,3 +29,107 @@ fn writefile_(path: str, data: str) -> int {
 fn quit(code: int) {
     exit(code)
 }
+
+// --- fd-level files: the io.Reader/Writer impls ----------------------
+// open/create return PathError-shaped messages ("open <path>: <errno
+// text>"); fds are plain ints under the hood.
+import "std/errors"
+
+extern fn rt_open_read(path: str) -> int
+
+extern fn rt_open_write(path: str) -> int
+
+extern fn rt_fd_read(fd: int, b: []byte) -> int
+
+extern fn rt_fd_write(fd: int, b: []byte) -> int
+
+extern fn rt_fd_close(fd: int) -> int
+
+extern fn rt_remove(path: str) -> int
+
+extern fn rt_errstr(code: int) -> str
+
+/// File is an open fd — implements io.Reader/Writer/Closer.
+struct File { fd: int }
+
+/// open a file for reading; [File, err] (PathError-shaped message).
+fn open(path: str) -> [File, err] {
+    fd := rt_open_read(path)
+    if fd < 0 {
+        return File{fd: -1}, errors.new("open " + path + ": " + rt_errstr(-fd))
+    }
+    return File{fd: fd}, nil
+}
+
+/// create/truncate a file for writing; [File, err].
+fn create(path: str) -> [File, err] {
+    fd := rt_open_write(path)
+    if fd < 0 {
+        return File{fd: -1}, errors.new("open " + path + ": " + rt_errstr(-fd))
+    }
+    return File{fd: fd}, nil
+}
+
+/// read into b; 0,eof at end; [n, err].
+fn (f ref File) read(b: []byte) -> [int, err] {
+    n := rt_fd_read(f.fd, b)
+    if n < 0 {
+        return 0, errors.new("read: " + rt_errstr(-n))
+    }
+    if n == 0 {
+        if len(b) == 0 {
+            return 0, nil
+        }
+        return 0, io_eof()
+    }
+    return n, nil
+}
+
+/// write b fully's worth of one call; [n, err].
+fn (f ref File) write(b: []byte) -> [int, err] {
+    n := rt_fd_write(f.fd, b)
+    if n < 0 {
+        return 0, errors.new("write: " + rt_errstr(-n))
+    }
+    return n, nil
+}
+
+/// close the fd; nil on success, err on failure — deferred write
+/// errors (full fs, NFS) surface here, so the result is real.
+fn (f ref File) close() -> err {
+    r := rt_fd_close(f.fd)
+    if r < 0 {
+        return errors.new("close: " + rt_errstr(-r))
+    }
+    return nil
+}
+
+// io.eof without an io import — os is io's substrate, not its client.
+// The interned registry keeps the sentinel identical to io.eof()'s.
+fn io_eof() -> err {
+    return errors.new("EOF")
+}
+
+/// stdin — process standard input as an io.Reader.
+fn stdin() -> File {
+    return File{fd: 0}
+}
+
+/// stdout — process standard output as an io.Writer.
+fn stdout() -> File {
+    return File{fd: 1}
+}
+
+/// stderr — process standard error as an io.Writer.
+fn stderr() -> File {
+    return File{fd: 2}
+}
+
+/// remove deletes a file; nil on success, err on failure.
+fn remove(path: str) -> err {
+    r := rt_remove(path)
+    if r == 0 {
+        return nil
+    }
+    return errors.new("remove " + path + ": " + rt_errstr(-r))
+}
