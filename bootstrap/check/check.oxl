@@ -1325,6 +1325,13 @@ fn env_get(ck: ref Ck, e: ref Env, n: str) -> int {
         }
         i = i - 1
     }
+    gn := qname(ck.cur_mod, n)
+    if gn != n && collections.map_has(ck.globals, gn) {
+        [v3, err3] = collections.map_get(ck.globals, gn)
+        if err3 == nil {
+            return v3
+        }
+    }
     if collections.map_has(ck.globals, n) {
         [v2, err2] = collections.map_get(ck.globals, n)
         if err2 == nil {
@@ -2296,7 +2303,10 @@ fn reg_global(ck: mut Ck, name: str, ty: ref parser.Node, init: ref parser.Node)
         assignable(ck, want, it)
         t = want
     }
-    collections.map_set(ck.globals, name, t)
+    // package-qualified key — two packages can share a global name
+    // (crypto/{md5,sha256} both keep P2/KT); Rust qualifies the decl
+    // itself in qualify_item
+    collections.map_set(ck.globals, qname(ck.cur_mod, name), t)
 }
 
 fn reg_sigs(ck: mut Ck, its: []It) {
@@ -2328,7 +2338,7 @@ fn register(ck: mut Ck, its: []It) {
 
 // ---------- builtins ----------
 fn is_builtin(n: str) -> bool {
-    return n == "print" || n == "println" || n == "mkchan" || n == "send" || n == "recv" || n == "close" || n == "sleep" || n == "msleep" || n == "new" || n == "mkslice" || n == "push" || n == "assert" || n == "itoa" || n == "argc" || n == "argv" || n == "len" || n == "byteat" || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf" || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32" || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open" || n == "str" || n == "sqlite_exec" || n == "sqlite_exec_bind" || n == "set_rcvtimo" || n == "set_sndtimo" || n == "sqlite_query" || n == "sqlite_close" || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared" || n == "sget" || n == "sset" || n == "scas" || n == "sadd" || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi" || n == "itof" || n == "atof" || n == "ftoa"
+    return n == "print" || n == "println" || n == "mkchan" || n == "send" || n == "recv" || n == "close" || n == "sleep" || n == "msleep" || n == "new" || n == "mkslice" || n == "push" || n == "assert" || n == "itoa" || n == "argc" || n == "argv" || n == "len" || n == "byteat" || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf" || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32" || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open" || n == "str" || n == "sqlite_exec" || n == "sqlite_exec_bind" || n == "set_rcvtimo" || n == "set_rcvtimo_ms" || n == "set_sndtimo" || n == "sqlite_query" || n == "sqlite_close" || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared" || n == "sget" || n == "sset" || n == "scas" || n == "sadd" || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi" || n == "itof" || n == "atof" || n == "ftoa"
 }
 
 fn is_susp_builtin(n: str) -> bool {
@@ -2437,6 +2447,17 @@ fn field_expr(ck: mut Ck, obj: ref parser.Node, name: str, env: mut Env) -> int 
                 return tn(ck, k_enum(), path)
             }
         }
+    }
+    // `pkg.fn` in value position — the chain head names an import, so
+    // the whole thing is a fn reference, not member access (fn values
+    // take the ident path's typarams/[T,err] guards and fnvals mark)
+    hd := base
+    hi := find(base, ".")
+    if hi >= 0 {
+        hd = substr(base, 0, hi)
+    }
+    if len(base) > 0 && len(alias_stem(ck, hd)) > 0 {
+        return ident(ck, base + "." + name, env)
     }
     t := expr(ck, obj, env)
     sn := ""
@@ -3354,7 +3375,7 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             }
             return t_str(ck)
         }
-        if qn == "sqlite_exec" || qn == "sqlite_exec_bind" || qn == "set_rcvtimo" || qn == "set_sndtimo" {
+        if qn == "sqlite_exec" || qn == "sqlite_exec_bind" || qn == "set_rcvtimo" || qn == "set_rcvtimo_ms" || qn == "set_sndtimo" {
             al := args
             for al != nil {
                 expr(ck, al.v, env)

@@ -1,0 +1,62 @@
+package main
+
+// S4 acceptance: std/hash — fnv1a32/64, adler32, crc32 known answers;
+// incremental write == one-shot.
+import "std/hash"
+
+import "std/encoding/binary"
+
+import "std/testing"
+
+import "std/errors"
+
+fn ck(e: err, m: str) {
+    testing.expect(e == nil, m + ": " + errors.msg(e))
+}
+
+fn test_fnv() {
+    testing.expect(hash.fnv1a32("" as []byte) == 2166136261, "fnv1a32 empty")
+    testing.expect(hash.fnv1a32("a" as []byte) == 3826002220, "fnv1a32 a")
+    testing.expect(hash.fnv1a32("abc" as []byte) == 440920331, "fnv1a32 abc")
+    testing.expect(hash.fnv1a64("a" as []byte) == 0 - 5808556873153909620, "fnv1a64 a")
+    testing.expect(hash.fnv1a64("abc" as []byte) == 0 - 1792535898324117685, "fnv1a64 abc")
+}
+
+fn test_adler_crc() {
+    testing.expect(hash.adler32("Wikipedia" as []byte) == 300286872, "adler32 Wikipedia")
+    testing.expect(hash.adler32("" as []byte) == 1, "adler32 empty")
+    testing.expect(hash.crc32("123456789" as []byte) == 3421780262, "crc32 123456789")
+    testing.expect(hash.crc32("" as []byte) == 0, "crc32 empty")
+}
+
+fn test_incremental() {
+    h := hash.new_fnv1a()
+    [n1, e1] = h.write("ab" as []byte)
+    ck(e1, "fnv write 1")
+    testing.expect(n1 == 2, "fnv write count")
+    [n2, e2] = h.write("c" as []byte)
+    ck(e2, "fnv write 2")
+    s := h.sum(nil)
+    testing.expect(len(s) == 4, "fnv sum is 4 bytes")
+    testing.expect(binary.be_u32(s, 0) == 440920331, "fnv incremental == one-shot")
+    h.reset()
+    [_r, _e] = h.write("" as []byte)
+    s2 := h.sum(nil)
+    testing.expect(binary.be_u32(s2, 0) == 2166136261, "fnv reset")
+
+    // fnv64's state goes negative (offset basis > int63) — sum must
+    // emit the unsigned pattern: "a" -> af63dc4c8601ec8c big-endian
+    h64 := hash.new_fnv1a64()
+    [_x, _y] = h64.write("a" as []byte)
+    s64 := h64.sum(nil)
+    testing.expect(binary.be_u64(s64, 0) == 0 - 5808556873153909620, "fnv64 sum keeps unsigned pattern")
+
+    c := hash.new_crc32()
+    [_a, _b] = c.write("12345" as []byte)
+    [_c, _d] = c.write("6789" as []byte)
+    cs := c.sum(nil)
+    testing.expect(binary.be_u32(cs, 0) == 3421780262, "crc incremental == one-shot")
+    testing.expect(c.blocksize() == 4, "crc blocksize")
+}
+
+fn main() {}

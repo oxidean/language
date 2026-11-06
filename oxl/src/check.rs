@@ -268,7 +268,7 @@ const BUILTINS: &[&str] = &[
     "assert", "itoa", "argc", "argv", "len", "byteat", "substr", "find", "atoi",
     "mkbuf", "bufstr", "poke8", "poke16", "poke32", "htons", "htonl",
     "cstr", "str", "sqlite_open", "sqlite_exec", "sqlite_exec_bind",
-    "sqlite_query", "sqlite_close", "set_rcvtimo", "set_sndtimo",
+    "sqlite_query", "sqlite_close", "set_rcvtimo", "set_rcvtimo_ms", "set_sndtimo",
     "readfile", "writefile", "exit", "mkshared", "sget", "sset", "scas", "sadd",
     "now", "now_ms", "usleep", "ftoi", "itof", "atof", "ftoa",
 ];
@@ -2217,7 +2217,7 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::Own(Box::new(Ty::Unknown));
                 }
-                "sqlite_exec" | "sqlite_exec_bind" | "set_rcvtimo" | "set_sndtimo" => {
+                "sqlite_exec" | "sqlite_exec_bind" | "set_rcvtimo" | "set_rcvtimo_ms" | "set_sndtimo" => {
                     for a in args {
                         self.expr(a, env);
                     }

@@ -216,6 +216,8 @@ int64_t rt_sget(RtShared *s);
 void rt_sset(RtShared *s, int64_t v);
 int64_t rt_scas(RtShared *s, int64_t expected, int64_t v); /* CAS → old */
 int64_t rt_sadd(RtShared *s, int64_t delta);               /* fetch+add → old */
+RtShared *rt_latch_alloc(void);                                /* pooled close-latch cell */
+void rt_latch_free(RtShared *s);                               /* return a closed latch to the pool */
 int64_t rt_now(void);          /* unix seconds */
 int64_t rt_now_ms(void);       /* unix ms */
 void rt_usleep(int64_t usecs);
@@ -328,13 +330,16 @@ int64_t rt_strlen(const char *s);                         /* strlen, name-safe *
 int64_t rt_sock_open(int64_t domain, int64_t ty, int64_t proto); /* socket() */
 int64_t rt_sock_listen(int64_t fd, int64_t backlog);             /* listen() */
 int64_t rt_sock_accept(int64_t fd);                            /* accept() */
-int64_t rt_sock_read(int64_t fd, void *buf, int64_t n);  /* read | recv, portable */
-int64_t rt_sock_write(int64_t fd, const char *buf, int64_t n); /* write | send */
+int64_t rt_sock_read(int64_t fd, RtSlice b);  /* read | recv, portable, -errno */
+int64_t rt_sock_write(int64_t fd, RtSlice b); /* write | send, -errno */
+int64_t rt_sock_port(int64_t fd);              /* getsockname -> bound port */
 int64_t rt_sock_close(int64_t fd);                       /* close | closesocket */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs);      /* SO_RCVTIMEO, portable */
+int64_t rt_set_rcvtimo_ms(int64_t fd, int64_t ms);
 int64_t rt_set_sndtimo(int64_t fd, int64_t secs);      /* SO_SNDTIMEO, portable */
 int64_t rt_set_reuseaddr(int64_t fd);                  /* SO_REUSEADDR, portable */
 int64_t rt_bind_any(int64_t fd, int64_t port);         /* bind INADDR_ANY, portable */
+int64_t rt_sock_connect_ipv4(int64_t fd, int64_t ip_h32, int64_t port, int64_t tmo_ms); /* timed IPv4 dial */
 int64_t rt_htons(int64_t v);
 int64_t rt_htonl(int64_t v);
 #endif /* OXL_NET */

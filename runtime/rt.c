@@ -18,6 +18,7 @@
 #ifndef _WIN32
 #include <dirent.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -1133,6 +1134,50 @@ int64_t rt_scas(RtShared *s, int64_t expected, int64_t v) {
 /* atomic add — returns the value before the add */
 int64_t rt_sadd(RtShared *s, int64_t delta) {
     return __sync_fetch_and_add(&s->val, delta);
+}
+
+/* ---------------- Conn/Listener latch cells ----------------
+ * One RtShared per socket would xmalloc a cell per connection with no
+ * free path — a long-running server leaks a cell per accept/dial.
+ * Closed latches return to a bounded free list for reuse. The cell
+ * value doubles as a generation word — even while open, odd once
+ * closed — and the owning handle CASes its own generation on close, so
+ * a stale copy holding an older generation can never consume a
+ * recycled latch. Pooled cells are kept, never freed: a stale copy may
+ * CAS the cell at any time, so a real free() would UAF; peak live
+ * usage bounds the pool.
+ */
+#define LATCH_POOL_CAP 4096
+static RtShared *latch_pool[LATCH_POOL_CAP];
+static int latch_pool_n;
+static oxl_mutex_t latch_pool_mu = OXL_MUTEX_INIT;
+
+RtShared *rt_latch_alloc(void) {
+    oxl_mu_lock(&latch_pool_mu);
+    if (latch_pool_n > 0) {
+        RtShared *s = latch_pool[--latch_pool_n];
+        oxl_mu_unlock(&latch_pool_mu);
+        return s;
+    }
+    oxl_mu_unlock(&latch_pool_mu);
+    return rt_mkshared(0);
+}
+
+/* the winning close calls this with the cell already flipped to
+   `gen|1`; pushing bumps it to the next even generation so every
+   outstanding copy's CAS fails from here on */
+void rt_latch_free(RtShared *s) {
+    oxl_mu_lock(&latch_pool_mu);
+    /* atomic: a stale copy's CAS doesn't take this mutex — a plain
+       store would race it; val goes g|1 → g+2, next even generation */
+    rt_sadd(s, 1);
+    if (latch_pool_n < LATCH_POOL_CAP) {
+        latch_pool[latch_pool_n++] = s;
+    }
+    /* overflow: keep the cell out of the pool rather than free() —
+       stale copies may still CAS it; the leak stays bounded by the
+       burst above the cap */
+    oxl_mu_unlock(&latch_pool_mu);
 }
 
 /* ---------------- time ---------------- */
@@ -2559,6 +2604,78 @@ int64_t rt_bind_any(int64_t fd, int64_t port) {
     return bind((oxl_sock_t)fd, (struct sockaddr *)&a, sizeof a);
 }
 
+/* connect to a dotted-quad IPv4 (host-order u32) with a millisecond
+ * timeout — nonblocking + poll-for-writable, because a raw blocking
+ * connect has no timeout knob and a silently dropped SYN would hang
+ * the caller forever. Blocking mode is restored before returning;
+ * -errno convention, ETIMEDOUT when the deadline wins. */
+int64_t rt_sock_connect_ipv4(int64_t fd, int64_t ip_h32, int64_t port, int64_t tmo_ms) {
+    struct sockaddr_in a;
+    int rc, err = 0;
+    socklen_t el = sizeof err;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = htonl((uint32_t)ip_h32);
+#ifdef _WIN32
+    {
+        u_long nb = 1;
+        WSAPOLLFD pfd;
+        ioctlsocket((oxl_sock_t)fd, FIONBIO, &nb);
+        rc = connect((oxl_sock_t)fd, (struct sockaddr *)&a, sizeof a);
+        if (rc == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+            pfd.fd = (SOCKET)fd;
+            pfd.events = POLLOUT;
+            pfd.revents = 0;
+            rc = WSAPoll(&pfd, 1, (INT)tmo_ms);
+            if (rc == 1) {
+                getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR, (char *)&err, &el);
+                rc = err == 0 ? 0 : SOCKET_ERROR;
+            } else if (rc == 0) {
+                err = WSAETIMEDOUT;
+                rc = SOCKET_ERROR;
+            } else {
+                err = WSAGetLastError();
+                rc = SOCKET_ERROR;
+            }
+        } else if (rc == SOCKET_ERROR) {
+            err = WSAGetLastError();
+        }
+        nb = 0;
+        ioctlsocket((oxl_sock_t)fd, FIONBIO, &nb);
+        return rc == 0 ? 0 : -(int64_t)(err ? err : WSAGetLastError());
+    }
+#else
+    {
+        int fl = fcntl((int)fd, F_GETFL, 0);
+        struct pollfd pfd;
+        fcntl((int)fd, F_SETFL, fl | O_NONBLOCK);
+        rc = connect((int)fd, (struct sockaddr *)&a, sizeof a);
+        if (rc < 0 && errno == EINPROGRESS) {
+            pfd.fd = (int)fd;
+            pfd.events = POLLOUT;
+            pfd.revents = 0;
+            rc = poll(&pfd, 1, (int)tmo_ms);
+            if (rc == 1) {
+                err = 0;
+                getsockopt((int)fd, SOL_SOCKET, SO_ERROR, &err, &el);
+                rc = err == 0 ? 0 : -1;
+            } else if (rc == 0) {
+                err = ETIMEDOUT;
+                rc = -1;
+            } else {
+                err = errno;
+                rc = -1;
+            }
+        } else if (rc < 0) {
+            err = errno;
+        }
+        fcntl((int)fd, F_SETFL, fl);
+        return rc == 0 ? 0 : -(int64_t)(err ? err : errno);
+    }
+#endif
+}
+
 /* portable receive timeout — SO_RCVTIMEO's constant differs by OS */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
 #ifdef _WIN32
@@ -2568,6 +2685,20 @@ int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
     struct timeval tv;
     tv.tv_sec = (time_t)secs;
     tv.tv_usec = 0;
+    return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#endif
+}
+
+/* ms-granularity receive timeout — the seconds form can't express
+ * the subsecond budget a deadline-driven caller needs */
+int64_t rt_set_rcvtimo_ms(int64_t fd, int64_t ms) {
+#ifdef _WIN32
+    DWORD tv = (DWORD)ms;
+    return setsockopt((oxl_sock_t)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+#else
+    struct timeval tv;
+    tv.tv_sec = (time_t)(ms / 1000);
+    tv.tv_usec = (suseconds_t)(ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 #endif
 }
@@ -2609,8 +2740,21 @@ int64_t rt_strlen(const char *s) { return (int64_t)strlen(s); }
  * with the .oxl-emitted prototypes, and on POSIX they're only safe
  * while <sys/socket.h> stays out of scope. The runtime owns every
  * socket-name binding (same reason rt_sigpipe_ignore exists). */
+/* macOS/BSD lack MSG_NOSIGNAL — SO_NOSIGPIPE on the socket is the
+ * per-peer equivalent; a no-op where the option doesn't exist */
+static void rt_nosigpipe(int64_t fd) {
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    setsockopt((oxl_sock_t)fd, SOL_SOCKET, SO_NOSIGPIPE, (const char *)&one, sizeof one);
+#else
+    (void)fd;
+#endif
+}
+
 int64_t rt_sock_open(int64_t domain, int64_t ty, int64_t proto) {
-    return (int64_t)socket((int)domain, (int)ty, (int)proto);
+    int64_t fd = (int64_t)socket((int)domain, (int)ty, (int)proto);
+    if (fd >= 0) rt_nosigpipe(fd);
+    return fd;
 }
 
 int64_t rt_sock_listen(int64_t fd, int64_t backlog) {
@@ -2619,26 +2763,48 @@ int64_t rt_sock_listen(int64_t fd, int64_t backlog) {
 
 /* NULL addr/len: the caller never reads the peer address */
 int64_t rt_sock_accept(int64_t fd) {
-    return (int64_t)accept((oxl_sock_t)fd, NULL, NULL);
+    int64_t c = (int64_t)accept((oxl_sock_t)fd, NULL, NULL);
+    if (c >= 0) rt_nosigpipe(c);
+    return c;
 }
 
 /* POSIX read/write/close have no socket counterpart on Win32
  * (recv/send/closesocket live in ws2_32), so .oxl code names these
- * instead of libc directly */
-int64_t rt_sock_read(int64_t fd, void *buf, int64_t n) {
+ * instead of libc directly. RtSlice + -errno: the S2 fd contract. */
+int64_t rt_sock_read(int64_t fd, RtSlice b) {
 #ifdef _WIN32
-    return recv((SOCKET)fd, (char *)buf, (int)n, 0);
+    int n = recv((SOCKET)fd, (char *)b.ptr, (int)b.len, 0);
+    return n < 0 ? -(int64_t)WSAGetLastError() : (int64_t)n;
 #else
-    return read((int)fd, buf, (size_t)n);
+    ssize_t n = read((int)fd, b.ptr, (size_t)b.len);
+    return n < 0 ? -(int64_t)errno : (int64_t)n;
 #endif
 }
 
-int64_t rt_sock_write(int64_t fd, const char *buf, int64_t n) {
+int64_t rt_sock_write(int64_t fd, RtSlice b) {
 #ifdef _WIN32
-    return send((SOCKET)fd, (const char *)buf, (int)n, 0);
+    int n = send((SOCKET)fd, (const char *)b.ptr, (int)b.len, 0);
+    return n < 0 ? -(int64_t)WSAGetLastError() : (int64_t)n;
 #else
-    return write((int)fd, buf, (size_t)n);
+    /* send() not write(): MSG_NOSIGNAL suppresses SIGPIPE on a reset
+     * peer so the caller gets -EPIPE instead of a killed process;
+     * SO_NOSIGPIPE (rt_nosigpipe) covers platforms without the flag */
+#ifdef MSG_NOSIGNAL
+    ssize_t n = send((int)fd, b.ptr, (size_t)b.len, MSG_NOSIGNAL);
+#else
+    ssize_t n = send((int)fd, b.ptr, (size_t)b.len, 0);
 #endif
+    return n < 0 ? -(int64_t)errno : (int64_t)n;
+#endif
+}
+
+/* bound port back out of a socket — ephemeral binds (port 0) need
+ * getsockname to learn what the kernel picked */
+int64_t rt_sock_port(int64_t fd) {
+    struct sockaddr_in a;
+    socklen_t al = sizeof a;
+    if (getsockname((oxl_sock_t)fd, (struct sockaddr *)&a, &al) != 0) return -1;
+    return (int64_t)ntohs(a.sin_port);
 }
 
 int64_t rt_sock_close(int64_t fd) {

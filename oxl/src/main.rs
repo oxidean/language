@@ -617,7 +617,25 @@ fn qualify_expr(
                 qualify_expr(v, renames, aliases, locals, used);
             }
         }
-        ast::ExprKind::Field { obj, .. } => qualify_expr(obj, renames, aliases, locals, used),
+        ast::ExprKind::Field { obj, name } => {
+            // `pkg.member` in value position (fn values, unit enum
+            // variants): flatten to the dotted ident the checker keys
+            // on — same canonicalization as call targets — so the
+            // import counts as used (M3)
+            let flat = match &obj.kind {
+                ast::ExprKind::Ident(on)
+                    if !local(locals, on) && aliases.contains_key(on) =>
+                {
+                    Some(map_name(&format!("{on}.{name}"), renames, aliases, used))
+                }
+                _ => None,
+            };
+            if let Some(m) = flat {
+                e.kind = ast::ExprKind::Ident(m);
+            } else {
+                qualify_expr(obj, renames, aliases, locals, used);
+            }
+        }
         ast::ExprKind::Index { obj, idx } => {
             qualify_expr(obj, renames, aliases, locals, used);
             qualify_expr(idx, renames, aliases, locals, used);

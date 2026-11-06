@@ -622,6 +622,13 @@ fn gx_lookup(g: mut G, n: str) -> int {
     if t >= 0 {
         return t
     }
+    gn2 := check.qname(g.ck.cur_mod, n)
+    if gn2 != n && collections.map_has(g.ck.globals, gn2) {
+        [v2, err2] = collections.map_get(g.ck.globals, gn2)
+        if err2 == nil {
+            return v2
+        }
+    }
     if collections.map_has(g.ck.globals, n) {
         [v, err] = collections.map_get(g.ck.globals, n)
         if err == nil {
@@ -1098,6 +1105,27 @@ fn xty_field(g: mut G, obj: ref parser.Node, name: str) -> int {
         if ev.ok {
             return check.tn(g.ck, check.k_enum(), ev.en)
         }
+        // `pkg.fn` in value position — the path resolves to a fn, not
+        // member access (gxfield's module-path arm; checker mirrors it
+        // via field_expr -> ident). Same retk/typarams guards.
+        fi2 := gfn(g, base + "." + name)
+        if fi2 >= 0 {
+            sig := g.ck.fnsv[fi2]
+            if sig.typarams == nil && sig.retk != 2 {
+                r1 := sig.ret1
+                if sig.retk == 0 {
+                    r1 = check.t_void(g.ck)
+                }
+                return check.tm(g.ck, check.k_fn(), -1, sig.params, r1, "")
+            }
+        }
+        gq := check.resolve_named(g.ck, base + "." + name)
+        if collections.map_has(g.ck.globals, gq) {
+            [gt2, gerr2] = collections.map_get(g.ck.globals, gq)
+            if gerr2 == nil {
+                return gt2
+            }
+        }
     }
     ot := xty(g, obj)
     sn := ""
@@ -1482,6 +1510,11 @@ fn giface_wrap_v(g: mut G, e: ref parser.Node, v: str, w: str, implkey: str) -> 
 fn gconv_v(g: mut G, e: ref parser.Node, v: str, want: int) -> str {
     w := gsub(g, want)
     got := gsub(g, xty(g, e))
+    // nil (err-typed) into a slice slot: the zero RtSlice — bare `0`
+    // isn't a valid struct initializer (Rust conv_v mirrors)
+    if got >= 0 && tyk(g, got) == check.k_err() && w >= 0 && tyk(g, w) == check.k_slice() {
+        return "(RtSlice){ 0, 0, 0, 0 }"
+    }
     // own []T -> []T borrow coercion outside call args (the arg loop
     // derefs via this same arm): own slices are RtSlice* where the
     // slot wants RtSlice
@@ -1964,7 +1997,7 @@ fn gbuiltin(name: str, argvs: ref GAv) -> str {
     if name == "byteat" || name == "substr" || name == "find" || name == "bufstr" || name == "poke8" || name == "poke16" || name == "poke32" || name == "sqlite_exec" || name == "sqlite_query" {
         return "rt_" + name + "(" + j + ")"
     }
-    if name == "atoi" || name == "mkbuf" || name == "htons" || name == "htonl" || name == "cstr" || name == "str" || name == "sqlite_open" || name == "sqlite_close" || name == "sqlite_exec_bind" || name == "set_rcvtimo" || name == "set_sndtimo" || name == "readfile" || name == "writefile" || name == "exit" || name == "mkshared" || name == "sget" || name == "sset" || name == "scas" || name == "sadd" || name == "now" || name == "now_ms" || name == "usleep" || name == "atof" || name == "ftoa" {
+    if name == "atoi" || name == "mkbuf" || name == "htons" || name == "htonl" || name == "cstr" || name == "str" || name == "sqlite_open" || name == "sqlite_close" || name == "sqlite_exec_bind" || name == "set_rcvtimo" || name == "set_rcvtimo_ms" || name == "set_sndtimo" || name == "readfile" || name == "writefile" || name == "exit" || name == "mkshared" || name == "sget" || name == "sset" || name == "scas" || name == "sadd" || name == "now" || name == "now_ms" || name == "usleep" || name == "atof" || name == "ftoa" {
         return "rt_" + name + "(" + j + ")"
     }
     if name == "ftoi" {
@@ -2017,15 +2050,16 @@ fn gxguard(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> str {
     return "fr->" + fd
 }
 
-fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> str {
+fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node, e: ref parser.Node) -> str {
     lt := xty(g, l)
     lv := gx(g, l)
     rv := gx(g, r)
     // byte arithmetic wraps mod 256 — C would promote to int and
-    // carry bits the oxl type says don't exist. Any byte operand
-    // makes it byte arithmetic (`255 as byte + 1` wraps to 0).
+    // carry bits the oxl type says don't exist. Wrap iff the result
+    // ty is byte (byte op byte): byte op int widens per check, so
+    // `b[i] * 65536` must not truncate (Rust gxbin mirrors).
     ltk := tyk(g, gdt(g, gsub(g, lt)))
-    if ltk == check.k_byte() && (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^") {
+    if tyk(g, gdt(g, gsub(g, xty(g, e)))) == check.k_byte() && (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^") {
         return "((uint8_t)(" + lv + " " + op + " " + rv + "))"
     }
     if op == "+" && ltk == check.k_str() {
@@ -2056,6 +2090,12 @@ fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> str {
             }
             return "(" + le + " " + op + " (void*)" + re + ")"
         }
+    }
+    if op == "*" && ltk == check.k_int() {
+        // signed int64 overflow is UB in C — int mul wraps in the
+        // language, so go through unsigned where -O2 can't exploit
+        // it (stdlib fnv relies on the wrap; Rust gxbin mirrors)
+        return "((int64_t)((uint64_t)(" + lv + ") * (uint64_t)(" + rv + ")))"
     }
     return "(" + lv + " " + op + " " + rv + ")"
 }
@@ -2088,6 +2128,9 @@ fn gxfield(g: mut G, obj: ref parser.Node, name: str) -> str {
                 }
                 return "(RtFnv){ 0, (void*)o_fnv_wrap_" + cname(qn) + " }"
             }
+        }
+        if collections.map_has(g.ck.globals, qn) {
+            return "o_g_" + cname(qn)
         }
     }
     o := gx(g, obj)
@@ -2253,7 +2296,7 @@ fn gx(g: mut G, e: ref parser.Node) -> str {
         parser.Node.Field{obj, name} => gxfield(g, obj, name)
         parser.Node.Lit{obj, fields} => gxlit(g, obj, fields)
         parser.Node.As{e, ty} => gxas(g, e, ty)
-        parser.Node.Bin{op, l, r} => gxbin(g, op, l, r)
+        parser.Node.Bin{op, l, r} => gxbin(g, op, l, r, e)
         parser.Node.Un{op, e} => gxun(g, op, e)
         parser.Node.Match{e, arms} => gmatch(g, e, arms)
         parser.Node.Index{obj, idx} => gxindex(g, obj, idx)
@@ -2282,6 +2325,10 @@ fn gxname(g: mut G, n: str) -> str {
     }
     if g_local(g, n) {
         return n
+    }
+    gn3 := check.qname(g.ck.cur_mod, n)
+    if gn3 != n && collections.map_has(g.ck.globals, gn3) {
+        return "o_g_" + cname(gn3)
     }
     if collections.map_has(g.ck.globals, n) {
         return "o_g_" + cname(n)
@@ -2339,9 +2386,21 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
             sig = sig + ", " + gcty(g, il.v)
             il = il.next
         }
+        // conv each arg to the declared fn param ty — raw argvs skip
+        // nil->slice / own->slice coercion (Rust fn-value path same)
         argl := ""
-        if argvs != nil {
-            argl = ", " + gav_join(argvs)
+        il2 := g.ck.tyv[ft].args
+        al2 := args
+        av2 := argvs
+        for al2 != nil {
+            v := av2.v
+            if il2 != nil {
+                v = gconv_v(g, al2.v, v, il2.v)
+                il2 = il2.next
+            }
+            argl = argl + ", " + v
+            al2 = al2.next
+            av2 = av2.next
         }
         return "({ RtFnv _fv = " + fv + "; ((" + ret_c + " (*)(" + sig + "))_fv.fp)(_fv.env" + argl + "); })"
     }
@@ -2427,6 +2486,12 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
             if collections.map_has(g.ck.structs, q) {
                 return "({ struct o_s_" + cname(q) + " *_nb = rt_alloc_own(sizeof(struct o_s_" + cname(q) + ")); __builtin_memset(_nb, 0, sizeof(struct o_s_" + cname(q) + ")); _nb; })"
             }
+        }
+        // new(slice) — deep-copy header+backing to heap so the own
+        // slice can outlive the scope arena (Rust emit mirrors)
+        st2 := xty(g, args.v)
+        if tyk(g, st2) == check.k_slice() {
+            return "rt_slice_own(" + argvs.v + ", sizeof(" + gcty(g, tyi(g, st2)) + "))"
         }
         ct := gcty(g, xty(g, args.v))
         v := argvs.v
@@ -4511,7 +4576,7 @@ fn gemit_static(g: mut G, i: int) {
             if ty == nil {
                 t = xty(g, init)
             }
-            g.head = push(g.head, "static " + gcty(g, t) + " o_g_" + cname(name) + ";")
+            g.head = push(g.head, "static " + gcty(g, t) + " o_g_" + cname(check.qname(g.ck.cur_mod, name)) + ";")
         }
         _ => {
         }
@@ -4833,8 +4898,8 @@ fn genall(g: mut G) -> str {
                     s := gusnap(g)
                     gemit_static(g, i)
                     gudrain(g, ui, s)
-                    gdef(g, ui, "o_g_" + cname(name))
-                    g.units[ui].root = 1 - ghasdot(name)
+                    gdef(g, ui, "o_g_" + cname(check.qname(g.its[i].mod, name)))
+                    g.units[ui].root = 1 - ghasdot(check.qname(g.its[i].mod, name))
                 }
                 _ => {
                 }
@@ -4918,7 +4983,7 @@ fn genall(g: mut G) -> str {
                         s := gusnap(g)
                         v := gx(g, init)
                         v = gconv_v(g, init, v, t)
-                        g.ginit = push(g.ginit, "    o_g_" + cname(name) + " = " + v + ";")
+                        g.ginit = push(g.ginit, "    o_g_" + cname(check.qname(g.its[i].mod, name)) + " = " + v + ";")
                         gudrain_init(g, ui, s)
                     }
                 }

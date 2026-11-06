@@ -1,0 +1,141 @@
+package main
+
+// S4 acceptance: net dial/listen/accept over loopback — echo round-trip,
+// refused dial returns err, listener close. The server binds an
+// ephemeral port (no fixed-port collisions) and its accept carries a
+// deadline, so `oxl test` — which never runs main — can't be pinned by
+// a server blocked in accept when the test scope joins.
+import "std/net"
+
+import "std/testing"
+
+import "std/errors"
+
+fn ck(e: err, m: str) {
+    testing.expect(e == nil, m + ": " + errors.msg(e))
+}
+
+fn echo_once(port: shared, ready: shared) {
+    [l, le] = net.listen(0)
+    if le != nil {
+        sset(ready, -1)
+        return
+    }
+    sset(port, l.port())
+    sset(ready, 1)
+    // SO_RCVTIMEO doubles as the accept deadline — a missing client
+    // turns into an accept error instead of a join that never lands
+    set_rcvtimo(l.rawfd(), 10)
+    [c, ae] = l.accept()
+    if ae != nil {
+        l.close()
+        return
+    }
+    b := mkslice(byte, 64)
+    [n, e] = c.read(b)
+    if n > 0 {
+        [nw, we] = c.write(b[0:n])
+    }
+    c.close()
+    l.close()
+}
+
+fn dial_retry(port: int) -> [net.Conn, err] {
+    tries := 0
+    for tries < 40 {
+        [c, e] = net.dial_timeout("127.0.0.1", port, 250)
+        if e == nil {
+            return c, nil
+        }
+        usleep(50000)
+        tries = tries + 1
+    }
+    // last attempt carries the real error out
+    return net.dial_timeout("127.0.0.1", port, 250)
+}
+
+fn test_echo() {
+    port := mkshared(0)
+    ready := mkshared(0)
+    spawnBlocking echo_once(port, ready)
+    i := 0
+    for sget(ready) == 0 && i < 500 {
+        usleep(10000)
+        i = i + 1
+    }
+    testing.expect(sget(ready) == 1, "echo listener bound")
+    if sget(ready) != 1 {
+        return
+    }
+    [c, e] = dial_retry(sget(port))
+    ck(e, "dial loopback")
+    if e != nil {
+        return
+    }
+    [nw, we] = c.write("ping" as []byte)
+    ck(we, "echo write")
+    testing.expect(nw == 4, "echo write count")
+    b := mkslice(byte, 64)
+    [nr, re] = c.read(b)
+    ck(re, "echo read")
+    got := b[0:nr] as str
+    testing.expect(got == "ping", "echo round-trip got " + got)
+    c.close()
+}
+
+fn test_closer() {
+    // close through an io.Closer box, then through the original — the
+    // shared latch must fire exactly once: the boxed copy owns the
+    // close, the original's stale copy becomes a no-op. A second dial
+    // likely lands the same descriptor; a real double-close would
+    // kill it.
+    port := mkshared(0)
+    ready := mkshared(0)
+    spawnBlocking echo_once(port, ready)
+    i := 0
+    for sget(ready) == 0 && i < 500 {
+        usleep(10000)
+        i = i + 1
+    }
+    [c, e] = dial_retry(sget(port))
+    ck(e, "closer dial")
+    cl := c.ascloser()
+    ce := cl.close()
+    testing.expect(ce == nil, "boxed closer close")
+    // the boxed close must have reached the descriptor: a write on the
+    // stale original fails EBADF — if the latch let the first close
+    // skip the fd entirely this write would land on the wire
+    [nw, we] = c.write("x" as []byte)
+    testing.expect(we != nil, "write after boxed close fails")
+    oe := c.close()
+    testing.expect(oe == nil, "original close after boxed is safe")
+    // second server+conn: the kernel hands out the just-freed fd —
+    // the stale original's no-op close must leave it untouched
+    port2 := mkshared(0)
+    ready2 := mkshared(0)
+    spawnBlocking echo_once(port2, ready2)
+    i = 0
+    for sget(ready2) == 0 && i < 500 {
+        usleep(10000)
+        i = i + 1
+    }
+    [c2, e2] = dial_retry(sget(port2))
+    ck(e2, "redial after boxed close")
+    [nw2, we2] = c2.write("z" as []byte)
+    testing.expect(we2 == nil && nw2 == 1, "reused fd still live")
+    c2.close()
+}
+
+fn test_refused() {
+    [c, e] = net.dial_timeout("127.0.0.1", 1, 500)
+    testing.expect(e != nil, "dial refused gives err")
+}
+
+fn test_badip() {
+    [c, e] = net.dial("not-an-ip", 80)
+    testing.expect(e != nil, "dial bad host gives err")
+}
+
+fn main() {
+    exit(0)
+}

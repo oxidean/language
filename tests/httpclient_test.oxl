@@ -1,0 +1,166 @@
+package main
+
+// S4 acceptance: http client against the real serve() on loopback —
+// get/post round-trip, status + body + ctype asserts. Runs under
+// `oxl run` (not `oxl test`): exit(0) ends the spawned accept loop,
+// which has no shutdown path.
+import "std/net/http"
+
+import "std/net"
+
+import "std/testing"
+
+import "std/errors"
+
+fn ck(e: err, m: str) {
+    testing.expect(e == nil, m + ": " + errors.msg(e))
+}
+
+let PORT2 = 18342
+
+struct App {}
+
+fn (a App) route(method: str, path: str, body: str) -> http.Resp {
+    if path == "/echo" {
+        return http.Resp{status: 200, body: method + ":" + body, ctype: "text/plain"}
+    }
+    return http.Resp{status: 200, body: "ok", ctype: "application/json"}
+}
+
+fn serve_it() {
+    http.serve(PORT2, App{})
+}
+
+fn get_retry(url: str) -> [http.Resp, err] {
+    tries := 0
+    for tries < 40 {
+        [r, e] = http.get(url)
+        if e == nil {
+            return r, nil
+        }
+        usleep(50000)
+        tries = tries + 1
+    }
+    return http.get(url)
+}
+
+fn main() {
+    spawnBlocking serve_it()
+    // dial may beat listen — retry through the client until it answers
+    [r, e] = get_retry("http://127.0.0.1:18342/")
+    ck(e, "client connects")
+    if e != nil {
+        exit(1)
+    }
+    testing.expect(r.status == 200, "get status")
+    testing.expect(r.body == "ok", "get body")
+    testing.expect(r.ctype == "application/json", "get ctype got " + r.ctype)
+
+    [pr, pe] = http.post("http://127.0.0.1:18342/echo", "text/plain", "hello")
+    ck(pe, "post")
+    testing.expect(pr.status == 200, "post status")
+    testing.expect(pr.body == "POST:hello", "post echo body got " + pr.body)
+    testing.expect(pr.ctype == "text/plain", "post ctype")
+
+    // bad url is an error, not a crash
+    [br, be] = http.get("noscheme://x")
+    testing.expect(be != nil || br.status == 0, "bad url handled")
+
+    // raw responders cover framing paths serve() never emits:
+    // chunked bodies must decode; short content-length must fail
+    spawnBlocking raw_chunked()
+    [cr, ce] = get_retry("http://127.0.0.1:18343/c")
+    ck(ce, "chunked connects")
+    testing.expect(cr.status == 200, "chunked status")
+    testing.expect(cr.body == "hello world", "chunked decode got " + cr.body)
+    [tr, te] = get_retry("http://127.0.0.1:18343/t")
+    testing.expect(te != nil, "short content-length errors")
+
+    // empty transfer-encoding value must not swallow the body into
+    // the header — the literal text comes back verbatim
+    [er, ee] = get_retry("http://127.0.0.1:18343/e")
+    ck(ee, "empty-te connects")
+    testing.expect(er.body == "plain body mentioning chunked framing", "empty-te body got " + er.body)
+
+    // an overflowing chunk size must error, not unwrap as a terminator
+    [or, oe] = get_retry("http://127.0.0.1:18343/o")
+    testing.expect(oe != nil, "overflow chunk size errors")
+
+    // `0\r\n` at stream end without the trailer blank line is
+    // truncated framing — an error, not a complete body
+    [ur, ue] = get_retry("http://127.0.0.1:18343/u")
+    testing.expect(ue != nil, "missing final CRLF errors")
+
+    // legal trailers between the zero chunk and the blank line pass
+    [vr, ve] = get_retry("http://127.0.0.1:18343/v")
+    ck(ve, "trailers connect")
+    testing.expect(vr.body == "hello", "trailer body got " + vr.body)
+
+    // present-but-empty content-length is malformed framing
+    [xr, xe] = get_retry("http://127.0.0.1:18343/x")
+    testing.expect(xe != nil, "empty content-length errors")
+    println("httpclient done")
+    exit(0)
+}
+
+/// raw responder: chunked for /c, under-delivered content-length for
+/// /t — a real client read path test serve() can't produce itself.
+fn raw_chunked() {
+    [l, e] = net.listen(18343)
+    if e != nil {
+        return
+    }
+    for true {
+        [c, ae] = l.accept()
+        if ae != nil {
+            return
+        }
+        scratch := mkslice(byte, 4096)
+        [rn, re] = c.read(scratch)
+        if rn <= 0 {
+            c.close()
+            continue
+        }
+        req := scratch[0:rn] as str
+        if find(req, " /t ") >= 0 {
+            write_out(c, "HTTP/1.1 200 OK\r\ncontent-length: 40\r\nconnection: close\r\n\r\nshort")
+        } else if find(req, " /e ") >= 0 {
+            // empty transfer-encoding value (last header, CRLF right
+            // after the colon) — hdr_of must return "" so the body's
+            // literal "chunked" text is delivered verbatim, not fed
+            // to unchunk
+            write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding:\r\n\r\nplain body mentioning chunked framing")
+        } else if find(req, " /o ") >= 0 {
+            // 17-hex-digit chunk size wraps parseint onto a small
+            // value — must error, never return a truncated body
+            write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n10000000000000000\r\nhi\r\n0\r\n\r\n")
+        } else if find(req, " /u ") >= 0 {
+            // chunked body ending at `0\r\n` with no trailer blank
+            // line — the terminator is truncated, must error
+            write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nhello\r\n0\r\n")
+        } else if find(req, " /v ") >= 0 {
+            // trailers are legal — lines between `0\r\n` and the
+            // blank line must simply be framed, then the body lands
+            write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nhello\r\n0\r\nx-trailer: yes\r\n\r\n")
+        } else if find(req, " /x ") >= 0 {
+            // content-length present but empty — malformed framing,
+            // must error rather than read to close
+            write_out(c, "HTTP/1.1 200 OK\r\ncontent-length:\r\nconnection: close\r\n\r\nsome body")
+        } else {
+            write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+        }
+        c.close()
+    }
+}
+
+fn write_out(c: net.Conn, s: str) {
+    b := s as []byte
+    off := 0
+    for off < len(b) {
+        [n, e] = c.write(b[off:])
+        if e != nil || n <= 0 {
+            return
+        }
+        off = off + n
+    }
+}

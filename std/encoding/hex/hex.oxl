@@ -1,0 +1,55 @@
+package hex
+
+// std/encoding/hex — RFC 4648 §8 lower-case hex. Go's shape:
+// encode/decode over []byte<->str; decode rejects odd lengths and
+// non-hex bytes.
+import "std/errors"
+
+let DIGITS = "0123456789abcdef"
+
+/// encode returns lower-case hex of b.
+fn encode(b: []byte) -> str {
+    // byte buffer + single str cast — per-byte concat is quadratic
+    out := mkslice(byte, len(b) * 2)
+    i := 0
+    for i < len(b) {
+        v := b[i]
+        out[i * 2] = byteat(DIGITS, v / 16)
+        out[i * 2 + 1] = byteat(DIGITS, v % 16)
+        i = i + 1
+    }
+    return out as str
+}
+
+fn nib(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return -1
+}
+
+/// decode parses hex s — odd length and non-hex bytes are errors
+/// (Go's ErrLength/InvalidByteError semantics, one err string).
+fn decode(s: str) -> [own []byte, err] {
+    if len(s) % 2 != 0 {
+        return nil, errors.new("hex: odd length string")
+    }
+    out := mkslice(byte, len(s) / 2)
+    i := 0
+    for i < len(s) {
+        hi := nib(byteat(s, i))
+        lo := nib(byteat(s, i + 1))
+        if hi < 0 || lo < 0 {
+            return nil, errors.new("hex: invalid byte in input")
+        }
+        out[i / 2] = hi * 16 + lo
+        i = i + 2
+    }
+    return new(out), nil
+}

@@ -1,0 +1,288 @@
+package sha256
+
+// std/crypto/sha256 — FIPS 180-4 SHA-256 written fresh from the
+// spec's algorithm description. u32 values ride in int64 masked to
+// 32 bits (M32); the language has no shifts so x>>n is x/2**n and
+// x<<n is (x*2**n)&M32 — operands stay non-negative so / is exact.
+import "std/hash"
+
+import "std/slices"
+
+import "std/encoding/binary"
+
+import "std/encoding/hex"
+
+let M32: int = 4294967295
+
+let P2: own []int = nil
+
+// powers of two — lazy table, same pattern as hash's crc table
+fn p2() -> own []int {
+    if P2 == nil {
+        t := mkslice(int, 33)
+        v := 1
+        i := 0
+        for i < 33 {
+            t[i] = v
+            v = v * 2
+            i = i + 1
+        }
+        P2 = slices.clone(t)
+    }
+    return P2
+}
+
+let KT: own []int = nil
+
+// round constants K — the FIPS-mandated cube-root primes table
+fn kt() -> own []int {
+    if KT == nil {
+        t := mkslice(int, 64)
+        t[0] = 1116352408
+        t[1] = 1899447441
+        t[2] = 3049323471
+        t[3] = 3921009573
+        t[4] = 961987163
+        t[5] = 1508970993
+        t[6] = 2453635748
+        t[7] = 2870763221
+        t[8] = 3624381080
+        t[9] = 310598401
+        t[10] = 607225278
+        t[11] = 1426881987
+        t[12] = 1925078388
+        t[13] = 2162078206
+        t[14] = 2614888103
+        t[15] = 3248222580
+        t[16] = 3835390401
+        t[17] = 4022224774
+        t[18] = 264347078
+        t[19] = 604807628
+        t[20] = 770255983
+        t[21] = 1249150122
+        t[22] = 1555081692
+        t[23] = 1996064986
+        t[24] = 2554220882
+        t[25] = 2821834349
+        t[26] = 2952996808
+        t[27] = 3210313671
+        t[28] = 3336571891
+        t[29] = 3584528711
+        t[30] = 113926993
+        t[31] = 338241895
+        t[32] = 666307205
+        t[33] = 773529912
+        t[34] = 1294757372
+        t[35] = 1396182291
+        t[36] = 1695183700
+        t[37] = 1986661051
+        t[38] = 2177026350
+        t[39] = 2456956037
+        t[40] = 2730485921
+        t[41] = 2820302411
+        t[42] = 3259730800
+        t[43] = 3345764771
+        t[44] = 3516065817
+        t[45] = 3600352804
+        t[46] = 4094571909
+        t[47] = 275423344
+        t[48] = 430227734
+        t[49] = 506948616
+        t[50] = 659060556
+        t[51] = 883997877
+        t[52] = 958139571
+        t[53] = 1322822218
+        t[54] = 1537002063
+        t[55] = 1747873779
+        t[56] = 1955562222
+        t[57] = 2024104815
+        t[58] = 2227730452
+        t[59] = 2361852424
+        t[60] = 2428436474
+        t[61] = 2756734187
+        t[62] = 3204031479
+        t[63] = 3329325298
+        KT = slices.clone(t)
+    }
+    return KT
+}
+
+fn rotr(x: int, n: int) -> int {
+    p := p2()
+    return (x / p[n] | x * p[32 - n]) & M32
+}
+
+/// Sha is an incremental SHA-256 state — write bytes in, sum appends
+/// the 32-byte digest. Implements hash.Hash.
+struct Sha { st: []int, buf: []byte, total: int }
+
+// fill_st loads the FIPS initial state into st (out-param — []T
+// returns are banned as arena escapes).
+fn fill_st(st: []int) {
+    st[0] = 1779033703
+    st[1] = 3144134277
+    st[2] = 1013904242
+    st[3] = 2773480762
+    st[4] = 1359893119
+    st[5] = 2600822924
+    st[6] = 528734635
+    st[7] = 1541459225
+}
+
+fn mksha() -> Sha {
+    // heap-backed retained state — a write inside a nested scope must
+    // not leave st/buf pointing into a freed arena (the heap flag
+    // rides the header through views and push growth). clone, not
+    // new(): `new` is this package's constructor name.
+    let st: []int = slices.clone(mkslice(int, 8))
+    fill_st(st)
+    let buf: []byte = slices.clone(mkslice(byte, 0))
+    return Sha{st: st, buf: buf, total: 0}
+}
+
+fn compress(st: []int, blk: []byte, off: int) {
+    k := kt()
+    w := mkslice(int, 64)
+    t := 0
+    for t < 16 {
+        w[t] = binary.be_u32(blk, off + t * 4)
+        t = t + 1
+    }
+    for t < 64 {
+        x := w[t - 15]
+        y := w[t - 2]
+        s0 := rotr(x, 7) ^ rotr(x, 18) ^ x / 8
+        s1 := rotr(y, 17) ^ rotr(y, 19) ^ y / 1024
+        w[t] = w[t - 16] + s0 + w[t - 7] + s1 & M32
+        t = t + 1
+    }
+    a := st[0]
+    b := st[1]
+    c := st[2]
+    d := st[3]
+    e := st[4]
+    f := st[5]
+    g := st[6]
+    h := st[7]
+    t = 0
+    for t < 64 {
+        s1 := rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+        ch := e & f ^ M32 - e & g
+        t1 := h + s1 + ch + k[t] + w[t] & M32
+        s0 := rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+        maj := a & b ^ a & c ^ b & c
+        t2 := s0 + maj & M32
+        h = g
+        g = f
+        f = e
+        e = d + t1 & M32
+        d = c
+        c = b
+        b = a
+        a = t1 + t2 & M32
+        t = t + 1
+    }
+    st[0] = st[0] + a & M32
+    st[1] = st[1] + b & M32
+    st[2] = st[2] + c & M32
+    st[3] = st[3] + d & M32
+    st[4] = st[4] + e & M32
+    st[5] = st[5] + f & M32
+    st[6] = st[6] + g & M32
+    st[7] = st[7] + h & M32
+}
+
+/// new returns a fresh incremental hasher as hash.Hash.
+fn new() -> hash.Hash {
+    s := mksha()
+    return s.ashash()
+}
+
+fn (s mut Sha) write(b: []byte) -> [int, err] {
+    s.total = s.total + len(b)
+    i := 0
+    for i < len(b) {
+        s.buf = push(s.buf, b[i])
+        i = i + 1
+    }
+    for len(s.buf) >= 64 {
+        compress(s.st, s.buf, 0)
+        s.buf = s.buf[64:]
+    }
+    return len(b), nil
+}
+
+fn (s mut Sha) sum(b: []byte) -> own []byte {
+    // snapshot — Sum must not disturb the running state (Go contract)
+    st := mkslice(int, 8)
+    i := 0
+    for i < 8 {
+        st[i] = s.st[i]
+        i = i + 1
+    }
+    // padding on a private copy of the pending tail
+    tb := mkslice(byte, 0)
+    i = 0
+    for i < len(s.buf) {
+        tb = push(tb, s.buf[i])
+        i = i + 1
+    }
+    ml := s.total * 8
+    tb = push(tb, 128)
+    for len(tb) % 64 != 56 {
+        tb = push(tb, 0)
+    }
+    i = 7
+    for i >= 0 {
+        tb = push(tb, ml / pow8(i) % 256)
+        i = i - 1
+    }
+    off := 0
+    for off + 64 <= len(tb) {
+        compress(st, tb, off)
+        off = off + 64
+    }
+    out := mkslice(byte, 32)
+    i = 0
+    for i < 8 {
+        binary.put_be_u32(out, i * 4, st[i])
+        i = i + 1
+    }
+    return slices.concat(b, out)
+}
+
+fn (s mut Sha) reset() {
+    fill_st(s.st)
+    s.buf = s.buf[0:0]
+    s.total = 0
+}
+
+fn (s mut Sha) blocksize() -> int {
+    return 64
+}
+
+fn (s Sha) ashash() -> hash.Hash {
+    return s
+}
+
+fn pow8(k: int) -> int {
+    v := 1
+    i := 0
+    for i < k {
+        v = v * 256
+        i = i + 1
+    }
+    return v
+}
+
+/// sum256 is the one-shot form — sha256.Sum256.
+fn sum256(b: []byte) -> own []byte {
+    s := mksha()
+    [wn, we] = s.write(b)
+    return s.sum(nil)
+}
+
+/// hexdigest is sum256 + hex — the printable form.
+fn hexdigest(b: []byte) -> str {
+    return hex.encode(sum256(b))
+}
