@@ -343,8 +343,8 @@ int64_t rt_fexists(OxlStr path);
 OxlStr rt_fullpath(OxlStr path);
 int64_t rt_open_read(OxlStr path);     /* fd or -1                  */
 int64_t rt_open_write(OxlStr path);    /* create|trunc, fd or -1    */
-int64_t rt_fd_read(int64_t fd, RtSlice b);   /* n or -1            */
-int64_t rt_fd_write(int64_t fd, RtSlice b);  /* n or -1            */
+int64_t rt_fd_read(int64_t fd, RtSlice b);   /* n or -errno        */
+int64_t rt_fd_write(int64_t fd, RtSlice b);  /* n or -errno        */
 int64_t rt_fd_close(int64_t fd);   /* 0 or -errno              */
 int64_t rt_remove(OxlStr path);      /* unlink, 0 or -errno      */
 OxlStr  rt_errstr(int64_t code);      /* strerror text             */

@@ -243,6 +243,28 @@ fn test_flush_keeps_unwritten() {
     testing.expect_streq(w.got as str, "abcdef", "no duplicated prefix")
 }
 
+// Zilch always returns 0,nil — fill must bail after bounded retries
+// (Go's ErrNoProgress) instead of spinning forever.
+struct Zilch {}
+
+fn (z mut Zilch) read(b: []byte) -> [int, err] {
+    return 0, nil
+}
+
+fn (z mut Zilch) asreader() -> io.Reader {
+    return z
+}
+
+fn test_fill_nop_progress() {
+    z := Zilch{}
+    br := bufio.newreadersize(z.asreader(), 64)
+    p := mkslice(byte, 16)
+    [n, e] = br.read(p)
+    testing.expect(n == 0 && e == io.noprogress(), "noprogress after 100 dry reads")
+    [_, e2] = br.read(p)
+    testing.expect(e2 == io.noprogress(), "noprogress latched")
+}
+
 fn test_stdstreams() {
     testing.expect(os.stdin().fd == 0, "stdin fd")
     testing.expect(os.stdout().fd == 1, "stdout fd")

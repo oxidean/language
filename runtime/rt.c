@@ -2273,7 +2273,7 @@ int64_t rt_fd_read(int64_t fd, RtSlice b) {
 #else
     ssize_t n = read((int)fd, b.ptr, (size_t)b.len);
 #endif
-    return n < 0 ? -1 : (int64_t)n;
+    return n < 0 ? -(int64_t)errno : (int64_t)n;
 }
 
 int64_t rt_fd_write(int64_t fd, RtSlice b) {
@@ -2282,7 +2282,7 @@ int64_t rt_fd_write(int64_t fd, RtSlice b) {
 #else
     ssize_t n = write((int)fd, b.ptr, (size_t)b.len);
 #endif
-    return n < 0 ? -1 : (int64_t)n;
+    return n < 0 ? -(int64_t)errno : (int64_t)n;
 }
 
 OxlStr rt_errstr(int64_t code) {
@@ -2370,10 +2370,47 @@ static uint64_t rt_err_hash(OxlStr s) {
     return h;
 }
 
+/* append without dedupe — mutex held, never hits the cap path */
+static int64_t err_put_locked(OxlStr msg) {
+    if (rt_err_n == rt_err_cap) {
+        rt_err_cap = rt_err_cap ? rt_err_cap * 2 : 64;
+        if (rt_err_cap > RT_ERR_MAX) rt_err_cap = RT_ERR_MAX;
+        rt_err_tab = realloc(rt_err_tab,
+                             (size_t)rt_err_cap * sizeof(RtErrEnt));
+        if (!rt_err_tab) { oxl_mu_unlock(&rt_err_mu); abort(); }
+    }
+    char *m = malloc((size_t)msg.n + 1);
+    if (!m) { oxl_mu_unlock(&rt_err_mu); abort(); }
+    memcpy(m, msg.p, (size_t)msg.n);
+    m[msg.n] = 0;
+    int64_t b = (int64_t)(rt_err_hash(msg) % RT_ERR_BUCKETS);
+    rt_err_tab[rt_err_n].next = rt_err_bkt[b];
+    rt_err_tab[rt_err_n].mlen = msg.n;
+    rt_err_tab[rt_err_n].msg = m;
+    rt_err_bkt[b] = rt_err_n + 1;
+    return RT_ERR_BASE + rt_err_n++;
+}
+
+/* control-flow sentinels must intern before any user message: if the
+ * registry filled first, errors.new("EOF") would collapse to the
+ * overflow code and every later unique error would compare equal to
+ * io.eof() — io.copy would then report truncated data as success.
+ * Seeded once on the first call, so their codes are guaranteed
+ * distinct regardless of registry pressure. The texts are std/io's
+ * stable API strings. */
+static const char *rt_err_seeds[] = {
+    "EOF", "io: no progress", "io: short write"
+};
+
 int64_t rt_err_new(OxlStr msg) {
     uint64_t h = rt_err_hash(msg);
     int64_t b = (int64_t)(h % RT_ERR_BUCKETS);
     oxl_mu_lock(&rt_err_mu);
+    if (!rt_err_tab) {
+        for (size_t i = 0; i < sizeof(rt_err_seeds) / sizeof(*rt_err_seeds); i++)
+            err_put_locked((OxlStr){ (char *)rt_err_seeds[i],
+                                     (int64_t)strlen(rt_err_seeds[i]) });
+    }
     for (int64_t i = rt_err_bkt[b]; i; i = rt_err_tab[i - 1].next) {
         RtErrEnt *e = &rt_err_tab[i - 1];
         if (e->mlen == msg.n && memcmp(e->msg, msg.p, (size_t)msg.n) == 0) {
@@ -2390,38 +2427,11 @@ int64_t rt_err_new(OxlStr msg) {
     if (rt_err_n == RT_ERR_MAX - 1) {
         /* cap reached — the final slot becomes the shared sentinel */
         static const char om[] = "error registry full";
-        int64_t on = (int64_t)(sizeof(om) - 1);
-        char *m2 = malloc(sizeof(om));
-        if (!m2) { oxl_mu_unlock(&rt_err_mu); abort(); }
-        memcpy(m2, om, sizeof(om));
-        int64_t ob = (int64_t)(rt_err_hash(
-            (OxlStr){ (char *)om, on }) % RT_ERR_BUCKETS);
-        rt_err_tab[rt_err_n].next = rt_err_bkt[ob];
-        rt_err_tab[rt_err_n].mlen = on;
-        rt_err_tab[rt_err_n].msg = m2;
-        rt_err_bkt[ob] = rt_err_n + 1;
-        rt_err_ovf = RT_ERR_BASE + rt_err_n;
-        rt_err_n++;
+        rt_err_ovf = err_put_locked((OxlStr){ (char *)om, sizeof(om) - 1 });
         oxl_mu_unlock(&rt_err_mu);
         return rt_err_ovf;
     }
-    if (rt_err_n == rt_err_cap) {
-        rt_err_cap = rt_err_cap ? rt_err_cap * 2 : 64;
-        if (rt_err_cap > RT_ERR_MAX) rt_err_cap = RT_ERR_MAX;
-        rt_err_tab = realloc(rt_err_tab,
-                             (size_t)rt_err_cap * sizeof(RtErrEnt));
-        if (!rt_err_tab) { oxl_mu_unlock(&rt_err_mu); abort(); }
-    }
-    char *m = malloc((size_t)msg.n + 1);
-    if (!m) { oxl_mu_unlock(&rt_err_mu); abort(); }
-    memcpy(m, msg.p, (size_t)msg.n);
-    m[msg.n] = 0;
-    rt_err_tab[rt_err_n].next = rt_err_bkt[b];
-    rt_err_tab[rt_err_n].mlen = msg.n;
-    rt_err_tab[rt_err_n].msg = m;
-    rt_err_bkt[b] = rt_err_n + 1;
-    int64_t code = RT_ERR_BASE + rt_err_n;
-    rt_err_n++;
+    int64_t code = err_put_locked(msg);
     oxl_mu_unlock(&rt_err_mu);
     return code;
 }
@@ -2430,7 +2440,9 @@ OxlStr rt_err_msg(int64_t code) {
     int64_t i = code - RT_ERR_BASE;
     if (i < 0) return rt_str("");
     oxl_mu_lock(&rt_err_mu);
-    OxlStr r = i < rt_err_n ? rt_str(rt_err_tab[i].msg) : rt_str("");
+    OxlStr r = i < rt_err_n
+        ? (OxlStr){ rt_err_tab[i].msg, rt_err_tab[i].mlen }
+        : rt_str("");
     oxl_mu_unlock(&rt_err_mu);
     return r;
 }

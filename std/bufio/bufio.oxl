@@ -42,15 +42,28 @@ fn (b mut Reader) fill() -> err {
     if b.wi >= len(b.buf) {
         return errors.new("bufio: buffer full")
     }
-    [n, e] = b.r.read(b.buf[b.wi:])
-    if n > 0 {
-        b.wi = b.wi + n
+    // pull until data, error, or 100 consecutive empty reads — Go's
+    // maxConsecutiveEmptyReads. A reader answering 0,nil forever would
+    // otherwise spin peek/readline with no way out.
+    i := 0
+    for i < 100 {
+        [n, e] = b.r.read(b.buf[b.wi:])
+        if n > 0 {
+            b.wi = b.wi + n
+            if e != nil {
+                b.stuck = e
+                return e
+            }
+            return nil
+        }
+        if e != nil {
+            b.stuck = e
+            return e
+        }
+        i = i + 1
     }
-    if e != nil {
-        b.stuck = e
-        return e
-    }
-    return nil
+    b.stuck = io.noprogress()
+    return b.stuck
 }
 
 /// read — buffered then pass-through for large p; [n, err].
