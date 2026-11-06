@@ -2426,6 +2426,9 @@ fn rewrite_requires(mtext: &str, want: &std::collections::BTreeMap<String, (Stri
     let mut first_req: Option<usize> = None;
     let mut had_block = false;
     let mut comments: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // standalone comment lines inside require regions — re-emitted
+    // above the rewritten set so no user text is lost
+    let mut hoisted: Vec<String> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let t = strip_comment(lines[i]).trim().to_string();
@@ -2445,8 +2448,12 @@ fn rewrite_requires(mtext: &str, want: &std::collections::BTreeMap<String, (Stri
                     break;
                 }
                 let b: Vec<&str> = t2.split_whitespace().collect();
-                if b.len() >= 2 {
+                if b.len() >= 2 && semver::parse(b[1]).is_some() {
                     comments.insert(b[0].to_string(), user_comment(lines[i]));
+                } else if !lines[i].trim().is_empty() {
+                    // non-entry content inside the block (a standalone
+                    // comment) — re-emitted above the rewritten set
+                    hoisted.push(lines[i].to_string());
                 }
                 i += 1;
             }
@@ -2470,6 +2477,10 @@ fn rewrite_requires(mtext: &str, want: &std::collections::BTreeMap<String, (Stri
     for (idx, line) in lines.iter().enumerate() {
         if Some(idx) == first_req && !emitted {
             emitted = true;
+            for c in &hoisted {
+                out.push_str(c);
+                out.push('\n');
+            }
             if all.len() == 1 && !had_block {
                 let (p, (v, ind)) = all[0];
                 out.push_str(&render_require("", true, p, v, *ind, &old_comment(p)));
