@@ -18,15 +18,20 @@ there: a cache, a fetcher, and integrity pinning.
   - `@vX.Y.Z` / `@vX.Y.Z-rc` → that tag
   - `@<sha>`/`@<branch>` → resolve via git → pseudo-version
   - Fetches by shelling out to `git` (clone/fetch into a temp dir,
-    checkout the ref, copy the working tree sans `.git` into the
-    cache) — same model as pre-proxy Go; `git` binary is a documented
-    toolchain dependency for `get` only.
+    `git archive <resolved-sha>` extracted into the cache — canonical
+    tree content, never a checkout, so `core.autocrlf` / smudge
+    filters can't fork the bytes; `export-ignore` is honoured, as in
+    Go module zips) — same model as the Go module proxy; `git` binary
+    is a documented toolchain dependency for `get` only.
   - Adds/updates the `require` line in `oxl.mod` and refreshes
     `oxl.sum`.
 - `oxl.sum`: one line per module: `<path> <ver> h1:<b64-sha256>` —
   hash of the deterministic dir tree (sorted relpaths + contents,
   same idea as Go's dirhash) plus `<path> <ver>/mod h1:<...>` for the
-  manifest itself. Verified on every load: cached dir whose hash
+  manifest itself. One procedure serves both sides: it runs over the
+  extracted archive at `get` time and over the cached dir at load
+  time — identical inputs, since the cache is the archive extracted
+  byte-for-byte. Verified on every load: cached dir whose hash
   mismatches → `checksum mismatch` (Go wording).
 - Private repos work through git's own auth (ssh agent, credential
   helper) — nothing oxl-specific needed; document that.
@@ -51,8 +56,8 @@ V1 (queries need semver; MVS runs over the fetched manifests).
 
 - `git` availability/behaviour varies (Windows!) — keep all git calls
   behind one small veneer; error messages quote the failing command.
-- Hash stability across platforms: hash **canonical git content** —
-  `git archive <resolved-sha>` tar bytes (tree-object output, no
-  checkout filters) — so `core.autocrlf` / smudge filters can't fork
-  `oxl.sum` between machines. Normalize `\\`→`/` in recorded names;
-  document the canonicalization.
+- Hash stability across platforms: the hash input is canonical git
+  tree content — the `git archive` extraction path means checkout
+  filters never touch it, so `core.autocrlf` / smudge filters can't
+  fork `oxl.sum` between machines. Normalize `\\`→`/` in recorded
+  names; document the canonicalization.

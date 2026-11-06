@@ -13,7 +13,9 @@ them. Resolution needs Go's deterministic build list, not a solver.
 - Major ≥ 2: the module path *ends* `/vN` and the tag is `vN.x.y` —
   semantic import versioning, included per "full Go model".
 - Pseudo-versions for non-tag pins (Go ref/mod forms): no base tag
-  → `v0.0.0-yyyymmddhhmmss-<sha12>`; base tag `vX.Y.Z` →
+  → `v0.0.0-yyyymmddhhmmss-<sha12>` without a major suffix, or
+  `vN.0.0-yyyymmddhhmmss-<sha12>` for a path ending in `/vN` (N ≥ 2);
+  base tag `vX.Y.Z` →
   `vX.Y.(Z+1)-0.yyyymmddhhmmss-<sha12>` (so a commit after `v1.2.3`
   is `v1.2.4-0.…` — sorts after `v1.2.3`, before `v1.2.4`); base
   prerelease `vX.Y.Z-pre` → `vX.Y.Z-pre.0.yyyymmddhhmmss-<sha12>`.
