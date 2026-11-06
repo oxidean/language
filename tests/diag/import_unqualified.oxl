@@ -3,5 +3,6 @@ package main
 import "std/strings"
 
 fn main() {
+    println(strings.startswith(" x ", " "))
     println(trim(" x "))
 }

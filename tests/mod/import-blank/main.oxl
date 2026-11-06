@@ -1,0 +1,5 @@
+package main
+
+import "std/strings" as _
+
+fn main() {}

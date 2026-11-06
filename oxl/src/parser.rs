@@ -210,7 +210,9 @@ impl<'a> Parser<'a> {
                 if let Tok::Ident(k) = &self.cur().tok {
                     if k == "as" {
                         self.bump();
-                        if let Some((a, _)) = self.ident() {
+                        if self.eat_p(P::Underscore) {
+                            alias = Some("_".into());
+                        } else if let Some((a, _)) = self.ident() {
                             alias = Some(a);
                         }
                     }

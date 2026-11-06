@@ -400,21 +400,36 @@ enum PkgSrc {
     Files(Vec<PathBuf>),
 }
 
+/// per-file import-use marks, recorded by `map_name` as it rewrites:
+/// `quals` = local qualifier names that resolved through an import
+/// alias (incl. the identity binding); `sels` = resolved `bound.name`
+/// targets, so same-named selectives from different imports can't
+/// mark each other used
+#[derive(Default)]
+struct Used {
+    quals: std::collections::HashSet<String>,
+    sels: std::collections::HashSet<String>,
+}
+
 /// rename an oxl identifier through this module's maps:
 /// `a.b` -> alias-mapped `stem.b`; bare `n` -> own-decl `mod.n` / selective `s.n`
 fn map_name(
     n: &str,
     renames: &std::collections::HashMap<String, String>,
     aliases: &std::collections::HashMap<String, String>,
+    used: &mut Used,
 ) -> String {
     if let Some(r) = renames.get(n) {
+        used.sels.insert(r.clone());
         return r.clone();
     }
     if let Some((head, rest)) = n.split_once('.') {
         if let Some(stem) = aliases.get(head) {
+            used.quals.insert(head.to_string());
             return format!("{stem}.{rest}");
         }
         if let Some(stem) = renames.get(head) {
+            used.sels.insert(stem.clone());
             return format!("{stem}.{rest}");
         }
         n.to_string()
@@ -439,6 +454,7 @@ fn qualify_expr(
     renames: &std::collections::HashMap<String, String>,
     aliases: &std::collections::HashMap<String, String>,
     locals: &mut Locals,
+    used: &mut Used,
 ) {
     match &mut e.kind {
         ast::ExprKind::Call { f, args } => {
@@ -450,70 +466,70 @@ fn qualify_expr(
                 let mapped = if local(locals, head) {
                     n
                 } else {
-                    map_name(&n, renames, aliases)
+                    map_name(&n, renames, aliases, used)
                 };
                 f.kind = ast::ExprKind::Ident(mapped);
             } else {
-                qualify_expr(f, renames, aliases, locals);
+                qualify_expr(f, renames, aliases, locals, used);
             }
             for a in args {
-                qualify_expr(a, renames, aliases, locals);
+                qualify_expr(a, renames, aliases, locals, used);
             }
         }
         ast::ExprKind::Ident(n) => {
             if !local(locals, n) {
-                *n = map_name(n, renames, aliases)
+                *n = map_name(n, renames, aliases, used)
             }
         }
         ast::ExprKind::StructLit { name, fields } => {
-            *name = map_name(name, renames, aliases);
+            *name = map_name(name, renames, aliases, used);
             for (_, v) in fields {
-                qualify_expr(v, renames, aliases, locals);
+                qualify_expr(v, renames, aliases, locals, used);
             }
         }
-        ast::ExprKind::Field { obj, .. } => qualify_expr(obj, renames, aliases, locals),
+        ast::ExprKind::Field { obj, .. } => qualify_expr(obj, renames, aliases, locals, used),
         ast::ExprKind::Index { obj, idx } => {
-            qualify_expr(obj, renames, aliases, locals);
-            qualify_expr(idx, renames, aliases, locals);
+            qualify_expr(obj, renames, aliases, locals, used);
+            qualify_expr(idx, renames, aliases, locals, used);
         }
         ast::ExprKind::Slice { obj, lo, hi } => {
-            qualify_expr(obj, renames, aliases, locals);
+            qualify_expr(obj, renames, aliases, locals, used);
             if let Some(x) = lo {
-                qualify_expr(x, renames, aliases, locals);
+                qualify_expr(x, renames, aliases, locals, used);
             }
             if let Some(x) = hi {
-                qualify_expr(x, renames, aliases, locals);
+                qualify_expr(x, renames, aliases, locals, used);
             }
         }
         ast::ExprKind::Closure { params, body } => {
             let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
             for p in params.iter_mut() {
-                qualify_ty(&mut p.ty, renames, aliases);
+                qualify_ty(&mut p.ty, renames, aliases, used);
             }
             locals.push(names.into_iter().collect());
-            qualify_block(body, renames, aliases, locals);
+            qualify_block(body, renames, aliases, locals, used);
             locals.pop();
         }
         ast::ExprKind::Bin { l, r, .. } => {
-            qualify_expr(l, renames, aliases, locals);
-            qualify_expr(r, renames, aliases, locals);
+            qualify_expr(l, renames, aliases, locals, used);
+            qualify_expr(r, renames, aliases, locals, used);
         }
-        ast::ExprKind::Un { e, .. } => qualify_expr(e, renames, aliases, locals),
+        ast::ExprKind::Un { e, .. } => qualify_expr(e, renames, aliases, locals, used),
         ast::ExprKind::As { e, ty } => {
-            qualify_expr(e, renames, aliases, locals);
-            qualify_ty(ty, renames, aliases);
+            qualify_expr(e, renames, aliases, locals, used);
+            qualify_ty(ty, renames, aliases, used);
         }
         ast::ExprKind::Match { e, arms } => {
-            qualify_expr(e, renames, aliases, locals);
+            qualify_expr(e, renames, aliases, locals, used);
             for a in arms {
                 locals.push(std::collections::HashSet::new());
                 match &mut a.pat {
                     ast::Pattern::VarUnit { path }
                     | ast::Pattern::VarPos { path, .. }
                     | ast::Pattern::VarNamed { path, .. } => {
-                        *path = map_name(path, renames, aliases);
+                        *path = map_name(path, renames, aliases, used);
                     }
-                    ast::Pattern::Lit(le) => qualify_expr(le, renames, aliases, locals),
+                    ast::Pattern::Lit(le) => qualify_expr(le, renames, aliases, locals, used),
                     _ => {}
                 }
                 let binds: Vec<String> = match &a.pat {
@@ -528,8 +544,8 @@ fn qualify_expr(
                     }
                 }
                 match &mut a.body {
-                    ast::MatchBody::Expr(be) => qualify_expr(be, renames, aliases, locals),
-                    ast::MatchBody::Block(b) => qualify_block(b, renames, aliases, locals),
+                    ast::MatchBody::Expr(be) => qualify_expr(be, renames, aliases, locals, used),
+                    ast::MatchBody::Block(b) => qualify_block(b, renames, aliases, locals, used),
                 }
                 locals.pop();
             }
@@ -542,20 +558,21 @@ fn qualify_ty(
     t: &mut ast::TyRef,
     renames: &std::collections::HashMap<String, String>,
     aliases: &std::collections::HashMap<String, String>,
+    used: &mut Used,
 ) {
     match &mut t.kind {
-        ast::TyKind::Named(n) => *n = map_name(n, renames, aliases),
+        ast::TyKind::Named(n) => *n = map_name(n, renames, aliases, used),
         ast::TyKind::Own(i) | ast::TyKind::Ref(i) | ast::TyKind::Mut(i) => {
-            qualify_ty(i, renames, aliases)
+            qualify_ty(i, renames, aliases, used)
         }
         ast::TyKind::Chan => {}
-        ast::TyKind::Slice(i) => qualify_ty(i, renames, aliases),
+        ast::TyKind::Slice(i) => qualify_ty(i, renames, aliases, used),
         ast::TyKind::Fn { params, ret } => {
             for p in params {
-                qualify_ty(p, renames, aliases);
+                qualify_ty(p, renames, aliases, used);
             }
             if let Some(r) = ret {
-                qualify_ty(r, renames, aliases);
+                qualify_ty(r, renames, aliases, used);
             }
         }
     }
@@ -566,6 +583,7 @@ fn qualify_block(
     renames: &std::collections::HashMap<String, String>,
     aliases: &std::collections::HashMap<String, String>,
     locals: &mut Locals,
+    used: &mut Used,
 ) {
     locals.push(std::collections::HashSet::new());
     for s in &mut b.stmts {
@@ -573,13 +591,13 @@ fn qualify_block(
             ast::Stmt::ExitBoundary { .. } => unreachable!("codegen-internal marker"),
             ast::Stmt::Let { name, ty, init, .. } => {
                 if let Some(t) = ty {
-                    qualify_ty(t, renames, aliases);
+                    qualify_ty(t, renames, aliases, used);
                 }
-                qualify_expr(init, renames, aliases, locals);
+                qualify_expr(init, renames, aliases, locals, used);
                 locals.last_mut().unwrap().insert(name.clone());
             }
             ast::Stmt::Let2 { a, b, call, .. } => {
-                qualify_expr(call, renames, aliases, locals);
+                qualify_expr(call, renames, aliases, locals, used);
                 for bn in [a, b] {
                     if let ast::Bind::Name(n) = bn {
                         locals.last_mut().unwrap().insert(n.clone());
@@ -587,47 +605,47 @@ fn qualify_block(
                 }
             }
             ast::Stmt::Assign { target, val, .. } => {
-                qualify_expr(target, renames, aliases, locals);
-                qualify_expr(val, renames, aliases, locals);
+                qualify_expr(target, renames, aliases, locals, used);
+                qualify_expr(val, renames, aliases, locals, used);
             }
-            ast::Stmt::Expr(x) => qualify_expr(x, renames, aliases, locals),
+            ast::Stmt::Expr(x) => qualify_expr(x, renames, aliases, locals, used),
             ast::Stmt::Return { vals, .. } => {
                 for v in vals {
-                    qualify_expr(v, renames, aliases, locals);
+                    qualify_expr(v, renames, aliases, locals, used);
                 }
             }
             ast::Stmt::If { cond, then, els, .. } => {
-                qualify_expr(cond, renames, aliases, locals);
-                qualify_block(then, renames, aliases, locals);
+                qualify_expr(cond, renames, aliases, locals, used);
+                qualify_block(then, renames, aliases, locals, used);
                 if let Some(e) = els {
-                    qualify_block(e, renames, aliases, locals);
+                    qualify_block(e, renames, aliases, locals, used);
                 }
             }
             ast::Stmt::For { cond, body, .. } => {
-                qualify_expr(cond, renames, aliases, locals);
-                qualify_block(body, renames, aliases, locals);
+                qualify_expr(cond, renames, aliases, locals, used);
+                qualify_block(body, renames, aliases, locals, used);
             }
             ast::Stmt::Scope { body, .. } | ast::Stmt::Unsafe { body, .. } => {
-                qualify_block(body, renames, aliases, locals)
+                qualify_block(body, renames, aliases, locals, used)
             }
-            ast::Stmt::Spawn { call, .. } => qualify_expr(call, renames, aliases, locals),
-            ast::Stmt::Defer { call, .. } => qualify_expr(call, renames, aliases, locals),
+            ast::Stmt::Spawn { call, .. } => qualify_expr(call, renames, aliases, locals, used),
+            ast::Stmt::Defer { call, .. } => qualify_expr(call, renames, aliases, locals, used),
             ast::Stmt::Select { arms, .. } => {
                 for a in arms {
                     locals.push(std::collections::HashSet::new());
                     match &mut a.kind {
                         ast::SelKind::Recv { chan, bind, .. } => {
-                            qualify_expr(chan, renames, aliases, locals);
+                            qualify_expr(chan, renames, aliases, locals, used);
                             if let Some(bn) = bind {
                                 locals.last_mut().unwrap().insert(bn.clone());
                             }
                         }
                         ast::SelKind::Timeout { ms, .. } => {
-                            qualify_expr(ms, renames, aliases, locals)
+                            qualify_expr(ms, renames, aliases, locals, used)
                         }
                         ast::SelKind::Else { .. } => {}
                     }
-                    qualify_block(&mut a.body, renames, aliases, locals);
+                    qualify_block(&mut a.body, renames, aliases, locals, used);
                     locals.pop();
                 }
             }
@@ -877,6 +895,11 @@ fn load_pkg_inner(
         // per-file maps: package-shared decls + this file's own imports
         let mut renames = shared.clone();
         let mut aliases: std::collections::HashMap<String, String> = Default::default();
+        // M3: import-use tracking — `used` fills during pass 2,
+        // `binds` = (written path, local qualifier, expected sel
+        // targets) in source order for the report
+        let mut used = Used::default();
+        let mut binds: Vec<(String, String, Vec<String>)> = Vec::new();
         // pass 1: resolve this file's imports first so its decls see the
         // bindings regardless of source order
         for it in &fitems {
@@ -903,17 +926,20 @@ fn load_pkg_inner(
                         ) {
                             Some((sub, sub_files)) => {
                                 let bound = sub.pkg.clone();
-                                if !bound.is_empty() {
-                                    aliases.insert(
-                                        i.alias.clone().unwrap_or_else(|| bound.clone()),
-                                        bound.clone(),
-                                    );
-                                    if i.alias.is_none() {
-                                        aliases.insert(bound.clone(), bound.clone());
-                                    }
+                                // `as _` — explicit side-effect import: the
+                                // package loads, nothing binds, exempt (M3)
+                                if !bound.is_empty() && i.alias.as_deref() != Some("_") {
+                                    let qual = i.alias.clone().unwrap_or_else(|| bound.clone());
+                                    aliases.insert(qual.clone(), bound.clone());
+                                    let sels: Vec<String> = i
+                                        .selective
+                                        .iter()
+                                        .map(|s| format!("{bound}.{s}"))
+                                        .collect();
                                     for s in &i.selective {
                                         renames.insert(s.clone(), format!("{bound}.{s}"));
                                     }
+                                    binds.push((i.path.clone(), qual, sels));
                                 }
                                 items.extend(sub.items);
                                 item_files.extend(sub_files);
@@ -949,10 +975,33 @@ fn load_pkg_inner(
             match it {
                 ast::Item::Import(_) => {}
                 mut it => {
-                    qualify_item(&mut it, &renames, &aliases);
+                    qualify_item(&mut it, &renames, &aliases, &mut used);
                     items.push(it);
                 }
             }
+        }
+        // M3: each import must have been touched by the qualify walk —
+        // one diag per dead binding, source order, then abort
+        let mut dead = false;
+        for (path, qual, sels) in &binds {
+            if !used.quals.contains(qual) {
+                if loud {
+                    eprintln!("error [check] imported and not used: \"{path}\"");
+                }
+                dead = true;
+            }
+            for t in sels {
+                let sname = t.rsplit('.').next().unwrap_or(t);
+                if !used.sels.contains(t) {
+                    if loud {
+                        eprintln!("error [check] imported and not used: \"{path}\".{{{sname}}}");
+                    }
+                    dead = true;
+                }
+            }
+        }
+        if dead && loud {
+            return None;
         }
         item_files.extend(
             std::iter::repeat(fpath.clone()).take(items.len() - item_files.len()),
@@ -999,11 +1048,12 @@ fn qualify_item(
     it: &mut ast::Item,
     renames: &std::collections::HashMap<String, String>,
     aliases: &std::collections::HashMap<String, String>,
+    used: &mut Used,
 ) {
     match it {
         ast::Item::Fn(f) => {
             if let Some(r) = &mut f.recv {
-                qualify_ty(&mut r.ty, renames, aliases);
+                qualify_ty(&mut r.ty, renames, aliases, used);
                 // the decl name is `{receiver type}.{method}` — receiver
                 // base unwraps own/ref/mut to its Named path
                 if let Some(base) = recv_base(&r.ty) {
@@ -1013,10 +1063,10 @@ fn qualify_item(
                 f.name = n.clone();
             }
             for p in &mut f.params {
-                qualify_ty(&mut p.ty, renames, aliases);
+                qualify_ty(&mut p.ty, renames, aliases, used);
             }
             match &mut f.ret {
-                ast::RetTy::One(t) | ast::RetTy::Pair(t) => qualify_ty(t, renames, aliases),
+                ast::RetTy::One(t) | ast::RetTy::Pair(t) => qualify_ty(t, renames, aliases, used),
                 ast::RetTy::Void => {}
             }
             if let Some(b) = &mut f.body {
@@ -1026,7 +1076,7 @@ fn qualify_item(
                     scope.insert(r.name.clone());
                 }
                 let mut locals: Locals = vec![scope];
-                qualify_block(b, renames, aliases, &mut locals);
+                qualify_block(b, renames, aliases, &mut locals, used);
             }
         }
         ast::Item::Struct(s) => {
@@ -1034,7 +1084,7 @@ fn qualify_item(
                 s.name = n.clone();
             }
             for p in &mut s.fields {
-                qualify_ty(&mut p.ty, renames, aliases);
+                qualify_ty(&mut p.ty, renames, aliases, used);
             }
         }
         ast::Item::Enum(e) => {
@@ -1045,12 +1095,12 @@ fn qualify_item(
                 match &mut v.payload {
                     ast::VariantPayload::Pos(tys) => {
                         for t in tys {
-                            qualify_ty(t, renames, aliases);
+                            qualify_ty(t, renames, aliases, used);
                         }
                     }
                     ast::VariantPayload::Named(fs) => {
                         for (_, t) in fs {
-                            qualify_ty(t, renames, aliases);
+                            qualify_ty(t, renames, aliases, used);
                         }
                     }
                     ast::VariantPayload::Unit => {}
@@ -1063,11 +1113,11 @@ fn qualify_item(
             }
             for m in &mut i.methods {
                 for p in &mut m.params {
-                    qualify_ty(&mut p.ty, renames, aliases);
+                    qualify_ty(&mut p.ty, renames, aliases, used);
                 }
                 match &mut m.ret {
                     ast::RetTy::One(t) | ast::RetTy::Pair(t) => {
-                        qualify_ty(t, renames, aliases)
+                        qualify_ty(t, renames, aliases, used)
                     }
                     ast::RetTy::Void => {}
                 }
@@ -1078,17 +1128,17 @@ fn qualify_item(
                 g.name = n.clone();
             }
             if let Some(t) = &mut g.ty {
-                qualify_ty(t, renames, aliases);
+                qualify_ty(t, renames, aliases, used);
             }
             let mut locals: Locals = vec![std::collections::HashSet::new()];
-            qualify_expr(&mut g.init, renames, aliases, &mut locals);
+            qualify_expr(&mut g.init, renames, aliases, &mut locals, used);
         }
         ast::Item::Extern(f) => {
             for p in &mut f.params {
-                qualify_ty(&mut p.ty, renames, aliases);
+                qualify_ty(&mut p.ty, renames, aliases, used);
             }
             match &mut f.ret {
-                ast::RetTy::One(t) | ast::RetTy::Pair(t) => qualify_ty(t, renames, aliases),
+                ast::RetTy::One(t) | ast::RetTy::Pair(t) => qualify_ty(t, renames, aliases, used),
                 ast::RetTy::Void => {}
             }
         }
