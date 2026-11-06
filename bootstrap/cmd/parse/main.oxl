@@ -2,9 +2,9 @@ package main
 
 // oxl parse driver — emits the file's AST as JSON
 //   oxl run bootstrap/cmd/parse -- <file.oxl>
-import "bootstrap/lexlib"
+import "oxl/bootstrap/lexlib"
 
-import "bootstrap/parser"
+import "oxl/bootstrap/parser"
 
 import "std/json"
 

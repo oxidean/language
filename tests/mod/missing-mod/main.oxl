@@ -1,0 +1,5 @@
+package main
+
+import "github.com/oxidean/widget/thing"
+
+fn main() {}

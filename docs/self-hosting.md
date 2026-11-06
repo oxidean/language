@@ -4,21 +4,21 @@ The goal: the compiler, written in the language, compiled by itself.
 
 **Done so far — the entire frontend is self-hosted:**
 
-- `bootstrap/lexlib.oxl` — a working lexer for `.oxl`, written in
+- `bootstrap/lexlib/lexlib.oxl` — a working lexer for `.oxl`, written in
   `.oxl` (shared library: token kinds, `lex`, cursor helpers)
-- `bootstrap/lexer.oxl` — thin driver over lexlib (token dump)
-- `bootstrap/parser.oxl` — a recursive-descent parser for `.oxl`,
+- `bootstrap/cmd/lex` — thin driver over lexlib (token dump)
+- `bootstrap/parser/parser.oxl` — a recursive-descent parser for `.oxl`,
   written in `.oxl`, emitting the AST as JSON via `std/json`.
   Internals are a typed `Node` enum (B1) — `to_json` dispatches on
   variants with `match` (B2), including `match` itself in the
   grammar. **It parses itself with zero skipped tokens** — full
   round-trip.
-- `bootstrap/check.oxl` — a port of the Rust typechecker, written in
+- `bootstrap/check/check.oxl` — a port of the Rust typechecker, written in
   `.oxl`: interned integer type handles, scope-slice environments,
   `std/collections` tables, registration + checking passes over the
   parser's AST (fns, structs, enums, globals, imports, bodies,
   patterns/match exhaustiveness, suspension analysis). **It checks
-  itself clean** — `oxl run bootstrap/check.oxl -- file.oxl` prints
+  itself clean** — `oxl run bootstrap/cmd/check -- file.oxl` prints
   diagnostics or `ok`. The parser produces the full v0.2 surface —
   generics (`fn f[T any]`), `interface` decls, and `fn (r T) m`
   receivers — and the checker consumes them: ty-param registration,
@@ -27,9 +27,9 @@ The goal: the compiler, written in the language, compiled by itself.
   distinctions beyond literals, and `codegen.oxl` does not yet lower
   generics/interfaces/methods — those still emit through the Rust
   pipeline.
-- `bootstrap/codegen.oxl` — a port of the Rust C emitter, written in
+- `bootstrap/cmd/codegen` — a port of the Rust C emitter, written in
   `.oxl`, consuming the checker's tables over the parser's AST:
-  `oxl run bootstrap/codegen.oxl -- file.oxl > out.c`, then
+  `oxl run bootstrap/cmd/codegen -- file.oxl > out.c`, then
   `cc -O2 -pthread -Iruntime out.c runtime/rt.c -o out`. When `out.c`
   references `rt_sqlite_*` (sqlite stdlib in use), add `-DOXL_SQLITE`
   before the sources and `-lsqlite3` after them — `emit_and_cc`
@@ -61,7 +61,7 @@ Ordered by what the checker/codegen port actually needs:
 1. ~~**Sum types / enums**~~ — **done (B1).** `enum` decls with
    unit/positional/named payloads, `E.V(...)`/`E.V{...}`/`E.V`
    construction, `.kind()` tag access, tag-checked `as` payload casts.
-   `bootstrap/parser.oxl` already uses it for its AST.
+   `bootstrap/parser/parser.oxl` already uses it for its AST.
 2. ~~**`match`**~~ — **done (B2).** `to_json` now pattern-dispatches
    with `match`; the grammar parses `match` too (self-parse round-trips).
 3. ~~**Slices `[]T`**~~ — **done (B3).** `[]T` fat-header slices with
@@ -90,11 +90,11 @@ Ordered by what the checker/codegen port actually needs:
 ## Path
 
 ```
-bootstrap/lexlib.oxl   (done — tokenizes .oxl, shared library)
-bootstrap/lexer.oxl    (done — token-dump driver)
-bootstrap/parser.oxl   (done — AST → JSON, self-parses clean)
-bootstrap/check.oxl    (done — typechecks .oxl, self-checks clean)
-bootstrap/codegen.oxl  (done — emits C, self-compiles byte-identical)
+bootstrap/lexlib/      (done — tokenizes .oxl, shared library)
+bootstrap/cmd/lex      (done — token-dump driver)
+bootstrap/parser/      (done — AST → JSON, self-parses clean)
+bootstrap/check/       (done — typechecks .oxl, self-checks clean)
+bootstrap/cmd/codegen  (done — emits C, self-compiles byte-identical)
 ```
 
 `oxl` (Rust) is needed to *first-compile* the self-hosted compiler —

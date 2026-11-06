@@ -10,7 +10,7 @@ package parser
 // the emitted output is unchanged.
 //
 //   oxl run bootstrap/parser.oxl -- examples/hello.oxl
-import "bootstrap/lexlib"
+import "oxl/bootstrap/lexlib"
 
 import "std/json"
 

@@ -35,35 +35,341 @@ fn main() {
     }
 }
 
-/// resolve an import path to a package directory: first relative to the
-/// importing file, then `<ancestor>/<imp>` walking up from the importer
-/// (this is what makes `std/...` and repo-rooted paths resolve), and
-/// finally the same walk from the executable so out-of-tree sources
-/// still find the toolchain's std/.
-fn resolve_pkg(from_file: &Path, imp: &str) -> Option<PathBuf> {
-    let rel = from_file.parent().unwrap_or(Path::new(".")).join(imp);
-    if rel.is_dir() {
-        return Some(rel);
+/// language version this toolchain implements — the `oxl` directive's
+/// floor compares against it; tied to the crate version so a release
+/// bump moves the floor ceiling too
+const OXL_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// the toolchain version as `major.minor`, for diagnostics
+fn tool_ver() -> String {
+    let mut it = OXL_VERSION.split('.');
+    format!("{}.{}", it.next().unwrap_or("0"), it.next().unwrap_or("0"))
+}
+
+/// `X.Y[.Z]` -> (maj, min, patch); leading `v` tolerated
+fn ver_tuple(v: &str) -> Option<(u64, u64, u64)> {
+    let v = v.strip_prefix('v').unwrap_or(v);
+    let mut it = v.split('.');
+    let maj = it.next()?.parse().ok()?;
+    let min = it.next().map_or(Ok(0), |s| s.parse()).ok()?;
+    let patch = it.next().map_or(Ok(0), |s| s.parse()).ok()?;
+    if it.next().is_some() {
+        return None;
     }
-    let mut dir = from_file.parent().map(Path::to_path_buf);
-    while let Some(d) = dir {
-        let p = d.join(imp);
-        if p.is_dir() {
-            return Some(p);
+    Some((maj, min, patch))
+}
+
+/// `vX.Y.Z` or a pseudo-version (`vX.Y.Z-<anything>`) — the require/
+/// replace version shape; full semver grammar lands with V1
+fn mod_ver_ok(v: &str) -> bool {
+    let core = v.split('-').next().unwrap_or(v);
+    let mut it = core.strip_prefix('v').unwrap_or("").split('.');
+    let dig = |s: Option<&str>| matches!(s, Some(x) if !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()));
+    dig(it.next()) && dig(it.next()) && dig(it.next()) && it.next().is_none()
+}
+
+/// first path segment carrying a `.` reads as a remote module path —
+/// drives the `oxl get` hint on `cannot find package`
+fn remoteish(imp: &str) -> bool {
+    imp.split('/').next().map_or(false, |s| s.contains('.'))
+}
+
+/// the main module's view of the build graph — v1 resolves EVERY
+/// import through it (dependency manifests never re-enter resolution;
+/// MVS flattens the build list in V1 anyway)
+struct ModCtx {
+    path: String,
+    root: PathBuf,
+    requires: Vec<(String, String)>,
+    /// replace LHS path -> local dir (v1 accepts dir RHS only)
+    replaces: Vec<(String, PathBuf)>,
+    modcache: PathBuf,
+}
+
+/// nearest ancestor of `dir` holding `oxl.mod`, if any — nearest wins,
+/// so a nested module is its own root
+fn find_root(dir: &Path) -> Option<PathBuf> {
+    let mut d = Some(dir.to_path_buf());
+    while let Some(x) = d {
+        if x.join("oxl.mod").is_file() {
+            return Some(x);
         }
-        dir = d.parent().map(Path::to_path_buf);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(Path::to_path_buf);
-        while let Some(d) = dir {
-            let p = d.join(imp);
-            if p.is_dir() {
-                return Some(p);
-            }
-            dir = d.parent().map(Path::to_path_buf);
-        }
+        d = x.parent().map(Path::to_path_buf);
     }
     None
+}
+
+/// module cache root: OXLMODCACHE wins, else ~/.oxl/mod
+fn modcache_dir() -> PathBuf {
+    if let Ok(v) = std::env::var("OXLMODCACHE") {
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    for k in ["HOME", "USERPROFILE"] {
+        if let Ok(h) = std::env::var(k) {
+            if !h.is_empty() {
+                return PathBuf::from(h).join(".oxl").join("mod");
+            }
+        }
+    }
+    PathBuf::from(".oxl").join("mod")
+}
+
+/// parse oxl.mod text -> (module path, `oxl` floor as written,
+/// requires, replaces). Errors come back ready to print:
+/// `oxl.mod:<line>: <msg>` — display stays hermetic (the manifest is
+/// always AT the module root, so the bare name locates it).
+fn parse_manifest(
+    src: &str,
+) -> Result<(String, Option<String>, Vec<(String, String)>, Vec<(String, PathBuf)>), String> {
+    let mut module = String::new();
+    let mut floor: Option<String> = None;
+    let mut requires: Vec<(String, String)> = Vec::new();
+    let mut replaces: Vec<(String, PathBuf)> = Vec::new();
+    let mut lines = src.lines().enumerate().peekable();
+    while let Some((ln, raw)) = lines.next() {
+        let line_no = ln + 1;
+        let text = raw.split("//").next().unwrap_or("").trim();
+        if text.is_empty() {
+            continue;
+        }
+        let toks: Vec<&str> = text.split_whitespace().collect();
+        let err = |m: String| format!("oxl.mod:{line_no}: {m}");
+        match toks[0] {
+            "module" => {
+                if !module.is_empty() {
+                    return Err(err("duplicate directive \"module\"".into()));
+                }
+                if toks.len() != 2 {
+                    return Err(err("expected module path".into()));
+                }
+                module = toks[1].to_string();
+            }
+            "oxl" => {
+                if floor.is_some() {
+                    return Err(err("duplicate directive \"oxl\"".into()));
+                }
+                if toks.len() != 2 || ver_tuple(toks[1]).is_none() {
+                    return Err(err("expected version".into()));
+                }
+                floor = Some(toks[1].to_string());
+            }
+            "require" | "replace" => {
+                let kw = toks[0];
+                // entries: inline tokens or a parenthesized block
+                let mut body: Vec<(usize, Vec<String>)> = Vec::new();
+                if toks.len() == 2 && toks[1] == "(" {
+                    let mut closed = false;
+                    for (ln2, raw2) in lines.by_ref() {
+                        let t2 = raw2.split("//").next().unwrap_or("").trim();
+                        if t2.is_empty() {
+                            continue;
+                        }
+                        if t2 == ")" {
+                            closed = true;
+                            break;
+                        }
+                        body.push((ln2 + 1, t2.split_whitespace().map(String::from).collect()));
+                    }
+                    if !closed {
+                        return Err(err(format!("unterminated {kw} block")));
+                    }
+                } else {
+                    body.push((line_no, toks[1..].iter().map(|s| s.to_string()).collect()));
+                }
+                for (bln, bt) in body {
+                    let berr = |m: String| format!("oxl.mod:{bln}: {m}");
+                    if kw == "require" {
+                        if bt.len() != 2 {
+                            return Err(berr("expected `path version`".into()));
+                        }
+                        if !mod_ver_ok(&bt[1]) {
+                            return Err(berr(format!("bad version \"{}\"", bt[1])));
+                        }
+                        if requires.iter().any(|(p, _)| p == &bt[0]) {
+                            return Err(berr(format!("duplicate require \"{}\"", bt[0])));
+                        }
+                        requires.push((bt[0].clone(), bt[1].clone()));
+                    } else {
+                        // replace <path> [ver] => <dir>
+                        let arrow = bt
+                            .iter()
+                            .position(|t| t == "=>")
+                            .ok_or_else(|| berr("expected `=>`".into()))?;
+                        if arrow == 0 || arrow > 2 || arrow + 1 != bt.len() - 1 {
+                            return Err(berr("expected `path [version] => dir`".into()));
+                        }
+                        if arrow == 2 && !mod_ver_ok(&bt[1]) {
+                            return Err(berr(format!("bad version \"{}\"", bt[1])));
+                        }
+                        replaces.push((bt[0].clone(), PathBuf::from(&bt[arrow + 1])));
+                    }
+                }
+            }
+            _ => return Err(err(format!("unknown directive \"{}\"", toks[0]))),
+        }
+    }
+    if module.is_empty() {
+        return Err("oxl.mod: missing module directive".into());
+    }
+    Ok((module, floor, requires, replaces))
+}
+
+/// the module context for a compile entry: nearest oxl.mod above
+/// `start`, parsed and floor-checked. Ok(None) = module-off mode —
+/// only `std/` imports resolve. Err = manifest found but malformed or
+/// above the toolchain floor (hard error when `loud`).
+fn mod_ctx(start: &Path, loud: bool) -> Result<Option<ModCtx>, ()> {
+    let Some(root) = find_root(start) else {
+        return Ok(None);
+    };
+    let mpath = root.join("oxl.mod");
+    let text = match std::fs::read_to_string(&mpath) {
+        Ok(t) => t,
+        Err(e) => {
+            if loud {
+                eprintln!("error [check] {}: {e}", mpath.display());
+            }
+            return Err(());
+        }
+    };
+    let (path, floor, requires, replaces) = match parse_manifest(&text) {
+        Ok(m) => m,
+        Err(e) => {
+            if loud {
+                eprintln!("error [check] {e}");
+            }
+            return Err(());
+        }
+    };
+    if let Some(fv) = floor {
+        let cur = ver_tuple(OXL_VERSION).unwrap_or((0, 0, 0));
+        if ver_tuple(&fv).map_or(false, |f| f > cur) {
+            if loud {
+                eprintln!("error [check] oxl.mod: requires oxl {fv}, toolchain is {}", tool_ver());
+            }
+            return Err(());
+        }
+    }
+    // replace dirs resolve against the module root
+    let replaces = replaces
+        .into_iter()
+        .map(|(p, d)| {
+            let d = if d.is_absolute() { d } else { root.join(&d) };
+            (p, d)
+        })
+        .collect();
+    Ok(Some(ModCtx {
+        path,
+        root,
+        requires,
+        replaces,
+        modcache: modcache_dir(),
+    }))
+}
+
+enum Resolve {
+    Dir(PathBuf),
+    /// declared require with neither replace nor a cache copy —
+    /// carries the `path@ver` the diagnostic names
+    Missing(String),
+    NotFound,
+}
+
+/// resolve an import path to a package directory under the module
+/// rules: `std/` from beside the toolchain executable, then the main
+/// module's own path, then the longest require-prefix match through
+/// replace or the module cache. NotFound = cannot find.
+fn resolve_pkg(ctx: Option<&ModCtx>, entry: &Path, imp: &str) -> Resolve {
+    if let Some(rest) = imp.strip_prefix("std/") {
+        // toolchain std ships beside the binary; a self-hosted checker
+        // compiled into a scratch dir still finds the SOURCE tree's
+        // std via the entry package's ancestors (only ever the root —
+        // dep files can't shadow std through it)
+        for base in [
+            std::env::current_exe().ok(),
+            Some(entry.to_path_buf()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut d = Some(base);
+            while let Some(x) = d {
+                let p = x.join("std").join(rest);
+                if p.is_dir() {
+                    return Resolve::Dir(p);
+                }
+                d = x.parent().map(Path::to_path_buf);
+            }
+        }
+        return Resolve::NotFound;
+    }
+    let Some(ctx) = ctx else {
+        return Resolve::NotFound;
+    };
+    if imp == ctx.path || imp.starts_with(&format!("{}/", ctx.path)) {
+        let rest = imp[ctx.path.len()..].trim_start_matches('/');
+        let p = ctx.root.join(rest);
+        return if p.is_dir() {
+            Resolve::Dir(p)
+        } else {
+            Resolve::NotFound
+        };
+    }
+    // requires — longest path prefix wins (module-path boundaries only)
+    let mut best: Option<&(String, String)> = None;
+    for r in &ctx.requires {
+        if (imp == r.0 || imp.starts_with(&format!("{}/", r.0)))
+            && best.map_or(true, |b| r.0.len() > b.0.len())
+        {
+            best = Some(r);
+        }
+    }
+    if let Some((mp, v)) = best {
+        let rest = imp[mp.len()..].trim_start_matches('/');
+        if let Some((_, rhs)) = ctx.replaces.iter().find(|(rp, _)| rp == mp) {
+            let d = rhs.join(rest);
+            return if d.is_dir() {
+                Resolve::Dir(d)
+            } else {
+                Resolve::NotFound
+            };
+        }
+        let base = ctx.modcache.join(format!("{mp}@{v}"));
+        let d = base.join(rest);
+        return if base.is_dir() && d.is_dir() {
+            Resolve::Dir(d)
+        } else if base.is_dir() {
+            Resolve::NotFound // fetched, but the package isn't in it
+        } else {
+            Resolve::Missing(format!("{mp}@{v}"))
+        };
+    }
+    Resolve::NotFound
+}
+
+/// internal rule: a resolved path with an `internal` segment may only
+/// be imported from inside the tree rooted at that segment's parent —
+/// checked for EVERY internal segment, canonicalized so `./`-relative
+/// module roots and absolute cache paths compare honestly
+fn internal_ok(resolved: &Path, importer_dir: &Path) -> bool {
+    let rd = resolved
+        .canonicalize()
+        .unwrap_or_else(|_| resolved.to_path_buf());
+    let id = importer_dir
+        .canonicalize()
+        .unwrap_or_else(|_| importer_dir.to_path_buf());
+    let comps: Vec<_> = rd.components().collect();
+    for (i, c) in comps.iter().enumerate() {
+        if c.as_os_str() == "internal" {
+            let parent: PathBuf = comps[..i].iter().collect();
+            if !id.starts_with(&parent) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// `*.oxl` files of a package directory, sorted for deterministic
@@ -391,18 +697,62 @@ fn load_pkg(
     is_root: bool,
     seen: &mut std::collections::HashSet<PathBuf>,
     pkg_names: &mut std::collections::HashMap<PathBuf, String>,
+    loading: &mut Vec<(PathBuf, String)>,
+    ctx: Option<&ModCtx>,
+    entry: &Path,
+    over: Option<(&Path, &str)>,
+    loud: bool,
+) -> Option<(ast::Crate, Vec<PathBuf>)> {
+    // dir packages: canonical key drives both finished-load dedup
+    // (`seen`/`pkg_names`) and in-flight cycle detection (`loading`).
+    // A finished package dedups to its cached clause; an in-flight one
+    // is an import cycle — Go-forbidden, reported as a resolved-path
+    // chain. Quiet mode keeps the old bind-what's-there behavior so the
+    // LSP survives cycles in incomplete code.
+    if let PkgSrc::Dir(d) = src {
+        let key = d.canonicalize().unwrap_or_else(|_| d.clone());
+        if let Some(pos) = loading.iter().position(|(k, _)| *k == key) {
+            if loud {
+                let mut cyc: Vec<String> =
+                    loading[pos..].iter().map(|(_, i)| i.clone()).collect();
+                cyc.push(imp.to_string());
+                eprintln!("error [check] import cycle not allowed: {}", cyc.join(" \u{2192} "));
+                return None;
+            }
+        }
+        if !seen.insert(key.clone()) {
+            // already loaded: items dedup away but the importer still
+            // binds the cached clause name
+            let pkg = pkg_names.get(&key).cloned().unwrap_or_default();
+            return Some((ast::Crate { pkg, pkg_span: Span::new(0, 0), items: Vec::new() }, Vec::new()));
+        }
+        loading.push((key, imp.to_string()));
+        let r = load_pkg_inner(
+            src, imp, as_import, is_root, seen, pkg_names, loading, ctx, entry, over, loud,
+        );
+        loading.pop();
+        return r;
+    }
+    load_pkg_inner(
+        src, imp, as_import, is_root, seen, pkg_names, loading, ctx, entry, over, loud,
+    )
+}
+
+fn load_pkg_inner(
+    src: &PkgSrc,
+    imp: &str,
+    as_import: bool,
+    is_root: bool,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    pkg_names: &mut std::collections::HashMap<PathBuf, String>,
+    loading: &mut Vec<(PathBuf, String)>,
+    ctx: Option<&ModCtx>,
+    entry: &Path,
     over: Option<(&Path, &str)>,
     loud: bool,
 ) -> Option<(ast::Crate, Vec<PathBuf>)> {
     let (dir_disp, files): (String, Vec<PathBuf>) = match src {
         PkgSrc::Dir(d) => {
-            let key = d.canonicalize().unwrap_or_else(|_| d.clone());
-            if !seen.insert(key.clone()) {
-                // already loaded (or mid-cycle): items dedup away but the
-                // importer still binds the cached clause name
-                let pkg = pkg_names.get(&key).cloned().unwrap_or_default();
-                return Some((ast::Crate { pkg, pkg_span: Span::new(0, 0), items: Vec::new() }, Vec::new()));
-            }
             let files = match pkg_dir_files(d) {
                 Ok(fs) => fs,
                 Err(e) => {
@@ -526,9 +876,23 @@ fn load_pkg(
         // bindings regardless of source order
         for it in &fitems {
             if let ast::Item::Import(i) = it {
-                match resolve_pkg(&fpath, &i.path) {
-                    Some(d) => {
-                        match load_pkg(&PkgSrc::Dir(d), &i.path, true, false, seen, pkg_names, over, loud) {
+                match resolve_pkg(ctx, entry, &i.path) {
+                    Resolve::Dir(d) => {
+                        let idir = fpath.parent().unwrap_or(Path::new("."));
+                        if !internal_ok(&d, idir) {
+                            if loud {
+                                eprintln!(
+                                    "error [check] use of internal package `{}` not allowed",
+                                    i.path
+                                );
+                                return None;
+                            }
+                            continue;
+                        }
+                        match load_pkg(
+                            &PkgSrc::Dir(d), &i.path, true, false, seen, pkg_names, loading, ctx,
+                            entry, over, loud,
+                        ) {
                             Some((sub, sub_files)) => {
                                 let bound = sub.pkg.clone();
                                 if !bound.is_empty() {
@@ -550,15 +914,25 @@ fn load_pkg(
                             None => {}
                         }
                     }
-                    None if loud => {
-                        eprintln!(
-                            "error [check] cannot resolve import `{}` (from `{}`)",
-                            i.path,
-                            fpath.display()
-                        );
-                        return None;
+                    Resolve::Missing(mv) => {
+                        if loud {
+                            eprintln!(
+                                "error [check] missing module `{mv}` — oxl get it or replace it"
+                            );
+                            return None;
+                        }
                     }
-                    None => {}
+                    Resolve::NotFound => {
+                        if loud {
+                            let hint = if remoteish(&i.path) {
+                                " (missing module — oxl get it or add a require)"
+                            } else {
+                                ""
+                            };
+                            eprintln!("error [check] cannot find package `{}`{hint}", i.path);
+                            return None;
+                        }
+                    }
                 }
             }
         }
@@ -582,13 +956,34 @@ fn load_pkg(
 
 /// root package: the file/dir args name the sources; decls stay bare
 fn load_crate(src: &PkgSrc) -> Option<(ast::Crate, Vec<PathBuf>)> {
+    let entry = match src {
+        PkgSrc::Dir(d) => d.clone(),
+        PkgSrc::Files(fs) => fs[0].parent().unwrap_or(Path::new(".")).to_path_buf(),
+    };
+    let ctx = match mod_ctx(&entry, true) {
+        Ok(c) => c,
+        Err(()) => return None,
+    };
     let mut seen = std::collections::HashSet::new();
     let mut pkg_names = std::collections::HashMap::new();
+    let mut loading = Vec::new();
     let label = match src {
         PkgSrc::Dir(d) => d.to_string_lossy().to_string(),
         PkgSrc::Files(fs) => fs[0].to_string_lossy().to_string(),
     };
-    load_pkg(src, &label, false, true, &mut seen, &mut pkg_names, None, true)
+    load_pkg(
+        src,
+        &label,
+        false,
+        true,
+        &mut seen,
+        &mut pkg_names,
+        &mut loading,
+        ctx.as_ref(),
+        &entry,
+        None,
+        true,
+    )
 }
 
 /// apply the module's rename/alias maps to one non-import item in place
@@ -1091,6 +1486,10 @@ fn analyze(path: &Path, src: &str) -> Analysis {
     let _krate = parser::parse(&toks, &mut diags);
     let mut seen = std::collections::HashSet::new();
     let mut pkg_names = std::collections::HashMap::new();
+    let mut loading = Vec::new();
+    let ctx = mod_ctx(path.parent().unwrap_or(Path::new(".")), false)
+        .ok()
+        .flatten();
     let fs = vec![path.to_path_buf()];
     let loaded = load_pkg(
         &PkgSrc::Files(fs),
@@ -1099,6 +1498,9 @@ fn analyze(path: &Path, src: &str) -> Analysis {
         true,
         &mut seen,
         &mut pkg_names,
+        &mut loading,
+        ctx.as_ref(),
+        path.parent().unwrap_or(Path::new(".")),
         Some((path, src)),
         false,
     );

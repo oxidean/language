@@ -2,9 +2,9 @@ package main
 
 // d5 module qualification: namespaces, `as` alias, selective flatten,
 // and two modules exporting the same name coexisting
-import "d5a"
+import "oxl/tests/d5a"
 
-import "d5b"
+import "oxl/tests/d5b"
 
 import "std/strings" as s
 

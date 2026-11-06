@@ -10,9 +10,9 @@ package check
 // AST-subset boundary: the bootstrap parser does not produce generics
 // (fn f[T any]), interface decls, select arms, closures, import aliases,
 // or float literals — files using them fail parse-side before checking.
-import "bootstrap/lexlib"
+import "oxl/bootstrap/lexlib"
 
-import "bootstrap/parser"
+import "oxl/bootstrap/parser"
 
 import "std/collections"
 
@@ -22,6 +22,11 @@ import "std/strings"
 extern fn rt_lsdir(path: str) -> str
 
 extern fn rt_isdir(path: str) -> int
+
+// module resolution needs env (OXLMODCACHE) + file-exists (oxl.mod)
+extern fn rt_getenv(name: str) -> str
+
+extern fn rt_fexists(path: str) -> int
 
 // ---------- interned types ----------
 fn k_unk() -> int {
@@ -366,6 +371,16 @@ struct Ck {
     susp: own SList, // suspend-capable fn names
     loaded: own SList, // resolved package dirs
     loaded_names: own ModEnt, // resolved dir -> package clause cache
+    loading: own ModEnt, // in-flight pkg dir -> written imp (cycle detect)
+    load_fail: int, // a load-time diag fired — unwind like Rust's None path
+    mod_on: int, // an oxl.mod was found (module mode); 0 = std-only
+    mod_path: str, // declared module path
+    mod_root: str, // dir holding oxl.mod
+    mod_floor: str, // `oxl` directive as written
+    mod_reqs: own ModEnt, // require path -> version
+    mod_reps: own ModEnt, // replace path -> resolved local dir
+    modcache: str, // module cache root
+    entry_dir: str, // root package dir — anchors the source-tree std walk
     fnvals: own SList, // named fns used as values
     cur_fn: str,
     cur_mod: str, // package clause while checking
@@ -4810,17 +4825,383 @@ fn clause_of(ck: ref Ck, dir: str) -> str {
     return ""
 }
 
-// mirrors resolve_pkg: dir-relative first, then `<ancestor>/<imp>` —
-// this is what makes `std/...` and repo-rooted paths resolve (no
-// exe-adjacent walk here: corpus paths are all in-repo)
-fn resolve_imp(from_file: str, imp: str) -> str {
-    rel := dir_of(from_file) + "/" + imp
-    if rt_isdir(rel) == 1 {
-        return rel
+// ---------- module system (mirrors the Rust mod_ctx/resolve_pkg) ----------
+
+// language version this self-hosted toolchain implements — kept in
+// lock-step with the Rust OXL_VERSION (Cargo.toml major.minor)
+fn tool_ver() -> str {
+    return "0.3"
+}
+
+// resolve result: dir non-empty = found; missing non-empty = declared
+// require with neither replace nor a cache copy; both = cannot find
+struct RRes { dir: str, missing: str }
+
+fn all_digits(s: str) -> bool {
+    i := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if c < 48 || c > 57 {
+            return false
+        }
+        i = i + 1
     }
-    d := dir_of(from_file)
+    return true
+}
+
+// `X.Y[.Z]` -> maj*1000000+min*1000+patch for ordering; -1 malformed
+fn ver_tuple(v: str) -> int {
+    if strings.startswith(v, "v") {
+        v = substr(v, 1, len(v))
+    }
+    parts := strings.split(v, ".")
+    nums := mkslice(int, 0)
+    for parts != nil {
+        if len(parts.v) == 0 || all_digits(parts.v) == false {
+            return -1
+        }
+        nums = push(nums, atoi(parts.v))
+        parts = parts.next
+    }
+    if len(nums) < 2 || len(nums) > 3 {
+        return -1
+    }
+    patch := 0
+    if len(nums) == 3 {
+        patch = nums[2]
+    }
+    return nums[0] * 1000000 + nums[1] * 1000 + patch
+}
+
+// `vX.Y.Z` or a pseudo-version (`vX.Y.Z-<anything>`)
+fn mod_ver_ok(v: str) -> bool {
+    core := v
+    h := find(v, "-")
+    if h >= 0 {
+        core = substr(v, 0, h)
+    }
+    if strings.startswith(core, "v") == false {
+        return false
+    }
+    parts := strings.split(substr(core, 1, len(core)), ".")
+    n := 0
+    for parts != nil {
+        if len(parts.v) == 0 || all_digits(parts.v) == false {
+            return false
+        }
+        n = n + 1
+        parts = parts.next
+    }
+    return n == 3
+}
+
+// first path segment carrying a `.` reads as a remote module path —
+// drives the `oxl get` hint on `cannot find package`
+fn remoteish(imp: str) -> bool {
+    seg := imp
+    i := find(imp, "/")
+    if i >= 0 {
+        seg = substr(imp, 0, i)
+    }
+    return find(seg, ".") >= 0
+}
+
+fn sl_len(l: ref SList) -> int {
+    n := 0
+    for l != nil {
+        n = n + 1
+        l = l.next
+    }
+    return n
+}
+
+fn sl_at(l: ref SList, i: int) -> str {
+    for l != nil {
+        if i == 0 {
+            return l.v
+        }
+        i = i - 1
+        l = l.next
+    }
+    return ""
+}
+
+// whitespace tokenizer for oxl.mod lines (space/tab — manifests don't
+// quote), returned as an ordered list
+fn split_ws(s: str) -> own SList {
+    let rev: own SList = nil
+    cur := ""
+    i := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if c == 32 || c == 9 {
+            if len(cur) > 0 {
+                rev = scons(cur, rev)
+                cur = ""
+            }
+        } else {
+            cur = cur + substr(s, i, i + 1)
+        }
+        i = i + 1
+    }
+    if len(cur) > 0 {
+        rev = scons(cur, rev)
+    }
+    let out: own SList = nil
+    for rev != nil {
+        out = scons(rev.v, out)
+        rev = rev.next
+    }
+    return out
+}
+
+// lexical `.`/`..` normalization — the internal-package rule compares
+// path prefixes, so `a/../b` must read as `b` (no symlink chasing; the
+// resolver never emits them)
+fn norm_path(p: str) -> str {
+    abs := strings.startswith(p, "/")
+    parts := strings.split(p, "/")
+    let stack: own SList = nil
+    for parts != nil {
+        s := parts.v
+        if s == ".." {
+            if stack != nil && stack.v != ".." {
+                stack = stack.next
+            } else if abs == false {
+                stack = scons("..", stack)
+            }
+        } else if len(s) > 0 && s != "." {
+            stack = scons(s, stack)
+        }
+        parts = parts.next
+    }
+    out := ""
+    for stack != nil {
+        if len(out) == 0 {
+            out = stack.v
+        } else {
+            out = stack.v + "/" + out
+        }
+        stack = stack.next
+    }
+    if abs {
+        return "/" + out
+    }
+    if len(out) == 0 {
+        return "."
+    }
+    return out
+}
+
+// nearest ancestor dir holding oxl.mod — "" when none (module-off)
+fn find_root(d: str) -> str {
     for len(d) > 0 {
-        p := d + "/" + imp
+        if rt_fexists(d + "/oxl.mod") == 1 {
+            return d
+        }
+        if d == "." || d == "/" {
+            break
+        }
+        d = dir_of(d)
+    }
+    if rt_fexists("/oxl.mod") == 1 {
+        return "/"
+    }
+    return ""
+}
+
+// OXLMODCACHE wins, else ~/.oxl/mod — mirrors modcache_dir
+fn modcache_dir() -> str {
+    v := rt_getenv("OXLMODCACHE")
+    if len(v) > 0 {
+        return v
+    }
+    h := rt_getenv("HOME")
+    if len(h) == 0 {
+        h = rt_getenv("USERPROFILE")
+    }
+    if len(h) > 0 {
+        return h + "/.oxl/mod"
+    }
+    return ".oxl/mod"
+}
+
+// manifest diagnostic — `oxl.mod:<line>: <msg>` (the file is always AT
+// the module root, so the bare name locates it)
+fn merr(ck: mut Ck, lineno: int, msg: str) {
+    diag(ck, "check", "oxl.mod:" + itoa(lineno) + ": " + msg)
+}
+
+// replace RHS is a local dir — absolute when `/` or `X:`-rooted,
+// else anchored at the module root
+fn is_abs(p: str) -> bool {
+    if strings.startswith(p, "/") {
+        return true
+    }
+    if len(p) >= 3 && substr(p, 1, 2) == ":" && substr(p, 2, 3) == "/" {
+        return true
+    }
+    return false
+}
+
+// one require/replace entry (inline or inside a ( ) block); `rest` is
+// the text after the keyword
+fn manifest_entry(ck: mut Ck, kw: str, rest: str, lineno: int) -> int {
+    toks := split_ws(rest)
+    n := sl_len(toks)
+    if kw == "require" {
+        if n != 2 {
+            merr(ck, lineno, "expected `path version`")
+            return 0
+        }
+        p := sl_at(toks, 0)
+        v := sl_at(toks, 1)
+        if mod_ver_ok(v) == false {
+            merr(ck, lineno, "bad version \"" + v + "\"")
+            return 0
+        }
+        l := ck.mod_reqs
+        for l != nil {
+            if l.alias == p {
+                merr(ck, lineno, "duplicate require \"" + p + "\"")
+                return 0
+            }
+            l = l.next
+        }
+        ck.mod_reqs = new(ModEnt{alias: p, stem: v, next: ck.mod_reqs})
+        return 1
+    }
+    // replace <path> [ver] => <dir>
+    arrow := -1
+    i := 0
+    for i < n {
+        if sl_at(toks, i) == "=>" {
+            arrow = i
+            break
+        }
+        i = i + 1
+    }
+    if arrow < 0 {
+        merr(ck, lineno, "expected `=>`")
+        return 0
+    }
+    if arrow == 0 || arrow > 2 || arrow + 1 != n - 1 {
+        merr(ck, lineno, "expected `path [version] => dir`")
+        return 0
+    }
+    if arrow == 2 && mod_ver_ok(sl_at(toks, 1)) == false {
+        merr(ck, lineno, "bad version \"" + sl_at(toks, 1) + "\"")
+        return 0
+    }
+    dir := sl_at(toks, arrow + 1)
+    if is_abs(dir) == false {
+        dir = ck.mod_root + "/" + dir
+    }
+    ck.mod_reps = new(ModEnt{alias: sl_at(toks, 0), stem: dir, next: ck.mod_reps})
+    return 1
+}
+
+// parse oxl.mod into ck's module fields — mirrors parse_manifest:
+// `//` comments, ( ) blocks, identical diagnostics incl. the oxl floor
+fn parse_manifest(ck: mut Ck, text: str) -> int {
+    lines := strings.split(text, "\n")
+    lineno := 0
+    block := ""
+    block_line := 0
+    for lines != nil {
+        lineno = lineno + 1
+        t := lines.v
+        lines = lines.next
+        ci := find(t, "//")
+        if ci >= 0 {
+            t = substr(t, 0, ci)
+        }
+        t = strings.trim(t)
+        if len(t) == 0 {
+            continue
+        }
+        if len(block) > 0 {
+            if t == ")" {
+                block = ""
+            } else if manifest_entry(ck, block, t, lineno) == 0 {
+                return 0
+            }
+            continue
+        }
+        toks := split_ws(t)
+        kw := sl_at(toks, 0)
+        n := sl_len(toks)
+        if kw == "module" {
+            if len(ck.mod_path) > 0 {
+                merr(ck, lineno, "duplicate directive \"module\"")
+                return 0
+            }
+            if n != 2 {
+                merr(ck, lineno, "expected module path")
+                return 0
+            }
+            ck.mod_path = sl_at(toks, 1)
+        } else if kw == "oxl" {
+            if len(ck.mod_floor) > 0 {
+                merr(ck, lineno, "duplicate directive \"oxl\"")
+                return 0
+            }
+            if n != 2 || ver_tuple(sl_at(toks, 1)) < 0 {
+                merr(ck, lineno, "expected version")
+                return 0
+            }
+            ck.mod_floor = sl_at(toks, 1)
+            if ver_tuple(sl_at(toks, 1)) > ver_tuple(tool_ver()) {
+                diag(ck, "check", "oxl.mod: requires oxl " + sl_at(toks, 1) + ", toolchain is " + tool_ver())
+                return 0
+            }
+        } else if kw == "require" || kw == "replace" {
+            if n == 2 && sl_at(toks, 1) == "(" {
+                block = kw
+                block_line = lineno
+            } else if manifest_entry(ck, kw, substr(t, len(kw), len(t)), lineno) == 0 {
+                return 0
+            }
+        } else {
+            merr(ck, lineno, "unknown directive \"" + kw + "\"")
+            return 0
+        }
+    }
+    if len(block) > 0 {
+        merr(ck, block_line, "unterminated " + block + " block")
+        return 0
+    }
+    if len(ck.mod_path) == 0 {
+        diag(ck, "check", "oxl.mod: missing module directive")
+        return 0
+    }
+    return 1
+}
+
+// find + parse the nearest oxl.mod into ck's module fields — 0 on
+// manifest error (diags emitted), 1 ok including module-off (no
+// oxl.mod anywhere: mod_on stays 0 and only `std/` imports resolve)
+fn mod_ctx_load(ck: mut Ck, start: str) -> int {
+    root := find_root(start)
+    if len(root) == 0 {
+        return 1
+    }
+    ck.mod_root = root
+    ck.modcache = modcache_dir()
+    text := readfile(root + "/oxl.mod")
+    if parse_manifest(ck, text) == 0 {
+        return 0
+    }
+    ck.mod_on = 1
+    return 1
+}
+
+// `<base>`-anchored ancestor walk for `std/<rest>` — the exe and the
+// entry dir each get one pass inside resolve_imp
+fn std_at(base: str, rest: str) -> str {
+    d := base
+    for len(d) > 0 {
+        p := d + "/std/" + rest
         if rt_isdir(p) == 1 {
             return p
         }
@@ -4829,19 +5210,131 @@ fn resolve_imp(from_file: str, imp: str) -> str {
         }
         d = dir_of(d)
     }
-    // exe-adjacent walk (mirrors the Rust resolve_pkg's current_exe
-    // fallback): sources outside the repo still find `std/...` beside
-    // the toolchain binary
-    d = dir_of(argv(0))
-    for len(d) > 0 {
-        p := d + "/" + imp
+    return ""
+}
+
+// mirrors resolve_pkg under the module rules: `std/` beside the
+// toolchain exe, then the main module's own path, then the longest
+// require-prefix through replace or the cache
+fn resolve_imp(ck: mut Ck, imp: str) -> RRes {
+    r := RRes{dir: "", missing: ""}
+    if strings.startswith(imp, "std/") {
+        rest := substr(imp, 4, len(imp))
+        // exe ancestors first (shipped-tree std beside the binary),
+        // then the entry's ancestors — a self-hosted checker compiled
+        // into a scratch dir still finds the SOURCE tree's std
+        r.dir = std_at(dir_of(argv(0)), rest)
+        if len(r.dir) == 0 {
+            r.dir = std_at(ck.entry_dir, rest)
+        }
+        return r
+    }
+    if ck.mod_on == 0 {
+        return r
+    }
+    if imp == ck.mod_path || strings.startswith(imp, ck.mod_path + "/") {
+        rest := ""
+        if len(imp) > len(ck.mod_path) {
+            rest = substr(imp, len(ck.mod_path) + 1, len(imp))
+        }
+        p := ck.mod_root
+        if len(rest) > 0 {
+            p = p + "/" + rest
+        }
         if rt_isdir(p) == 1 {
-            return p
+            r.dir = p
         }
-        if d == "." || d == "/" {
-            break
+        return r
+    }
+    // requires — longest path prefix wins
+    best_alias := ""
+    best_ver := ""
+    l := ck.mod_reqs
+    for l != nil {
+        if (imp == l.alias || strings.startswith(imp, l.alias + "/")) && len(l.alias) > len(best_alias) {
+            best_alias = l.alias
+            best_ver = l.stem
         }
-        d = dir_of(d)
+        l = l.next
+    }
+    if len(best_alias) > 0 {
+        rest := ""
+        if len(imp) > len(best_alias) {
+            rest = substr(imp, len(best_alias) + 1, len(imp))
+        }
+        rl := ck.mod_reps
+        for rl != nil {
+            if rl.alias == best_alias {
+                p := rl.stem
+                if len(rest) > 0 {
+                    p = p + "/" + rest
+                }
+                if rt_isdir(p) == 1 {
+                    r.dir = p
+                }
+                return r
+            }
+            rl = rl.next
+        }
+        base := ck.modcache + "/" + best_alias + "@" + best_ver
+        p := base
+        if len(rest) > 0 {
+            p = p + "/" + rest
+        }
+        if rt_isdir(base) == 1 {
+            if rt_isdir(p) == 1 {
+                r.dir = p
+            }
+        } else {
+            r.missing = best_alias + "@" + best_ver
+        }
+        return r
+    }
+    return r
+}
+
+// internal rule: the importing package's dir must sit under EVERY
+// `internal` segment's parent — mirrors the Rust component scan over
+// normalized paths
+fn internal_ok(resolved: str, importer_dir: str) -> bool {
+    rd := norm_path(resolved)
+    id := norm_path(importer_dir)
+    segs := strings.split(rd, "/")
+    prefix := ""
+    for segs != nil {
+        s := segs.v
+        if s == "internal" && len(prefix) > 0 {
+            if id != prefix && strings.startswith(id, prefix + "/") == false {
+                return false
+            }
+        }
+        if len(s) > 0 {
+            if len(prefix) == 0 {
+                prefix = s
+            } else {
+                prefix = prefix + "/" + s
+            }
+        }
+        segs = segs.next
+    }
+    return true
+}
+
+// the written-imp chain from the in-flight load of `dir` to the stack
+// top, oldest first — "" when `dir` isn't mid-load
+fn cycle_chain(ck: mut Ck, dir: str) -> str {
+    rev := ""
+    l := ck.loading
+    for l != nil {
+        if len(rev) == 0 {
+            rev = l.stem
+        } else {
+            rev = l.stem + " → " + rev
+        }
+        if l.alias == dir {
+            return rev
+        }
+        l = l.next
     }
     return ""
 }
@@ -4854,11 +5347,13 @@ fn parse_pfile(ck: mut Ck, path: str) -> PFile {
     src := readfile(path)
     if len(src) == 0 {
         diag(ck, "check", "cannot read `" + path + "`")
+        ck.load_fail = 1
         return PFile{path: path, clause: "", ast: nil}
     }
     ast := parser.parse(lexlib.lex(src))
     if ast == nil {
         diag(ck, "lex", "lexical error — see lex output above")
+        ck.load_fail = 1
         return PFile{path: path, clause: "", ast: nil}
     }
     clause := ""
@@ -4899,11 +5394,25 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
             for l != nil {
                 match l.v {
                     parser.Node.Import{path, alias, names} => {
-                        p := resolve_imp(fpath, path)
-                        if len(p) == 0 {
-                            diag(ck, "check", "cannot resolve import `" + path + "` (from `" + fpath + "`)")
+                        if ck.load_fail == 1 {
+                            break
+                        }
+                        rr := resolve_imp(ck, path)
+                        if len(rr.missing) > 0 {
+                            diag(ck, "check", "missing module `" + rr.missing + "` — oxl get it or replace it")
+                            ck.load_fail = 1
+                        } else if len(rr.dir) == 0 {
+                            if remoteish(path) {
+                                diag(ck, "check", "cannot find package `" + path + "` (missing module — oxl get it or add a require)")
+                            } else {
+                                diag(ck, "check", "cannot find package `" + path + "`")
+                            }
+                            ck.load_fail = 1
+                        } else if internal_ok(rr.dir, dir_of(fpath)) == false {
+                            diag(ck, "check", "use of internal package `" + path + "` not allowed")
+                            ck.load_fail = 1
                         } else {
-                            bound := load_pkg(ck, ld, p, path, 1, 0)
+                            bound := load_pkg(ck, ld, rr.dir, path, 1, 0)
                             if len(bound) > 0 {
                                 if len(alias) > 0 {
                                     al = new(ModEnt{alias: alias, stem: bound, next: al})
@@ -4940,10 +5449,26 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
 // diagnostics already emitted). Mirrors the Rust load_pkg checks:
 // mixed clauses, clause-vs-dirname, `main` isn't importable.
 fn load_pkg(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int, is_root: int) -> str {
+    if ck.load_fail == 1 {
+        return ""
+    }
+    cc := cycle_chain(ck, dir)
+    if len(cc) > 0 {
+        diag(ck, "check", "import cycle not allowed: " + cc + " → " + imp)
+        ck.load_fail = 1
+        return ""
+    }
     if sl_has(ck.loaded, dir) {
         return clause_of(ck, dir)
     }
     ck.loaded = scons(dir, ck.loaded)
+    ck.loading = new(ModEnt{alias: dir, stem: imp, next: ck.loading})
+    r := load_pkg_inner(ck, ld, dir, imp, as_import, is_root)
+    ck.loading = ck.loading.next
+    return r
+}
+
+fn load_pkg_inner(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int, is_root: int) -> str {
     // .oxl entries of the dir — rt_lsdir presorts so the load order
     // (and diagnostics) match the Rust loader deterministically
     fs := mkslice(str, 0)
@@ -5054,13 +5579,40 @@ fn check_file(path: str, need_main: int) -> own CkRes {
     ck.clcks = nil
     ck.loop_depth = 0
     ck.nerr = 0
+    ck.loading = nil
+    ck.load_fail = 0
+    ck.mod_on = 0
+    ck.mod_path = ""
+    ck.mod_root = ""
+    ck.mod_floor = ""
+    ck.mod_reqs = nil
+    ck.mod_reps = nil
+    ck.modcache = ""
+    ck.entry_dir = ""
     ld := new(Loader)
     ld.items = mkslice(It, 0)
+    // module ctx from the entry — dir args directly, file args' parent
+    start := path
+    if rt_isdir(path) == 0 {
+        start = dir_of(path)
+    }
+    ck.entry_dir = start
+    if mod_ctx_load(ck, start) == 0 {
+        ck.load_fail = 1
+    }
     root_pkg := ""
-    if rt_isdir(path) == 1 {
-        root_pkg = load_pkg(ck, ld, path, path, 0, 1)
-    } else {
-        root_pkg = load_file_root(ck, ld, path)
+    if ck.load_fail == 0 {
+        if rt_isdir(path) == 1 {
+            root_pkg = load_pkg(ck, ld, path, path, 0, 1)
+        } else {
+            root_pkg = load_file_root(ck, ld, path)
+        }
+    }
+    if ck.load_fail == 1 {
+        r := new(CkRes)
+        r.ck = ck
+        r.items = ld.items
+        return r
     }
     if need_main == 1 && len(root_pkg) > 0 && root_pkg != "main" {
         diag(ck, "check", "package `" + root_pkg + "` is not a main package")

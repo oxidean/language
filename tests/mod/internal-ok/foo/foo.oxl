@@ -1,0 +1,7 @@
+package foo
+
+import "app/internal/x"
+
+fn f() -> int {
+    return x.x()
+}

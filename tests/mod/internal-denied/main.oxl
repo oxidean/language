@@ -1,0 +1,7 @@
+package main
+
+import "intmod/internal/x"
+
+fn main() {
+    v := x.x()
+}

@@ -1,0 +1,5 @@
+package x
+
+fn x() -> int {
+    return 9
+}

@@ -330,6 +330,8 @@ int64_t rt_set_reuseaddr(int64_t fd);                  /* SO_REUSEADDR, portable
 int64_t rt_bind_any(int64_t fd, int64_t port);         /* bind INADDR_ANY, portable */
 int64_t rt_htons(int64_t v);
 int64_t rt_htonl(int64_t v);
+OxlStr rt_getenv(OxlStr name);
+int64_t rt_fexists(OxlStr path);
 OxlStr rt_readfile(OxlStr path);
 int64_t rt_writefile(OxlStr path, OxlStr data);
 void rt_exit(int64_t code);

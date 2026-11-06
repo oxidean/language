@@ -2,7 +2,7 @@ package main
 
 // oxl check driver — prints the checker diagnostics, or `ok`
 //   oxl run bootstrap/cmd/check -- <file.oxl|dir>
-import "bootstrap/check"
+import "oxl/bootstrap/check"
 
 fn main() {
     if argc() < 2 {

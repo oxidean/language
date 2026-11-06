@@ -1,0 +1,5 @@
+package thing
+
+fn thing() -> int {
+    return 7
+}
