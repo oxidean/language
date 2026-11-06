@@ -8,7 +8,7 @@ The goal: the compiler, written in the language, compiled by itself.
   `.oxl` (shared library: token kinds, `lex`, cursor helpers)
 - `bootstrap/cmd/lex` — thin driver over lexlib (token dump)
 - `bootstrap/parser/parser.oxl` — a recursive-descent parser for `.oxl`,
-  written in `.oxl`, emitting the AST as JSON via `std/json`.
+  written in `.oxl`, emitting the AST as JSON via `std/encoding/json`.
   Internals are a typed `Node` enum (B1) — `to_json` dispatches on
   variants with `match` (B2), including `match` itself in the
   grammar. **It parses itself with zero skipped tokens** — full
@@ -47,7 +47,7 @@ rot.
 ## What the language already has (sufficient for frontend)
 
 - `readfile`/`writefile`/`exit` builtins (file io + process)
-- `import "std/http"` — binds the module under a namespace qualifier (`http.serve(...)`); `as` renames it and `.{name, ...}` imports select names unqualified. `std/...` resolves against the toolchain `std/` tree
+- `import "std/net/http"` — binds the module under a namespace qualifier (`http.serve(...)`); `as` renames it and `.{name, ...}` imports select names unqualified. `std/...` resolves against the toolchain `std/` tree
 - `own` linked structures + `nil` — token lists and AST trees
 - `mut`/`ref` borrows — parser cursors mutate through borrow regions
 - Generics: `fn f[T constraint]` monomorphized per instantiation

@@ -2,7 +2,7 @@ package parser
 
 // bootstrap/parser.oxl — a parser for .oxl, written in .oxl.
 // Second self-host component: consumes lexlib's token list and emits
-// the AST as JSON via std/json. With the lexer, the entire compiler
+// the AST as JSON via std/encoding/json. With the lexer, the entire compiler
 // frontend now exists in-language.
 //
 // Internals are a typed `Node` enum (B1) — every variant maps to one
@@ -12,7 +12,7 @@ package parser
 //   oxl run bootstrap/parser.oxl -- examples/hello.oxl
 import "oxl/bootstrap/lexlib"
 
-import "std/json"
+import "std/encoding/json"
 
 // readfile signals failure as "" — the same result a legitimately
 // empty file produces — so probe readability first to tell them apart

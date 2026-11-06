@@ -147,7 +147,7 @@ flags; publishing awaits the next tag.
 ### Task 17: Pilot apps [done — load tested]
 
 `examples/cli`: works. `examples/http-crud-sqlite`: rewritten on
-`std/http` + `std/json` + `std/strings`, serves real JSON
+`std/net/http` + `std/encoding/json` + `std/strings`, serves real JSON
 (`{"items":[...]}`), one shared sqlite conn via a `let` global —
 sqlite's serialized mode does the locking. Load test: 300 concurrent
 GETs all 200s, RSS ~2.4 MB; writes: 30/30 serial **and 100/100 at

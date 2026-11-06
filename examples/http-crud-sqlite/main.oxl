@@ -1,15 +1,15 @@
 package main
 
 // HTTP CRUD + SQLite pilot — the v0.0.1 success bar for services.
-// Now built on std/http: the server plumbing lives in stdlib, this file
+// Now built on std/net/http: the server plumbing lives in stdlib, this file
 // only declares the route handler.
 //
 //   oxl run examples/http-crud-sqlite/main.oxl
 //   curl localhost:8080/items             → list rows
 //   curl -d 'widget' localhost:8080/items → insert row
-import "std/http"
+import "std/net/http"
 
-import "std/json"
+import "std/encoding/json"
 
 // one shared connection for the whole process — sqlite's serialized
 // mode (THREADSAFE=1) provides the write lock; no per-request open/close.

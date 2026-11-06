@@ -3,7 +3,7 @@
 ## Problem
 
 JSON floats, durations, metrics, any real service numerics need a
-floating-point type. `std/json` documents ints-only as the v0
+floating-point type. `std/encoding/json` documents ints-only as the v0
 limitation; this unblocks it.
 
 ## Design sketch
@@ -14,7 +14,7 @@ limitation; this unblocks it.
   builtins — implicit widening is a deliberate anti-choice (keeps the
   type system shallow and costs visible)
 - `atof`/`ftoa` builtins (str conversions)
-- `std/json`: `j.i` for ints, `j.f` for floats, `kind` tag picks —
+- `std/encoding/json`: `j.i` for ints, `j.f` for floats, `kind` tag picks —
   `jparse` reads `.`/`e`/`E` into float
 
 ## Acceptance

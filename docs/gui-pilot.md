@@ -11,7 +11,7 @@ the FFI bridge.
 **Good — better than expected.**
 
 - *Handles-as-ints was enough.* Every GTK object is an opaque `int`
-  (same idiom as socket fds in `stdlib/http.oxl`). No wrapper types,
+  (same idiom as socket fds in `std/net/http/http.oxl`). No wrapper types,
   no unsafe blocks needed — GTK owns widget memory, OXL never
   dereferences. The ownership story simply doesn't engage because
   nothing `own`-typed crosses the boundary.

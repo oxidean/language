@@ -1,6 +1,6 @@
 package main
 
-import "std/json"
+import "std/encoding/json"
 
 import "std/sync"
 
