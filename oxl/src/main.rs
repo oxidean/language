@@ -2269,6 +2269,7 @@ fn tidy_satisfy(
     mtext: &mut String,
     sums: &mut Vec<modcache::SumLine>,
     probed: &mut std::collections::HashMap<String, Option<std::rc::Rc<fetch::Fetched>>>,
+    asked: &mut std::collections::HashSet<(String, String)>,
     report: &mut Vec<String>,
 ) -> Result<bool, String> {
     let cache = ctx.modcache.clone();
@@ -2288,6 +2289,11 @@ fn tidy_satisfy(
                 }
                 if let Some((mp, mv)) = best {
                     if !ctx.requires.iter().any(|(p, _)| p == mp) {
+                        // several deps can ask for the same module in
+                        // one pass — the first fetches and reports
+                        if !asked.insert((mp.clone(), mv.clone())) {
+                            return Ok(false);
+                        }
                         // fetch the dep's asked tag — MVS never selects
                         // below it
                         let f = fetch_mod(mp, mv)?;
@@ -2320,6 +2326,57 @@ fn tidy_satisfy(
         {
             upsert_require(mtext, rp, "v0.0.0-00010101000000-000000000000")?;
             report.push(format!("added {rp} (replace)"));
+            return Ok(true);
+        }
+    }
+    // restore: a require already covers imp but its selected version's
+    // slot is absent — fetch THAT version (Go re-downloads the pinned
+    // one, never @latest), verify it against the sums, and keep the
+    // floor. The probe below runs only when the restored tree lacks
+    // the package.
+    let mut covered: Vec<&String> = ctx
+        .requires
+        .iter()
+        .map(|(p, _)| p)
+        .filter(|mp| imp == mp.as_str() || imp.starts_with(&format!("{mp}/")))
+        .collect();
+    covered.sort_by_key(|mp| std::cmp::Reverse(mp.len()));
+    for mp in covered {
+        let Some(mv) = selected_ver(ctx, mp).map(str::to_string) else {
+            continue;
+        };
+        if replace_covers(ctx, mp, &mv) {
+            continue;
+        }
+        let slot = modcache::slot(&cache, mp, &mv);
+        let rest = imp[mp.len()..].trim_start_matches('/');
+        if slot.is_dir() {
+            // a slot fetched earlier in this tidy run wasn't visible
+            // to the walk — providing the package here resolves the
+            // import on the next pass; a pre-existing slot's contents
+            // were already judged by the provider scan
+            if asked.contains(&(mp.clone(), mv.clone()))
+                && (rest.is_empty() || slot.join(rest).is_dir())
+            {
+                return Ok(true);
+            }
+            continue;
+        }
+        asked.insert((mp.clone(), mv.clone()));
+        let f = fetch_mod(mp, &mv)?;
+        let slot = install(&cache, mp, &f)?;
+        // a pinned version already carries sums — refresh them only
+        // when the file lost the lines, never to mask a real mismatch
+        let has_sums = [false, true]
+            .iter()
+            .all(|m| modcache::sum_for(sums, mp, &mv, *m).is_some());
+        if has_sums {
+            modcache::verify_slot(&slot, mp, &mv, sums)?;
+        } else {
+            pin_require(mtext, sums, mp, &f, &slot)?;
+        }
+        report.push(format!("fetched {mp}@{mv}"));
+        if rest.is_empty() || slot.join(rest).is_dir() {
             return Ok(true);
         }
     }
@@ -2361,6 +2418,7 @@ fn tidy_satisfy(
             probed.insert(m.clone(), None);
             continue;
         }
+        let installing = tmp.is_some();
         if let Some(t) = tmp {
             commit_tmp(&t, &slot)?;
         } else if !slot_matches(&slot, &f)? {
@@ -2369,13 +2427,19 @@ fn tidy_satisfy(
                 f.ver
             ));
         }
+        let had_sums = [false, true]
+            .iter()
+            .all(|x| modcache::sum_for(sums, &m, &f.ver, *x).is_some());
         let old = pin_require(mtext, sums, &m, &f, &slot)?;
-        match old {
-            Some(o) if o == f.ver => {}
+        let moved = old.as_deref() != Some(f.ver.as_str());
+        match &old {
+            Some(o) if *o == f.ver => {}
             Some(o) => report.push(format!("upgraded {m}@{o} => {}", f.ver)),
             None => report.push(format!("added {m}@{}", f.ver)),
         }
-        return Ok(true);
+        // progress = installed a slot, moved the floor, or filled in
+        // missing sums — a pure no-op must not keep the fixpoint alive
+        return Ok(installing || !had_sums || moved);
     }
     Err(format!(
         "no required module provides package \"{imp}\"; to add it: oxl get {imp}"
@@ -2551,6 +2615,7 @@ fn mod_tidy(args: &[String], cwd: &Path) {
     let main_files = main_mod_files(&root);
     let mut probed: std::collections::HashMap<String, Option<std::rc::Rc<fetch::Fetched>>> =
         std::collections::HashMap::new();
+    let mut asked: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     let mut report: Vec<String> = Vec::new();
     // fixpoint: fetch/require changes alter resolution, so re-walk
     // until a pass leaves nothing unresolved
@@ -2575,6 +2640,7 @@ fn mod_tidy(args: &[String], cwd: &Path) {
                 &mut mtext,
                 &mut sums,
                 &mut probed,
+                &mut asked,
                 &mut report,
             ) {
                 Ok(c) => changed |= c,
