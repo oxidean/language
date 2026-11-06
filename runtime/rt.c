@@ -2090,15 +2090,21 @@ OxlStr rt_bufstr(void *buf, int64_t n) {
 }
 void rt_poke8(void *buf, int64_t off, int64_t v) { ((uint8_t *)buf)[off] = (uint8_t)v; }
 void rt_poke16(void *buf, int64_t off, int64_t v) {
-    uint16_t x = htons((uint16_t)v);
-    memcpy((uint8_t *)buf + off, &x, sizeof x);
+    uint8_t *p = (uint8_t *)buf + off;
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
 }
 void rt_poke32(void *buf, int64_t off, int64_t v) {
-    uint32_t x = htonl((uint32_t)v);
-    memcpy((uint8_t *)buf + off, &x, sizeof x);
+    uint8_t *p = (uint8_t *)buf + off;
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
 }
+#ifdef OXL_NET
 int64_t rt_htons(int64_t v) { return htons((uint16_t)v); }
 int64_t rt_htonl(int64_t v) { return htonl((uint32_t)v); }
+#endif /* OXL_NET */
 
 /* ---------------- file io + process ---------------- */
 
@@ -2266,6 +2272,7 @@ OxlStr rt_lsdir(OxlStr path) {
     return (OxlStr){ buf, (int64_t)off };
 }
 
+#ifdef OXL_NET
 /* portable socket setup — SOL_SOCKET/SO_REUSEADDR constants and the
  * sockaddr_in layout differ across Linux/macOS/BSD (sin_len exists only
  * on BSD-derived systems), so they can't be spelled in oxl source */
@@ -2316,6 +2323,7 @@ int64_t rt_set_sndtimo(int64_t fd, int64_t secs) {
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 #endif
 }
+#endif /* OXL_NET */
 
 /* file readability probe — readfile()'s "" result can't tell an
  * empty file from an unreadable one; callers that care probe first.
@@ -2333,6 +2341,7 @@ int64_t rt_file_readable(const char *path) {
  * says size_t, and C allows no disagreement */
 int64_t rt_strlen(const char *s) { return (int64_t)strlen(s); }
 
+#ifdef OXL_NET
 /* socket setup + fd I/O — socket/listen/accept can't be extern'd
  * directly: on Win32 they're real ws2_32 decls whose signatures clash
  * with the .oxl-emitted prototypes, and on POSIX they're only safe
@@ -2377,14 +2386,18 @@ int64_t rt_sock_close(int64_t fd) {
     return close((int)fd);
 #endif
 }
+#endif /* OXL_NET */
 
 /* process-wide runtime init — WinSock needs WSAStartup before the
- * first socket call; POSIX has no equivalent */
+ * first socket call (OXL_NET only); POSIX has no equivalent. The
+ * _setmode block is unconditional — binary stdio isn't socket work */
 void rt_init(void) {
-#ifdef _WIN32
+#if defined(_WIN32) && defined(OXL_NET)
     WSADATA wd;
     if (WSAStartup(MAKEWORD(2, 2), &wd) != 0)
         fprintf(stderr, "oxl: WSAStartup failed\n");
+#endif
+#ifdef _WIN32
     /* the CRT opens the standard streams in text mode: \n expands to
      * \r\n on write, \r\n collapses on read and Ctrl-Z reads as EOF.
      * POSIX fds carry bytes verbatim — binary mode keeps oxl stdio

@@ -314,22 +314,24 @@ void rt_poke8(void *buf, int64_t off, int64_t v);
 void rt_poke16(void *buf, int64_t off, int64_t v);
 void rt_poke32(void *buf, int64_t off, int64_t v);
 void rt_init(void);                                    /* proc init (WinSock); main() calls it */
+int64_t rt_file_readable(const char *path);            /* open+close probe */
+OxlStr rt_lsdir(OxlStr path);
+int64_t rt_isdir(OxlStr path);
+int64_t rt_strlen(const char *s);                         /* strlen, name-safe */
+#ifdef OXL_NET
 int64_t rt_sock_open(int64_t domain, int64_t ty, int64_t proto); /* socket() */
 int64_t rt_sock_listen(int64_t fd, int64_t backlog);             /* listen() */
 int64_t rt_sock_accept(int64_t fd);                            /* accept() */
 int64_t rt_sock_read(int64_t fd, void *buf, int64_t n);  /* read | recv, portable */
 int64_t rt_sock_write(int64_t fd, const char *buf, int64_t n); /* write | send */
 int64_t rt_sock_close(int64_t fd);                       /* close | closesocket */
-int64_t rt_file_readable(const char *path);            /* open+close probe */
-OxlStr rt_lsdir(OxlStr path);
-int64_t rt_isdir(OxlStr path);
-int64_t rt_strlen(const char *s);                         /* strlen, name-safe */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs);      /* SO_RCVTIMEO, portable */
 int64_t rt_set_sndtimo(int64_t fd, int64_t secs);      /* SO_SNDTIMEO, portable */
 int64_t rt_set_reuseaddr(int64_t fd);                  /* SO_REUSEADDR, portable */
 int64_t rt_bind_any(int64_t fd, int64_t port);         /* bind INADDR_ANY, portable */
 int64_t rt_htons(int64_t v);
 int64_t rt_htonl(int64_t v);
+#endif /* OXL_NET */
 OxlStr rt_getenv(OxlStr name);
 int64_t rt_fexists(OxlStr path);
 OxlStr rt_fullpath(OxlStr path);

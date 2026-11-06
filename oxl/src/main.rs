@@ -1355,18 +1355,46 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
     // which would break every build — including `oxl run hello.oxl` —
     // on a stock system. rt.c compiles its sqlite section only under
     // -DOXL_SQLITE, so the flag and the library arrive together.
-    let needs_sqlite = std::fs::read_to_string(&c_file)
-        .map(|s| s.contains("rt_sqlite_"))
-        .unwrap_or(false);
+    let needs_sqlite = c_src.contains("rt_sqlite_");
+    // OXL_NET wraps the socket family (sock_*, bind_any, set_*addr/
+    // timo, htons/htonl wrappers) — emitted C references these names
+    // only when the program declares the externs/builtins that emit
+    // them, so scanning it is an exact "uses sockets" test.
+    let needs_net = [
+        "rt_sock_",
+        "rt_bind_any",
+        "rt_set_reuseaddr",
+        "rt_set_rcvtimo",
+        "rt_set_sndtimo",
+        "rt_htons",
+        "rt_htonl",
+    ]
+    .iter()
+    .any(|p| c_src.contains(p));
     let mut cmd = Command::new(&cc);
     cmd.arg("-O2");
     #[cfg(not(windows))]
     cmd.arg("-pthread");
+    // G2: every emitted fn gets its own section so the linker can GC
+    // unreferenced runtime machinery — spelling is ELF/mingw
+    // --gc-sections, Mach-O -dead_strip (MSVC cl never reaches here:
+    // pick_cc only tries cc/gcc/clang driver spellings)
+    cmd.arg("-ffunction-sections").arg("-fdata-sections");
+    if cfg!(target_os = "macos") {
+        cmd.arg("-Wl,-dead_strip");
+    } else {
+        cmd.arg("-Wl,--gc-sections");
+    }
     cmd.arg("-o").arg(out).arg(&c_file).arg(dir.join("rt.c"));
-    // rt.c's socket shims reference WinSock unconditionally on Windows —
-    // ws2_32 must reach the link even when nothing else pulls it
+    // ws2_32 only when the program uses sockets — under OXL_NET gating
+    // rt.c's WinSock code isn't even compiled otherwise
     #[cfg(windows)]
-    cmd.arg("-lws2_32");
+    if needs_net {
+        cmd.arg("-lws2_32");
+    }
+    if needs_net {
+        cmd.arg("-DOXL_NET");
+    }
     if needs_sqlite {
         // -D before sources, -l after: --as-needed linkers (Ubuntu gcc
         // default) drop libs seen before the undefined refs they resolve
