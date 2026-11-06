@@ -1716,10 +1716,11 @@ fn cmd_fmt(args: &[String]) {
 /// slot is reused — re-get only re-pins the sums, matching Go's
 /// idempotent `go get` on a cached module.
 fn cmd_get(args: &[String]) {
-    let spec = args.get(2).unwrap_or_else(|| {
+    if args.len() != 3 {
         eprintln!("usage: oxl get <path>@<query>");
         exit(2);
-    });
+    }
+    let spec = &args[2];
     if spec.starts_with('-') {
         eprintln!("usage: oxl get <path>@<query>");
         exit(2);
@@ -1744,6 +1745,26 @@ fn cmd_get(args: &[String]) {
             exit(1);
         }
     };
+    // the fetched manifest must declare the path it was fetched as —
+    // Go refuses a module whose self-declared path differs from the
+    // required one (mis-pinned forks have to be replaced explicitly)
+    let declared = match std::str::from_utf8(&f.manifest)
+        .map_err(|e| e.to_string())
+        .and_then(|t| parse_manifest(t).map(|(p, _, _, _)| p))
+    {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {mpath}@{}: parsing oxl.mod: {e}", f.ver);
+            exit(1);
+        }
+    };
+    if declared != mpath {
+        eprintln!(
+            "error: {mpath}@{}: parsing oxl.mod: module declares its path as: {declared}, but was required as: {mpath}",
+            f.ver
+        );
+        exit(1);
+    }
     let cache = modcache_dir();
     let slot = modcache::slot(&cache, &mpath, &f.ver);
     if !slot.is_dir() {

@@ -353,12 +353,9 @@ pub fn untar(bytes: &[u8], dest: &Path) -> Result<u64, String> {
         if let Some(p) = pax_path.take() {
             name = p;
         }
-        // normalize: strip leading ./ and any prefix git archive added
-        // (we pass --prefix=<slotname>/ and drop its first component)
-        let mut comps: Vec<&str> = name.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
-        if comps.first().map_or(false, |c| c.contains('@')) && comps.len() > 1 {
-            comps.remove(0);
-        }
+        // normalize: strip leading ./ components; `git archive` adds
+        // no prefix unless asked, and we ask for none
+        let comps: Vec<&str> = name.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
         if comps.is_empty() {
             continue;
         }
