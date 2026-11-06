@@ -114,6 +114,7 @@ out=$("$OXL" test tests/float_test.oxl)
 grep -q "test_json_float ... ok" <<<"$out" || { echo "FAIL float: $out"; exit 1; }
 # int/float mixing must be a compile error, not silent widening
 cat > "$scratch/floatmix.oxl" <<'EOF'
+package main
 fn main() { x := 1 + 2.5 }
 EOF
 if "$OXL" build "$scratch/floatmix.oxl" -o "$scratch/floatmix$EXE" 2>/dev/null; then
@@ -129,6 +130,7 @@ out=$("$OXL" run tests/match.oxl)
 [ "$(tail -1 <<<"$out")" = "match ok" ] || { echo "FAIL match: $out"; exit 1; }
 # non-exhaustive match must name the missing variant
 cat > "$scratch/matchnex.oxl" <<'EOF'
+package main
 enum E { A(int), B, }
 fn f(e: E) -> int { return match e { E.A(v) => v } }
 fn main() { }
@@ -160,6 +162,7 @@ out=$("$OXL" run tests/fnval.oxl)
 # fn values can't suspend, capture susp, compare, or wrap generics/pairs
 for bad in susp clsusp ctrans gen pair eq; do
     cat > "$scratch/fnv_$bad.oxl" <<EOF
+package main
 $(case $bad in
   susp)   printf 'fn s() { sleep(1) }\nfn main() { f := s }' ;;
   clsusp) printf 'fn main() { f := { |x: int| sleep(1); return x } }' ;;
@@ -187,6 +190,7 @@ out=$("$OXL" run tests/defer_test.oxl)
 [ "$out" = $'3\n2\n1\n9\n2\n1\n0\n7\ndone' ] || { echo "FAIL defer: $out"; exit 1; }
 # trap unwind still drains the task's defer stack before aborting
 cat > "$scratch/d5trap.oxl" <<'EOF'
+package main
 fn dmark(x: int) { println(itoa(x)) }
 fn willtrap() {
     defer dmark(6)
@@ -206,6 +210,7 @@ out=$("$OXL" run tests/methods.oxl)
 [ "$out" = "methods ok" ] || { echo "FAIL methods: $out"; exit 1; }
 # a method-less type must not satisfy a method interface
 cat > "$scratch/d3sat.oxl" <<'D3EOF'
+package main
 interface Writer { write(s: str) -> int }
 struct Bare { n: int }
 fn emit(w: Writer) -> int { return w.write("x") }
@@ -216,6 +221,7 @@ if "$OXL" build "$scratch/d3sat.oxl" -o "$scratch/d3sat" 2>/dev/null; then
 fi
 # methods can't suspend — vtable calls carry no task frame
 cat > "$scratch/d3susp.oxl" <<'D3EOF'
+package main
 struct S { n: int }
 fn (s S) wait() { sleep(1) }
 fn main() { s := S{n: 0}; s.wait() }
@@ -227,6 +233,7 @@ fi
 echo "== move tracking (d2) =="
 # use-after-move must be a compile error naming the binding
 cat > "$scratch/d2move.oxl" <<'EOF'
+package main
 struct P { v: int }
 fn take(p: own P) { }
 fn main() { p := new(P); take(p); take(p) }
@@ -238,6 +245,7 @@ diag=$("$OXL" build "$scratch/d2move.oxl" -o "$scratch/d2move" 2>&1 || true)
 grep -q 'use of moved value `p`' <<<"$diag" || { echo "FAIL moved diag: $diag"; exit 1; }
 # the headline bug class — one own cell into two spawned workers
 cat > "$scratch/d2spawn.oxl" <<'EOF'
+package main
 struct P { v: int }
 fn w(p: own P) { }
 fn main() { p := new(P); spawn w(p); spawn w(p) }
@@ -247,6 +255,7 @@ if "$OXL" build "$scratch/d2spawn.oxl" -o "$scratch/d2spawn" 2>/dev/null; then
 fi
 # moved inside a loop body — the next iteration would read a moved value
 cat > "$scratch/d2for.oxl" <<'EOF'
+package main
 struct P { v: int }
 fn take(p: own P) { }
 fn main() { p := new(P); for true { take(p) } }
@@ -256,6 +265,7 @@ if "$OXL" build "$scratch/d2for.oxl" -o "$scratch/d2for" 2>/dev/null; then
 fi
 # re-init clears the mark
 cat > "$scratch/d2ok.oxl" <<'EOF'
+package main
 struct P { v: int }
 fn take(p: own P) { }
 fn main() {
@@ -271,6 +281,7 @@ out=$("$OXL" run "$scratch/d2ok.oxl")
 # moved in one branch: the join can't prove which path ran — reject the
 # later read unless EVERY path re-initializes the binding
 cat > "$scratch/d2branch.oxl" <<'EOF'
+package main
 struct P { v: int }
 fn take(p: own P) { }
 fn main() { p := new(P); if len("x") > 0 { take(p) }; take(p) }
@@ -288,6 +299,7 @@ out=$("$OXL" run tests/d5_qual.oxl)
 # an imported name with no qualifier and no selective flatten must not
 # resolve — silent shadowing was the bug d5 exists to kill
 cat > "$scratch/d5unqual.oxl" <<'EOF'
+package main
 import "std/strings"
 fn main() { println(trim(" x ")) }
 EOF
@@ -304,15 +316,15 @@ fi
 grep -q "undefined \`trim\`" <<<"$diag" || { echo "FAIL unqual diag: $diag"; exit 1; }
 
 echo "== bootstrap lexer =="
-out=$("$OXL" run bootstrap/lexer.oxl -- examples/hello.oxl)
-grep -q "11 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }
+out=$("$OXL" run bootstrap/cmd/lex -- examples/hello.oxl)
+grep -q "13 tokens" <<<"$out" || { echo "FAIL lexer"; exit 1; }
 
 echo "== bootstrap parser =="
-out=$("$OXL" run bootstrap/parser.oxl -- examples/features.oxl)
+out=$("$OXL" run bootstrap/cmd/parse -- examples/features.oxl)
 printf '%s' "$out" | $PY -c 'import json,sys
 d=json.load(sys.stdin)
-assert len(d["items"])==6 and not any("skip" in i for i in d["items"]), d' || { echo "FAIL parser"; exit 1; }
-out=$("$OXL" run bootstrap/parser.oxl -- bootstrap/parser.oxl)
+assert len(d["items"])==7 and not any("skip" in i for i in d["items"]), d' || { echo "FAIL parser"; exit 1; }
+out=$("$OXL" run bootstrap/cmd/parse -- bootstrap/parser/parser.oxl)
 # stdin not argv for the payload — a self-parse AST is far past the
 # ~32KB command-line cap Windows puts on every child process
 printf '%s' "$out" | $PY -c 'import json,sys
@@ -321,8 +333,8 @@ assert len(d["items"])>20 and not any("skip" in i for i in d["items"]), d' || { 
 
 echo "== bootstrap checker =="
 # the self-hosted typechecker must check itself and representative sources
-for f in bootstrap/check.oxl examples/features.oxl tests/match.oxl stdlib/collections.oxl; do
-    out=$("$OXL" run bootstrap/check.oxl -- "$f")
+for f in bootstrap/check examples/features.oxl tests/match.oxl std/collections; do
+    out=$("$OXL" run bootstrap/cmd/check -- "$f")
     [ "$out" = "ok" ] || { echo "FAIL checker $f: $out"; exit 1; }
 done
 
@@ -338,7 +350,7 @@ echo "== differential diagnostics (c1) =="
 # `oxl run` would recompile check.oxl's C per fixture, and clang's
 # -Wparentheses-equality warnings on the generated code (macOS cc) land
 # in the captured output and break the diff.
-"$OXL" build bootstrap/check.oxl -o "$scratch/selfcheck$EXE"     || { echo "FAIL selfcheck build"; exit 1; }
+"$OXL" build bootstrap/cmd/check -o "$scratch/selfcheck$EXE"     || { echo "FAIL selfcheck build"; exit 1; }
 for f in tests/diag/*.oxl; do
     # both checkers must reject every fixture (pipefail carries the
     # build's nonzero status through the sed) — and their diagnostics
@@ -366,7 +378,7 @@ echo "== bootstrap codegen =="
 # example plus representative tests, run-and-compared end to end
 cgen_dir=$(mktemp -d "$scratch/cgen.XXXXXX")
 cgen() {  # cgen <src> <name> — emit C via codegen.oxl, compile it
-    "$OXL" run bootstrap/codegen.oxl -- "$1" > "$cgen_dir/$2.c"
+    "$OXL" run bootstrap/cmd/codegen -- "$1" > "$cgen_dir/$2.c"
     # sqlite only when the emitted C calls it — mirrors emit_and_cc;
     # -l must follow the sources: with --as-needed a library listed
     # before them is dropped and rt.o's sqlite refs go undefined
@@ -387,7 +399,7 @@ got=$("$cgen_dir/cli$EXE" Jesse)
 want=$("$OXL" run examples/cli/main.oxl -- Jesse)
 [ "$got" = "$want" ] || { echo "FAIL codegen cli: $got"; exit 1; }
 # --test mode: scope-wrapped runner like `oxl test`
-"$OXL" run bootstrap/codegen.oxl -- --test examples/smoke_test.oxl > "$cgen_dir/t.c"
+"$OXL" run bootstrap/cmd/codegen -- --test examples/smoke_test.oxl > "$cgen_dir/t.c"
 "$CC" -O2 $THREAD_FLAG -Iruntime "$cgen_dir/t.c" runtime/rt.c -DOXL_SQLITE $SQLITE_LINK $NET_LIBS -o "$cgen_dir/t$EXE" || { echo "FAIL codegen cc --test"; exit 1; }
 out=$("$cgen_dir/t$EXE")
 grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL codegen --test: $out"; exit 1; }
@@ -414,7 +426,7 @@ kill $srv_pid 2>/dev/null || true
 # DISPLAY additionally selftests)
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists gtk4 2>/dev/null; then
     "$CC" -O2 $(pkg-config --cflags gtk4) -c examples/gui-todo/gui_shim.c -o "$cgen_dir/gui_shim.o"
-    "$OXL" run bootstrap/codegen.oxl -- examples/gui-todo/todo.oxl > "$cgen_dir/todo.c"
+    "$OXL" run bootstrap/cmd/codegen -- examples/gui-todo/todo.oxl > "$cgen_dir/todo.c"
     "$CC" -O2 $THREAD_FLAG -Iruntime "$cgen_dir/todo.c" runtime/rt.c "$cgen_dir/gui_shim.o" $(pkg-config --libs gtk4) $NET_LIBS -o "$cgen_dir/todo$EXE" || { echo "FAIL codegen cc gui"; exit 1; }
     if [ -n "${DISPLAY:-}" ]; then
         out=$(with_timeout 30 "$cgen_dir/todo$EXE" --selftest 2>/dev/null)
@@ -423,29 +435,30 @@ if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists gtk4 2>/dev/null
 fi
 # bootstrap chain: all four self-host components compiled by the
 # self-hosted codegen must behave identically to `oxl run`
-for comp in lexer parser check codegen; do
-    cgen "bootstrap/$comp.oxl" "self_$comp"
-done
+cgen "bootstrap/cmd/lex" "self_lexer"
+cgen "bootstrap/cmd/parse" "self_parser"
+cgen "bootstrap/cmd/check" "self_check"
+cgen "bootstrap/cmd/codegen" "self_codegen"
 out=$("$cgen_dir/self_lexer$EXE" examples/hello.oxl)
-want=$("$OXL" run bootstrap/lexer.oxl -- examples/hello.oxl)
+want=$("$OXL" run bootstrap/cmd/lex -- examples/hello.oxl)
 [ "$out" = "$want" ] || { echo "FAIL self lexer: $out"; exit 1; }
-grep -q "11 tokens" <<<"$out" || { echo "FAIL self lexer tokens: $out"; exit 1; }
+grep -q "13 tokens" <<<"$out" || { echo "FAIL self lexer tokens: $out"; exit 1; }
 out=$("$cgen_dir/self_parser$EXE" examples/features.oxl)
-want=$("$OXL" run bootstrap/parser.oxl -- examples/features.oxl)
+want=$("$OXL" run bootstrap/cmd/parse -- examples/features.oxl)
 [ "$out" = "$want" ] || { echo "FAIL self parser"; exit 1; }
 printf '%s' "$out" | $PY -c 'import json,sys
 d=json.load(sys.stdin)
-assert len(d["items"])==6 and not any("skip" in i for i in d["items"]), d' || { echo "FAIL self parser shape"; exit 1; }
+assert len(d["items"])==7 and not any("skip" in i for i in d["items"]), d' || { echo "FAIL self parser shape"; exit 1; }
 out=$("$cgen_dir/self_check$EXE" examples/features.oxl)
 [ "$out" = "ok" ] || { echo "FAIL self check: $out"; exit 1; }
 # deeper chain: the self-compiled checker's diagnostics must equal the
 # `oxl run` interpretation's on a corpus file — transitively Rust's
 out=$("$cgen_dir/self_check$EXE" tests/diag/own_use_moved.oxl || true)
-want=$("$OXL" run bootstrap/check.oxl -- tests/diag/own_use_moved.oxl || true)
+want=$("$OXL" run bootstrap/cmd/check -- tests/diag/own_use_moved.oxl || true)
 [ "$out" = "$want" ] || { echo "FAIL self check diag: $out vs $want"; exit 1; }
 # codegen self-compile emits byte-identical C to the direct emission
 "$cgen_dir/self_codegen$EXE" examples/hello.oxl > "$cgen_dir/chain.c"
-"$OXL" run bootstrap/codegen.oxl -- examples/hello.oxl > "$cgen_dir/direct.c"
+"$OXL" run bootstrap/cmd/codegen -- examples/hello.oxl > "$cgen_dir/direct.c"
 cmp "$cgen_dir/chain.c" "$cgen_dir/direct.c" || { echo "FAIL bootstrap chain"; exit 1; }
 
 echo "== a1 coroutine scale =="
@@ -560,7 +573,7 @@ out=$("$OXL" run tests/chanbuf_close.oxl)
 
 echo "== fmt check =="
 # the whole .oxl corpus must be canonically formatted
-if ! "$OXL" fmt --check $(find stdlib bootstrap tests examples -name '*.oxl' | sort); then
+if ! "$OXL" fmt --check $(find std bootstrap tests examples -name '*.oxl' | sort); then
     echo "FAIL fmt: run \`oxl fmt -w\` on the corpus"; exit 1
 fi
 
@@ -582,8 +595,8 @@ def recv():
         if not l: break
         k, v = l.split(":", 1); h[k.strip()] = v.strip()
     return json.loads(p.stdout.read(int(h["Content-Length"])).decode())
-uri = pathlib.Path("bootstrap/parser.oxl").resolve().as_uri()
-src = open("bootstrap/parser.oxl").read()
+uri = pathlib.Path("bootstrap/cmd/parse/main.oxl").resolve().as_uri()
+src = open("bootstrap/cmd/parse/main.oxl").read()
 send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}); recv()
 send({"jsonrpc":"2.0","method":"initialized","params":{}})
 send({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"oxl","version":1,"text":src}}}); recv()
@@ -594,7 +607,7 @@ pos = {"textDocument":{"uri":uri},"position":{"line":i,"character":col}}
 send({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":pos})
 h = recv(); assert "fn lexlib.lex(src: str)" in json.dumps(h), h
 send({"jsonrpc":"2.0","id":3,"method":"textDocument/definition","params":pos})
-d = recv(); assert d["result"]["uri"].endswith("bootstrap/lexlib.oxl"), d
+d = recv(); assert d["result"]["uri"].endswith("lexlib/lexlib.oxl"), d
 send({"jsonrpc":"2.0","method":"exit","params":{}})
 PYEOF
 

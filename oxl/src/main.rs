@@ -16,8 +16,8 @@ fn main() {
         cmd_lsp();
         return;
     }
-    if args.len() < 3 {
-        eprintln!("oxl — one toolchain binary\n\n  oxl build <file.oxl> [-o out]\n  oxl run <file.oxl>\n  oxl test <file.oxl>\n  oxl fmt <file.oxl>\n  oxl doc <file.oxl>\n  oxl lsp");
+    if args.len() < 2 {
+        eprintln!("oxl — one toolchain binary\n\n  oxl build [<pkg dir>|<file.oxl>...] [-o out]\n  oxl run [<pkg dir>|<file.oxl>...]\n  oxl test [<pkg dir>|<file.oxl>...]\n  oxl fmt <file.oxl>...\n  oxl doc <file.oxl>\n  oxl lsp");
         exit(2);
     }
     match args[1].as_str() {
@@ -34,34 +34,29 @@ fn main() {
     }
 }
 
-/// resolve an import path relative to the importing file, then `stdlib/`
-/// under any ancestor of the importing file (for `std/...` paths)
-fn resolve_import(from_file: &Path, imp: &str) -> Option<PathBuf> {
-    let mut cand = imp.to_string();
-    if !cand.ends_with(".oxl") {
-        cand.push_str(".oxl");
-    }
-    let rel = from_file.parent().unwrap_or(Path::new(".")).join(&cand);
-    if rel.exists() {
+/// resolve an import path to a package directory: first relative to the
+/// importing file, then `<ancestor>/<imp>` walking up from the importer
+/// (this is what makes `std/...` and repo-rooted paths resolve), and
+/// finally the same walk from the executable so out-of-tree sources
+/// still find the toolchain's std/.
+fn resolve_pkg(from_file: &Path, imp: &str) -> Option<PathBuf> {
+    let rel = from_file.parent().unwrap_or(Path::new(".")).join(imp);
+    if rel.is_dir() {
         return Some(rel);
     }
-    // std/x -> <ancestor>/stdlib/x.oxl walking up from the importing file
-    let stripped = cand.strip_prefix("std/").unwrap_or(&cand);
     let mut dir = from_file.parent().map(Path::to_path_buf);
     while let Some(d) = dir {
-        let p = d.join("stdlib").join(stripped);
-        if p.exists() {
+        let p = d.join(imp);
+        if p.is_dir() {
             return Some(p);
         }
         dir = d.parent().map(Path::to_path_buf);
     }
-    // last resort: walk up from the executable — a source outside the
-    // repo tree (e.g. /tmp/x.oxl) still finds the toolchain's stdlib
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(Path::to_path_buf);
         while let Some(d) = dir {
-            let p = d.join("stdlib").join(stripped);
-            if p.exists() {
+            let p = d.join(imp);
+            if p.is_dir() {
                 return Some(p);
             }
             dir = d.parent().map(Path::to_path_buf);
@@ -70,9 +65,25 @@ fn resolve_import(from_file: &Path, imp: &str) -> Option<PathBuf> {
     None
 }
 
-/// stem of a resolved path = its canonical module name
-fn mod_stem(path: &Path) -> String {
-    path.file_stem().unwrap_or_default().to_string_lossy().to_string()
+/// `*.oxl` files of a package directory, sorted for deterministic loads
+fn pkg_dir_files(dir: &Path) -> Vec<PathBuf> {
+    let mut fs: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |x| x == "oxl"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    fs.sort();
+    fs
+}
+
+/// a package's sources: a directory scan or an explicit file list
+/// (command-line file mode — Go's `go run a.go b.go`)
+enum PkgSrc {
+    Dir(PathBuf),
+    Files(Vec<PathBuf>),
 }
 
 /// rename an oxl identifier through this module's maps:
@@ -321,35 +332,25 @@ fn recv_base(t: &ast::TyRef) -> Option<String> {
     }
 }
 
-fn load_crate(
+/// parse one package file — the `over` buffer substitutes its path so the
+/// LSP analyzes unsaved text. Returns (clause, items); on a parse failure
+/// with loud set the diags have already been reported.
+fn parse_pkg_file(
     path: &Path,
-    seen: &mut std::collections::HashSet<PathBuf>,
-) -> Option<(ast::Crate, Vec<PathBuf>)> {
-    load_mod(path, "", seen, true)
-}
-
-/// parse a file, recursively qualify its imports under their module stems,
-/// then qualify this file's own decls as `mod.name` (root: modname "").
-/// The returned Vec<PathBuf> is item-parallel: the file each item's spans
-/// index into (imported items keep their own file's coordinates).
-fn load_mod(
-    path: &Path,
-    modname: &str,
-    seen: &mut std::collections::HashSet<PathBuf>,
+    over: Option<(&Path, &str)>,
     loud: bool,
-) -> Option<(ast::Crate, Vec<PathBuf>)> {
-    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !seen.insert(canon.clone()) {
-        return Some((ast::Crate { items: Vec::new() }, Vec::new()));
-    }
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            if loud {
-                eprintln!("{}: {e}", path.display());
+) -> Option<(String, Vec<ast::Item>)> {
+    let src = match over {
+        Some((p, s)) if p == path => s.to_string(),
+        _ => match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                if loud {
+                    eprintln!("{}: {e}", path.display());
+                }
+                return None;
             }
-            return None;
-        }
+        },
     };
     let mut diags = diag::Diags::new(path.to_string_lossy().to_string(), src.clone());
     let toks = lexer::lex(&src, &mut diags);
@@ -360,76 +361,222 @@ fn load_mod(
             return None;
         }
     }
-    // own decl names (externs keep C names) + per-import maps
-    let mut renames: std::collections::HashMap<String, String> = Default::default();
-    let mut aliases: std::collections::HashMap<String, String> = Default::default();
-    if !modname.is_empty() {
-        for it in &krate.items {
-            // methods key on the receiver type (`T.m`), not the bare name —
-            // two types may share a method name, so `m` can't be a decl key
-            if let ast::Item::Fn(f) = it {
-                if f.recv.is_some() {
-                    continue;
-                }
+    Some((krate.pkg, krate.items))
+}
+
+/// last path component, string-level — identical rule on the .oxl side
+/// (trailing slashes ignored); used for the dir-name/package-name check
+fn path_base(p: &str) -> String {
+    p.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(p)
+        .to_string()
+}
+
+fn fname(p: &Path) -> String {
+    p.file_name().unwrap_or_default().to_string_lossy().to_string()
+}
+
+/// load a package — every `.oxl` of `src` shares one clause and one decl
+/// namespace (file-scope imports like Go). Decls qualify as `pkg.name`
+/// for imported packages, bare for the root (`is_root`). The returned
+/// Vec<PathBuf> is item-parallel: the file each item's spans index into.
+fn load_pkg(
+    src: &PkgSrc,
+    imp: &str,
+    as_import: bool,
+    is_root: bool,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    pkg_names: &mut std::collections::HashMap<PathBuf, String>,
+    over: Option<(&Path, &str)>,
+    loud: bool,
+) -> Option<(ast::Crate, Vec<PathBuf>)> {
+    let (dir_disp, files): (String, Vec<PathBuf>) = match src {
+        PkgSrc::Dir(d) => {
+            let key = d.canonicalize().unwrap_or_else(|_| d.clone());
+            if !seen.insert(key.clone()) {
+                // already loaded (or mid-cycle): items dedup away but the
+                // importer still binds the cached clause name
+                let pkg = pkg_names.get(&key).cloned().unwrap_or_default();
+                return Some((ast::Crate { pkg, items: Vec::new() }, Vec::new()));
             }
-            let n = match it {
-                ast::Item::Fn(f) => Some(&f.name),
-                ast::Item::Struct(s) => Some(&s.name),
-                ast::Item::Enum(e) => Some(&e.name),
-                ast::Item::Interface(i) => Some(&i.name),
-                ast::Item::Global(g) => Some(&g.name),
-                _ => None,
-            };
-            if let Some(n) = n {
-                renames.insert(n.clone(), format!("{modname}.{n}"));
+            (d.to_string_lossy().to_string(), pkg_dir_files(d))
+        }
+        PkgSrc::Files(fs) => (
+            fs[0]
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_string_lossy()
+                .to_string(),
+            fs.clone(),
+        ),
+    };
+    if let PkgSrc::Dir(_) = src {
+        if files.is_empty() {
+            if loud {
+                eprintln!("error [check] no .oxl source files in `{dir_disp}`");
+                return None;
+            }
+            return Some((ast::Crate { pkg: String::new(), items: Vec::new() }, Vec::new()));
+        }
+    }
+    // parse all files first — clause validation precedes decl collection
+    let mut pfiles: Vec<(PathBuf, String, Vec<ast::Item>)> = Vec::new();
+    for f in &files {
+        match parse_pkg_file(f, over, loud) {
+            Some((clause, items)) => pfiles.push((f.clone(), clause, items)),
+            None if loud => return None,
+            None => return Some((ast::Crate { pkg: String::new(), items: Vec::new() }, Vec::new())),
+        }
+    }
+    let clause0 = pfiles[0].1.clone();
+    for pf in &pfiles[1..] {
+        if pf.1 != clause0 {
+            if loud {
+                eprintln!(
+                    "error [check] found packages `{clause0}` (`{}`) and `{}` (`{}`) in `{dir_disp}`",
+                    fname(&pfiles[0].0), pf.1, fname(&pf.0)
+                );
+                return None;
+            }
+            break;
+        }
+    }
+    if as_import && clause0 == "main" {
+        if loud {
+            eprintln!("error [check] `{imp}` is a program, not an importable package");
+            return None;
+        }
+    }
+    if matches!(src, PkgSrc::Dir(_)) && clause0 != "main" && clause0 != path_base(&dir_disp) {
+        if loud {
+            eprintln!(
+                "error [check] package name `{clause0}` does not match directory `{}`",
+                path_base(&dir_disp)
+            );
+            return None;
+        }
+    }
+    // Files-mode file lists must share one directory (Go's file-list rule)
+    if let PkgSrc::Files(fs) = src {
+        let d0 = fs[0].parent().map(Path::to_path_buf);
+        for f in &fs[1..] {
+            if f.parent().map(Path::to_path_buf) != d0 {
+                if loud {
+                    eprintln!(
+                        "error [check] named files must all be in one directory; have `{}` and `{}`",
+                        d0.as_deref().unwrap_or(Path::new(".")).display(),
+                        f.parent().unwrap_or(Path::new(".")).display()
+                    );
+                    return None;
+                }
+                break;
+            }
+        }
+    }
+    if let PkgSrc::Dir(d) = src {
+        pkg_names.insert(d.canonicalize().unwrap_or_else(|_| d.clone()), clause0.clone());
+    }
+    // shared decl renames across every file of the package (root stays bare)
+    let mut shared: std::collections::HashMap<String, String> = Default::default();
+    if !is_root {
+        for (_, _, items) in &pfiles {
+            for it in items {
+                // methods key on the receiver type (`T.m`), not the bare
+                // name — two types may share a method name
+                if let ast::Item::Fn(f) = it {
+                    if f.recv.is_some() {
+                        continue;
+                    }
+                }
+                let n = match it {
+                    ast::Item::Fn(f) => Some(&f.name),
+                    ast::Item::Struct(s) => Some(&s.name),
+                    ast::Item::Enum(e) => Some(&e.name),
+                    ast::Item::Interface(i) => Some(&i.name),
+                    ast::Item::Global(g) => Some(&g.name),
+                    _ => None,
+                };
+                if let Some(n) = n {
+                    shared.insert(n.clone(), format!("{clause0}.{n}"));
+                }
             }
         }
     }
     let mut items = Vec::new();
     let mut item_files: Vec<PathBuf> = Vec::new();
-    // pass 1: resolve every import first so its alias/selective bindings are
-    // visible to all decls regardless of source order
-    for it in &krate.items {
-        if let ast::Item::Import(imp) = it {
-            match resolve_import(path, &imp.path) {
-                Some(p) => {
-                    let stem = mod_stem(&p);
-                    aliases.insert(imp.alias.clone().unwrap_or_else(|| stem.clone()), stem.clone());
-                    if imp.alias.is_none() {
-                        aliases.insert(stem.clone(), stem.clone());
+    for (fpath, _, fitems) in pfiles {
+        // per-file maps: package-shared decls + this file's own imports
+        let mut renames = shared.clone();
+        let mut aliases: std::collections::HashMap<String, String> = Default::default();
+        // pass 1: resolve this file's imports first so its decls see the
+        // bindings regardless of source order
+        for it in &fitems {
+            if let ast::Item::Import(i) = it {
+                match resolve_pkg(&fpath, &i.path) {
+                    Some(d) => {
+                        match load_pkg(&PkgSrc::Dir(d), &i.path, true, false, seen, pkg_names, over, loud) {
+                            Some((sub, sub_files)) => {
+                                let bound = sub.pkg.clone();
+                                if !bound.is_empty() {
+                                    aliases.insert(
+                                        i.alias.clone().unwrap_or_else(|| bound.clone()),
+                                        bound.clone(),
+                                    );
+                                    if i.alias.is_none() {
+                                        aliases.insert(bound.clone(), bound.clone());
+                                    }
+                                    for s in &i.selective {
+                                        renames.insert(s.clone(), format!("{bound}.{s}"));
+                                    }
+                                }
+                                items.extend(sub.items);
+                                item_files.extend(sub_files);
+                            }
+                            None if loud => return None,
+                            None => {}
+                        }
                     }
-                    for s in &imp.selective {
-                        renames.insert(s.clone(), format!("{stem}.{s}"));
-                    }
-                    if let Some((sub, sub_files)) = load_mod(&p, &stem, seen, loud) {
-                        items.extend(sub.items);
-                        item_files.extend(sub_files);
-                    } else if loud {
+                    None if loud => {
+                        eprintln!(
+                            "error [check] cannot resolve import `{}` (from `{}`)",
+                            i.path,
+                            fpath.display()
+                        );
                         return None;
                     }
+                    None => {}
                 }
-                None if loud => {
-                    eprintln!("error [check] cannot resolve import `{}` (from `{}`)", imp.path, path.display());
-                    return None;
-                }
-                None => {}
             }
         }
-    }
-    // pass 2: qualify own decls against the complete maps
-    let own = krate.items.len();
-    for it in krate.items {
-        match it {
-            ast::Item::Import(_) => {}
-            mut it => {
-                qualify_item(&mut it, &renames, &aliases);
-                items.push(it);
+        // pass 2: qualify this file's decls against the complete maps
+        for it in fitems {
+            match it {
+                ast::Item::Import(_) => {}
+                mut it => {
+                    qualify_item(&mut it, &renames, &aliases);
+                    items.push(it);
+                }
             }
         }
+        item_files.extend(
+            std::iter::repeat(fpath.clone()).take(items.len() - item_files.len()),
+        );
     }
-    item_files.extend(std::iter::repeat(path.to_path_buf()).take(items.len() - item_files.len()));
-    debug_assert_eq!(items.len(), item_files.len(), "{own} own items");
-    Some((ast::Crate { items }, item_files))
+    debug_assert_eq!(items.len(), item_files.len());
+    Some((ast::Crate { pkg: clause0, items }, item_files))
+}
+
+/// root package: the file/dir args name the sources; decls stay bare
+fn load_crate(src: &PkgSrc) -> Option<(ast::Crate, Vec<PathBuf>)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut pkg_names = std::collections::HashMap::new();
+    let label = match src {
+        PkgSrc::Dir(d) => d.to_string_lossy().to_string(),
+        PkgSrc::Files(fs) => fs[0].to_string_lossy().to_string(),
+    };
+    load_pkg(src, &label, false, true, &mut seen, &mut pkg_names, None, true)
 }
 
 /// apply the module's rename/alias maps to one non-import item in place
@@ -534,22 +681,73 @@ fn qualify_item(
     }
 }
 
-fn compile_mode(src_file: &str, test_mode: bool) -> Result<String, ()> {
-    let mut seen = std::collections::HashSet::new();
-    let (krate, item_files) = match load_crate(Path::new(src_file), &mut seen) {
+/// positional args naming sources: a leading directory, or consecutive
+/// `.oxl` files (Go's `go run a.go b.go` file-list rule). Returns the
+/// source args and the index where program args begin (after `--`).
+fn pkg_args(args: &[String], start: usize) -> (Vec<String>, usize) {
+    let mut fs = Vec::new();
+    let mut i = start;
+    while i < args.len() && args[i] != "--" {
+        let a = &args[i];
+        if fs.is_empty() && Path::new(a).is_dir() {
+            fs.push(a.clone());
+            i += 1;
+            break;
+        }
+        if !a.ends_with(".oxl") {
+            break;
+        }
+        fs.push(a.clone());
+        i += 1;
+    }
+    (fs, i)
+}
+
+/// source args -> package source: one dir = dir package, files = the
+/// file-list package, none = the cwd package
+fn pkg_src(fs: &[String]) -> PkgSrc {
+    if fs.len() == 1 && Path::new(&fs[0]).is_dir() {
+        PkgSrc::Dir(PathBuf::from(&fs[0]))
+    } else if fs.is_empty() {
+        PkgSrc::Dir(PathBuf::from("."))
+    } else {
+        PkgSrc::Files(fs.iter().map(PathBuf::from).collect())
+    }
+}
+
+/// the file whose source backs diag rendering — the first package file
+/// (spans in other files mis-map: the pre-existing per-crate limitation)
+fn entry_file(src: &PkgSrc) -> Option<PathBuf> {
+    match src {
+        PkgSrc::Dir(d) => pkg_dir_files(d).into_iter().next(),
+        PkgSrc::Files(fs) => fs.first().cloned(),
+    }
+}
+
+fn compile_mode(src: &PkgSrc, test_mode: bool) -> Result<String, ()> {
+    let (krate, item_files) = match load_crate(src) {
         Some(k) => k,
         None => return Err(()),
     };
-    let src = match std::fs::read_to_string(src_file) {
+    // `oxl test` emits its own driver main, so library packages test fine;
+    // build/run produce a binary and need `package main` + fn main
+    if !test_mode && krate.pkg != "main" {
+        eprintln!("error [check] package `{}` is not a main package", krate.pkg);
+        return Err(());
+    }
+    let Some(entry) = entry_file(src) else {
+        return Err(());
+    };
+    let src_text = match std::fs::read_to_string(&entry) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{src_file}: {e}");
+            eprintln!("{}: {e}", entry.display());
             return Err(());
         }
     };
     // note: semantic diagnostics in imported files map spans against the
     // entry file's source (v0 limitation — spans are per-crate)
-    let mut diags = diag::Diags::new(src_file, src);
+    let mut diags = diag::Diags::new(entry.to_string_lossy(), src_text);
     let files: Vec<String> = item_files.iter().map(|p| p.to_string_lossy().to_string()).collect();
     let checked = check::check(&krate, &files, &mut diags);
     diags.report();
@@ -559,8 +757,8 @@ fn compile_mode(src_file: &str, test_mode: bool) -> Result<String, ()> {
     Ok(codegen::generate_mode(&krate, test_mode, &checked.suspend))
 }
 
-fn compile(src_file: &str) -> Result<String, ()> {
-    compile_mode(src_file, false)
+fn compile(src: &PkgSrc) -> Result<String, ()> {
+    compile_mode(src, false)
 }
 
 /// private scratch dir under $TMPDIR: created exclusively (never a
@@ -720,9 +918,10 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
 }
 
 fn cmd_build(args: &[String]) {
-    let file = &args[2];
+    let (fs, _) = pkg_args(args, 2);
+    let src = pkg_src(&fs);
     let out = exe_out_name(out_arg(args).unwrap_or_else(|| PathBuf::from("a.out")));
-    match compile(file) {
+    match compile(&src) {
         Ok(c) => {
             if !emit_and_cc(&c, &out) {
                 exit(1);
@@ -733,8 +932,9 @@ fn cmd_build(args: &[String]) {
 }
 
 fn cmd_run(args: &[String]) {
-    let file = &args[2];
-    match compile(file) {
+    let (fs, argi) = pkg_args(args, 2);
+    let src = pkg_src(&fs);
+    match compile(&src) {
         Ok(c) => {
             let Some(dir) = mk_scratch_dir("oxl-run") else {
                 exit(1);
@@ -743,10 +943,10 @@ fn cmd_run(args: &[String]) {
             if !emit_and_cc(&c, &out) {
                 exit(1);
             }
-            let child_args: &[String] = if args.len() > 3 && args[3] == "--" {
-                &args[4..]
+            let child_args: &[String] = if args.get(argi).map(|a| a.as_str()) == Some("--") {
+                &args[argi + 1..]
             } else {
-                &args[3..]
+                &args[argi..]
             };
             let st = Command::new(&out).args(child_args).status().unwrap();
             let _ = std::fs::remove_dir_all(&dir);
@@ -757,8 +957,9 @@ fn cmd_run(args: &[String]) {
 }
 
 fn cmd_test(args: &[String]) {
-    let file = &args[2];
-    match compile_mode(file, true) {
+    let (fs, _) = pkg_args(args, 2);
+    let src = pkg_src(&fs);
+    match compile_mode(&src, true) {
         Ok(c) => {
             let Some(dir) = mk_scratch_dir("oxl-test") else {
                 exit(1);
@@ -871,45 +1072,29 @@ struct Analysis {
 }
 
 fn analyze(path: &Path, src: &str) -> Analysis {
+    // diagnostic pass: lex+parse the buffer so its parse errors surface
+    // (load_pkg re-parses silently for the merged crate)
     let mut diags = diag::Diags::new(path.to_string_lossy(), src);
     let toks = lexer::lex(src, &mut diags);
-    let krate = parser::parse(&toks, &mut diags);
+    let _krate = parser::parse(&toks, &mut diags);
     let mut seen = std::collections::HashSet::new();
-    seen.insert(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
-    let mut renames: std::collections::HashMap<String, String> = Default::default();
-    let mut aliases: std::collections::HashMap<String, String> = Default::default();
-    let mut items = Vec::new();
-    let mut item_files: Vec<PathBuf> = Vec::new();
-    for it in &krate.items {
-        if let ast::Item::Import(imp) = it {
-            if let Some(p) = resolve_import(path, &imp.path) {
-                let stem = mod_stem(&p);
-                let alias = imp.alias.clone().unwrap_or_else(|| stem.clone());
-                aliases.insert(alias.clone(), stem.clone());
-                if imp.alias.is_none() {
-                    aliases.insert(stem.clone(), stem.clone());
-                }
-                for s in &imp.selective {
-                    renames.insert(s.clone(), format!("{stem}.{s}"));
-                }
-                if let Some((sub, sub_files)) = load_mod(&p, &stem, &mut seen, false) {
-                    items.extend(sub.items);
-                    item_files.extend(sub_files);
-                }
-            }
-        }
-    }
-    let mut own = 0;
-    for mut it in krate.items {
-        if !matches!(it, ast::Item::Import(_)) {
-            qualify_item(&mut it, &renames, &aliases);
-            items.push(it);
-            own += 1;
-        }
-    }
-    item_files.extend(std::iter::repeat(path.to_path_buf()).take(own));
+    let mut pkg_names = std::collections::HashMap::new();
+    let fs = vec![path.to_path_buf()];
+    let loaded = load_pkg(
+        &PkgSrc::Files(fs),
+        &path.to_string_lossy(),
+        false,
+        true,
+        &mut seen,
+        &mut pkg_names,
+        Some((path, src)),
+        false,
+    );
+    let (krate, item_files) = loaded.unwrap_or_else(|| {
+        (ast::Crate { pkg: String::new(), items: Vec::new() }, Vec::new())
+    });
     let files: Vec<String> = item_files.iter().map(|p| p.to_string_lossy().to_string()).collect();
-    let checked = check::check(&ast::Crate { items }, &files, &mut diags);
+    let checked = check::check(&krate, &files, &mut diags);
     if std::env::var("OXL_IDX_DEBUG").is_ok() {
         for u in &checked.index.uses {
             eprintln!("USE {} {:?} -> {} {:?} `{}`", u.file, u.span, u.def_file, u.def_span, u.sig);

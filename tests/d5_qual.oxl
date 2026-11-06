@@ -1,3 +1,5 @@
+package main
+
 // d5 module qualification: namespaces, `as` alias, selective flatten,
 // and two modules exporting the same name coexisting
 import "d5a"

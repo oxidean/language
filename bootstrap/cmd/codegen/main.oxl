@@ -1,3 +1,5 @@
+package main
+
 // bootstrap/codegen.oxl — the C emitter, written in .oxl.
 // Fourth self-host component: ports oxl/src/codegen.rs over the
 // bootstrap parser's `Node` AST, consuming check.oxl's tables (fn sigs,
@@ -8,7 +10,7 @@
 //
 // Full surface: methods + interfaces emit as RtIface/vtab pairs and
 // generic fns mono-instantiate per call binding (Rust insts).
-import "check"
+import "bootstrap/check"
 
 import "std/collections"
 
@@ -4638,7 +4640,7 @@ fn main() {
         println("usage: codegen [--test] <file.oxl>")
         exit(1)
     }
-    r := check.check_file(file)
+    r := check.check_file(file, 1 - testm)
     if len(r.ck.diags) > 0 {
         i := 0
         for i < len(r.ck.diags) {

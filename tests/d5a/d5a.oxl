@@ -1,3 +1,5 @@
+package d5a
+
 // d5 fixture: exports f() — collides with d5b.f on purpose; the
 // qualified namespaces must keep them apart
 fn f() -> int {

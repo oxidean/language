@@ -15,6 +15,8 @@
 #endif
 #include <time.h>
 #ifndef _WIN32
+#include <dirent.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -2129,6 +2131,92 @@ int64_t rt_writefile(OxlStr path, OxlStr data) {
 }
 
 void rt_exit(int64_t code) { exit((int)code); }
+
+/* directory probe — fopen("dir") succeeds on POSIX so readability
+ * can't stand in for it; resolve must know dir-vs-file-vs-missing */
+int64_t rt_isdir(OxlStr path) {
+    char *cp = rt_alloc(path.n + 1);
+    memcpy(cp, path.p, (size_t)path.n);
+    cp[path.n] = 0;
+#ifdef _WIN32
+    DWORD a = GetFileAttributesA(cp);
+    return (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) ? 1 : 0;
+#else
+    struct stat st;
+    return (stat(cp, &st) == 0 && S_ISDIR(st.st_mode)) ? 1 : 0;
+#endif
+}
+
+static int name_cmp(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* directory entry names, sorted + newline-joined; "" on any failure.
+ * package loading needs a portable enumeration — the sort keeps the
+ * load order (and generated code) deterministic across filesystems */
+OxlStr rt_lsdir(OxlStr path) {
+    char *cp = rt_alloc(path.n + 1);
+    memcpy(cp, path.p, (size_t)path.n);
+    cp[path.n] = 0;
+    size_t cap = 16, n = 0;
+    char **names = xmalloc(cap * sizeof *names);
+#ifdef _WIN32
+    char *pat = xmalloc((size_t)path.n + 3);
+    memcpy(pat, cp, (size_t)path.n);
+    pat[path.n] = '\\';
+    pat[path.n + 1] = '*';
+    pat[path.n + 2] = 0;
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    free(pat);
+    if (h == INVALID_HANDLE_VALUE) {
+        free(names);
+        return rt_str("");
+    }
+    do {
+        const char *nm = fd.cFileName;
+        if (!strcmp(nm, ".") || !strcmp(nm, "..")) continue;
+        if (n == cap) { cap *= 2; names = realloc(names, cap * sizeof *names); }
+        size_t m = strlen(nm);
+        names[n] = xmalloc(m + 1);
+        memcpy(names[n], nm, m + 1);
+        n++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d = opendir(cp);
+    if (!d) {
+        free(names);
+        return rt_str("");
+    }
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        const char *nm = e->d_name;
+        if (!strcmp(nm, ".") || !strcmp(nm, "..")) continue;
+        if (n == cap) { cap *= 2; names = realloc(names, cap * sizeof *names); }
+        size_t m = strlen(nm);
+        names[n] = xmalloc(m + 1);
+        memcpy(names[n], nm, m + 1);
+        n++;
+    }
+    closedir(d);
+#endif
+    qsort(names, n, sizeof *names, name_cmp);
+    size_t total = 0;
+    for (size_t i = 0; i < n; i++) total += strlen(names[i]) + 1;
+    char *buf = rt_alloc((int64_t)total + 1);
+    size_t off = 0;
+    for (size_t i = 0; i < n; i++) {
+        size_t m = strlen(names[i]);
+        memcpy(buf + off, names[i], m);
+        off += m;
+        if (i + 1 < n) buf[off++] = '\n';
+        free(names[i]);
+    }
+    buf[off] = 0;
+    free(names);
+    return (OxlStr){ buf, (int64_t)off };
+}
 
 /* portable socket setup — SOL_SOCKET/SO_REUSEADDR constants and the
  * sockaddr_in layout differ across Linux/macOS/BSD (sin_len exists only

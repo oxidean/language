@@ -1,3 +1,5 @@
+package collections
+
 // std/collections — str-keyed map and set over int payloads.
 //
 // FNV-1a hash, power-of-2 bucket array, separate chaining on `own`

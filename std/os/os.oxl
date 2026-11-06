@@ -1,3 +1,5 @@
+package os
+
 // std/os — process environment + file I/O, thin honest wrappers over
 // the file/process builtins (argv/argc, readfile/writefile, exit).
 // Named fns, not bare builtins, so user code can shadow builtins safely

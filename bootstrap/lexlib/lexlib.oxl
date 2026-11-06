@@ -1,3 +1,5 @@
+package lexlib
+
 // bootstrap/lexlib.oxl — the lexer as a library (no main).
 // Shared by bootstrap/lexer.oxl (token dump) and
 // bootstrap/parser.oxl (AST → JSON). See docs/self-hosting.md.
@@ -51,7 +53,7 @@ fn is_space(c: int) -> bool {
 }
 
 fn is_kw(w: str) -> bool {
-    return w == "fn" || w == "struct" || w == "extern" || w == "return" || w == "if" || w == "else" || w == "for" || w == "let" || w == "scope" || w == "spawn" || w == "go" || w == "own" || w == "ref" || w == "mut" || w == "unsafe" || w == "nil" || w == "true" || w == "false" || w == "import" || w == "chan" || w == "break" || w == "continue" || w == "interface" || w == "spawnBlocking"
+    return w == "fn" || w == "struct" || w == "extern" || w == "return" || w == "if" || w == "else" || w == "for" || w == "let" || w == "scope" || w == "spawn" || w == "go" || w == "own" || w == "ref" || w == "mut" || w == "unsafe" || w == "nil" || w == "true" || w == "false" || w == "import" || w == "package" || w == "chan" || w == "break" || w == "continue" || w == "interface" || w == "spawnBlocking"
 }
 
 fn push(tail: own Tok, kind: int, text: str, ln: int) -> own Tok {

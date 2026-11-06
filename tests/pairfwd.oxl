@@ -1,3 +1,5 @@
+package main
+
 // pair-forward across differing val types: `return f()` where f's
 // pair val ty differs from the caller's — the emitted struct must
 // convert .val (iface rewrap / boxing), not drop it in raw

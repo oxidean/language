@@ -1,3 +1,5 @@
+package sync
+
 // std/sync — mutual exclusion built on Shared atomics.
 //
 // A Mutex is a shared cell: 0 = unlocked, 1 = locked. mlock spins on

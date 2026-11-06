@@ -1,3 +1,5 @@
+package time
+
 // std/time — wall clock and sleeps, backed by the rt builtins.
 // (named fns, not bare builtins, so user code can shadow builtins safely)
 

@@ -1,3 +1,5 @@
+package main
+
 // A2: select — multi-chan wait, uniform pick, timeout, else
 import "std/time"
 

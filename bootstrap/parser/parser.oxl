@@ -1,3 +1,5 @@
+package parser
+
 // bootstrap/parser.oxl — a parser for .oxl, written in .oxl.
 // Second self-host component: consumes lexlib's token list and emits
 // the AST as JSON via std/json. With the lexer, the entire compiler
@@ -8,14 +10,12 @@
 // the emitted output is unchanged.
 //
 //   oxl run bootstrap/parser.oxl -- examples/hello.oxl
-import "lexlib"
+import "bootstrap/lexlib"
 
 import "std/json"
 
 // readfile signals failure as "" — the same result a legitimately
 // empty file produces — so probe readability first to tell them apart
-extern fn rt_file_readable(path: cstr) -> int
-
 struct PCur {
     t: own lexlib.Tok,
     nolit: int, // 1 while parsing if/for conditions — `{` is a block, not a literal
@@ -82,6 +82,7 @@ enum Node {
     Slice { obj: own Node, lo: own Node, hi: own Node }, // {"slice","lo","hi"}
     Defer { call: own Node }, // {"defer": <call>}
     Unsafe { body: own Node }, // {"unsafe": <body>}
+    Package { name: str }, // {"package": s} — mandatory first item
 }
 
 fn ncons(v: own Node, next: own NList) -> own NList {
@@ -285,6 +286,9 @@ fn to_json(n: own Node) -> own json.Json {
             if ret != nil {
                 json.jadd(o, "ret", to_json(ret))
             }
+        }
+        Node.Package{name} => {
+            json.jadd(o, "package", json.jstr(name))
         }
         Node.Skip{text} => {
             json.jadd(o, "skip", json.jstr(text))
@@ -1209,7 +1213,15 @@ fn parse(toks: own lexlib.Tok) -> own Node {
         println("lex: " + c.t.text + " (line " + itoa(c.t.ln) + ")")
         return nil
     }
-    let items: own NList = nil
+    // the package clause is the mandatory first item of every file —
+    // the Rust parser emits `expected package clause` when it's absent
+    if !eat(c, "package") {
+        println("parse: expected package clause")
+        return nil
+    }
+    let items: own NList = ncons(b(Node.Package{name: peek(c)}), nil)
+    next(c)
+    eat(c, ";")
     for pkind(c) != 0 {
         items = ncons(p_item(c), items)
     }
@@ -1217,22 +1229,4 @@ fn parse(toks: own lexlib.Tok) -> own Node {
         return nil
     }
     return b(Node.Root{items: nrev(items)})
-}
-
-fn main() {
-    if argc() < 2 {
-        println("usage: parser <file.oxl>")
-        exit(1)
-    }
-    if rt_file_readable(cstr(argv(1))) == 0 {
-        println("cannot read " + argv(1))
-        exit(1)
-    }
-    src := readfile(argv(1))
-    // empty source is fine: lex just yields the EOF token
-    ast := parse(lexlib.lex(src))
-    if ast == nil {
-        exit(1)
-    }
-    println(json.tojson(to_json(ast)))
 }

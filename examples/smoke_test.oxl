@@ -1,3 +1,5 @@
+package main
+
 // oxl test runs every fn test_*() and reports ok per function.
 // `oxl test examples/smoke_test.oxl`
 fn add(a: int, b: int) -> int {

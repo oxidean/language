@@ -1,3 +1,5 @@
+package strings
+
 // std/strings — string helpers written in the language itself.
 
 // explicit release for `own ?` buffers (mkbuf) — scope arenas don't

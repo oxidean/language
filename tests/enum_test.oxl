@@ -1,3 +1,5 @@
+package main
+
 // B1: enum tagged unions — positional, named, and unit payloads
 struct Expr { v: int }
 

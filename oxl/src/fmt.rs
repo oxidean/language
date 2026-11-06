@@ -258,6 +258,13 @@ impl<'a> Fmt<'a> {
     }
 
     fn krate(&mut self, k: &Crate) {
+        if !k.pkg.is_empty() {
+            self.drain_trailing(0);
+            self.out.push_str("package ");
+            self.out.push_str(&k.pkg);
+            self.nl(0);
+            self.blank();
+        }
         for (i, it) in k.items.iter().enumerate() {
             self.drain_trailing(item_span(it).lo);
             if i > 0 {

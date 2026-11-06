@@ -1,0 +1,25 @@
+package main
+
+// oxl check driver — prints the checker diagnostics, or `ok`
+//   oxl run bootstrap/cmd/check -- <file.oxl|dir>
+import "bootstrap/check"
+
+fn main() {
+    if argc() < 2 {
+        println("usage: check <file.oxl|dir>")
+        exit(1)
+    }
+    r := check.check_file(argv(1), 0)
+    ck := r.ck
+    if len(ck.diags) == 0 {
+        println("ok")
+        return
+    }
+    i := 0
+    for i < len(ck.diags) {
+        d := ck.diags[i]
+        println("error [" + d.kind + "] " + d.msg)
+        i = i + 1
+    }
+    exit(1)
+}

@@ -1,3 +1,5 @@
+package main
+
 // A2 select fairness: the pick must be uniform over the READY arms,
 // not over arm positions. With a never-ready third arm, a random-start
 // first-ready sweep lands on arm a with P=2/3 (starts at a, or wraps

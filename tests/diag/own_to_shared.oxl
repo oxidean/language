@@ -1,3 +1,5 @@
+package main
+
 struct P { v: int }
 
 fn use(p: P) {}

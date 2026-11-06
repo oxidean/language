@@ -1,3 +1,5 @@
+package main
+
 // Regression: a frame task that returns while still inside an inner
 // scope orphans that scope; a task spawned inside it keeps the orphan
 // alive past the spawner's join. The orphan's teardown must find its

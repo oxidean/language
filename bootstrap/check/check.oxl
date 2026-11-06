@@ -1,3 +1,5 @@
+package check
+
 // bootstrap/check.oxl — the typechecker, written in .oxl.
 // Third self-host component: ports oxl/src/check.rs over the bootstrap
 // parser's `Node` AST. Types are interned ints into a pool (rustc-style
@@ -8,13 +10,18 @@
 // AST-subset boundary: the bootstrap parser does not produce generics
 // (fn f[T any]), interface decls, select arms, closures, import aliases,
 // or float literals — files using them fail parse-side before checking.
-import "lexlib"
+import "bootstrap/lexlib"
 
-import "parser"
+import "bootstrap/parser"
 
 import "std/collections"
 
 import "std/strings"
+
+// package loading needs portable dir probes (Rust resolve_pkg mirrors)
+extern fn rt_lsdir(path: str) -> str
+
+extern fn rt_isdir(path: str) -> int
 
 // ---------- interned types ----------
 fn k_unk() -> int {
@@ -309,7 +316,7 @@ struct ArmSt { mv: own LL, ft: int, next: own ArmSt }
 struct ModEnt { alias: str, stem: str, next: own ModEnt }
 
 struct FileAlias {
-    mod: str,
+    file: str,
     aliases: own ModEnt,
     names: own ModEnt,
     next: own FileAlias,
@@ -331,7 +338,7 @@ struct DBox { kind: str, msg: str }
 
 struct ClChk { callees: own SList, seeded: int, next: own ClChk }
 
-struct It { node: own parser.Node, mod: str }
+struct It { node: own parser.Node, mod: str, file: str }
 
 struct Scope { m: own collections.Map, moved: own SList }
 
@@ -357,10 +364,12 @@ struct Ck {
     diags: []DBox,
     edges: own Edge, // caller -> callee call graph
     susp: own SList, // suspend-capable fn names
-    loaded: own SList, // resolved import paths
+    loaded: own SList, // resolved package dirs
+    loaded_names: own ModEnt, // resolved dir -> package clause cache
     fnvals: own SList, // named fns used as values
     cur_fn: str,
-    cur_mod: str, // module stem while checking
+    cur_mod: str, // package clause while checking
+    cur_file: str, // file path while checking (import tables key on it)
     retk: int, // current fn's return kind
     ret1: int,
     in_let2: int,
@@ -1539,6 +1548,7 @@ fn nk(n: ref parser.Node) -> int {
         parser.Node.Interface{name} => 47
         parser.Node.TyParam{name} => 48
         parser.Node.Method{name} => 49
+        parser.Node.Package{name} => 52
         _ => -1
     }
     return i
@@ -1618,10 +1628,10 @@ fn qname(mod: str, n: str) -> str {
 
 // per-file import tables: `import "x" as a` maps qualifier a -> stem,
 // plain imports map stem -> stem; `import "x".{n}` maps n -> stem.n
-fn file_alias_idx(ck: ref Ck, mod: str) -> int {
+fn file_alias_idx(ck: ref Ck, file: str) -> int {
     i := 0
     for i < len(ck.file_aliases) {
-        if ck.file_aliases[i].mod == mod {
+        if ck.file_aliases[i].file == file {
             return i
         }
         i = i + 1
@@ -1631,7 +1641,7 @@ fn file_alias_idx(ck: ref Ck, mod: str) -> int {
 
 // qualifier -> stem for the current file's aliases ("" when unaliased)
 fn alias_stem(ck: ref Ck, q: str) -> str {
-    fi := file_alias_idx(ck, ck.cur_mod)
+    fi := file_alias_idx(ck, ck.cur_file)
     if fi < 0 {
         return ""
     }
@@ -1647,7 +1657,7 @@ fn alias_stem(ck: ref Ck, q: str) -> str {
 
 // bare name -> `stem.name` when the file selectively imported it
 fn selective_name(ck: ref Ck, n: str) -> str {
-    fi := file_alias_idx(ck, ck.cur_mod)
+    fi := file_alias_idx(ck, ck.cur_file)
     if fi < 0 {
         return ""
     }
@@ -2042,6 +2052,7 @@ fn reg_fields(ck: mut Ck, its: []It) {
     i := 0
     for i < len(its) {
         ck.cur_mod = its[i].mod
+        ck.cur_file = its[i].file
         match its[i].node {
             parser.Node.Interface{name, ops, methods} => {
                 iname := qname(its[i].mod, name)
@@ -2182,6 +2193,7 @@ fn reg_sigs(ck: mut Ck, its: []It) {
     i := 0
     for i < len(its) {
         ck.cur_mod = its[i].mod
+        ck.cur_file = its[i].file
         match its[i].node {
             parser.Node.Fn{ex, name, recv, typarams, params, ret, body} => {
                 reg_fn(ck, its[i].mod, ex, name, recv, typarams, params, ret)
@@ -2195,6 +2207,7 @@ fn reg_sigs(ck: mut Ck, its: []It) {
         i = i + 1
     }
     ck.cur_mod = ""
+    ck.cur_file = ""
 }
 
 fn register(ck: mut Ck, its: []It) {
@@ -4693,6 +4706,7 @@ fn check_items(ck: mut Ck, its: []It) {
                 parser.Node.Fn{ex, name, recv, params, body} => {
                     if !ex {
                         ck.cur_mod = its[i].mod
+                        ck.cur_file = its[i].file
                         check_fn(ck, its[i].mod, name, recv, params, body)
                     }
                 }
@@ -4703,6 +4717,7 @@ fn check_items(ck: mut Ck, its: []It) {
         i = i + 1
     }
     ck.cur_mod = ""
+    ck.cur_file = ""
 }
 
 // item-level Skip nodes — surfaced as parse diagnostics
@@ -4725,6 +4740,7 @@ fn check_suspend_rules(ck: mut Ck, its: []It) {
     i := 0
     for i < len(its) {
         ck.cur_mod = its[i].mod
+        ck.cur_file = its[i].file
         match its[i].node {
             parser.Node.Fn{ex, body} => {
                 if !ex && body != nil {
@@ -4742,6 +4758,7 @@ fn check_suspend_rules(ck: mut Ck, its: []It) {
         i = i + 1
     }
     ck.cur_mod = ""
+    ck.cur_file = ""
 }
 
 // B4 deferred: fn values may not be suspend-capable
@@ -4767,41 +4784,58 @@ fn dir_of(path: str) -> str {
     return substr(path, 0, ls)
 }
 
-fn file_stem(path: str) -> str {
-    ls := last_slash(path)
-    base := path
-    if ls >= 0 {
-        base = substr(path, ls + 1, len(path))
+// last path component, trailing slashes ignored — mirrors path_base
+fn base_name(path: str) -> str {
+    p := path
+    for len(p) > 0 && strings.endswith(p, "/") {
+        p = substr(p, 0, len(p) - 1)
     }
-    d := last_dot(base)
-    if d >= 0 {
-        base = substr(base, 0, d)
+    ls := last_slash(p)
+    if ls < 0 {
+        return p
     }
-    return base
+    return substr(p, ls + 1, len(p))
 }
 
-fn exists(path: str) -> bool {
-    return len(readfile(path)) > 0
+// clause name cached per resolved dir — re-imports of an already-loaded
+// (or mid-cycle) package still bind their package name
+fn clause_of(ck: ref Ck, dir: str) -> str {
+    l := ck.loaded_names
+    for l != nil {
+        if l.alias == dir {
+            return l.stem
+        }
+        l = l.next
+    }
+    return ""
 }
 
-// mirrors resolve_import: dir-relative first, then ancestors' stdlib/
+// mirrors resolve_pkg: dir-relative first, then `<ancestor>/<imp>` —
+// this is what makes `std/...` and repo-rooted paths resolve (no
+// exe-adjacent walk here: corpus paths are all in-repo)
 fn resolve_imp(from_file: str, imp: str) -> str {
-    cand := imp
-    if !strings.endswith(cand, ".oxl") {
-        cand = cand + ".oxl"
-    }
-    rel := dir_of(from_file) + "/" + cand
-    if exists(rel) {
+    rel := dir_of(from_file) + "/" + imp
+    if rt_isdir(rel) == 1 {
         return rel
-    }
-    stripped := cand
-    if strings.startswith(cand, "std/") {
-        stripped = substr(cand, 4, len(cand))
     }
     d := dir_of(from_file)
     for len(d) > 0 {
-        p := d + "/stdlib/" + stripped
-        if exists(p) {
+        p := d + "/" + imp
+        if rt_isdir(p) == 1 {
+            return p
+        }
+        if d == "." || d == "/" {
+            break
+        }
+        d = dir_of(d)
+    }
+    // exe-adjacent walk (mirrors the Rust resolve_pkg's current_exe
+    // fallback): sources outside the repo still find `std/...` beside
+    // the toolchain binary
+    d = dir_of(argv(0))
+    for len(d) > 0 {
+        p := d + "/" + imp
+        if rt_isdir(p) == 1 {
             return p
         }
         if d == "." || d == "/" {
@@ -4812,61 +4846,82 @@ fn resolve_imp(from_file: str, imp: str) -> str {
     return ""
 }
 
-fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
-    if sl_has(ck.loaded, file) {
-        return
-    }
-    ck.loaded = scons(file, ck.loaded)
-    src := readfile(file)
+// one parsed package file: clause + ast
+struct PFile { path: str, clause: str, ast: own parser.Node }
+
+// read + parse a file, report failures; "" clause when unparseable
+fn parse_pfile(ck: mut Ck, path: str) -> PFile {
+    src := readfile(path)
     if len(src) == 0 {
-        diag(ck, "check", "cannot read `" + file + "`")
-        return
+        diag(ck, "check", "cannot read `" + path + "`")
+        return PFile{path: path, clause: "", ast: nil}
     }
     ast := parser.parse(lexlib.lex(src))
     if ast == nil {
         diag(ck, "lex", "lexical error — see lex output above")
-        return
+        return PFile{path: path, clause: "", ast: nil}
     }
-    if nk(ast) != 28 {
-        return
+    clause := ""
+    match ast {
+        parser.Node.Root{items} => {
+            if items != nil && nk(items.v) == 52 {
+                match items.v {
+                    parser.Node.Package{name} => {
+                        clause = name
+                    }
+                    _ => {
+                    }
+                }
+            }
+        }
+        _ => {
+        }
     }
+    return PFile{path: path, clause: clause, ast: ast}
+}
+
+// collect one file's items + its own import bindings: names shared
+// package-wide through `mod`, import tables stay per-file like Go
+fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, itemmod: str) {
     match ast {
         parser.Node.Root{items} => {
             l := items
             for l != nil {
-                if nk(l.v) != 25 { // Import lands after items are seen
-                    ld.items = push(ld.items, It{node: l.v, mod: mod})
+                k := nk(l.v)
+                if k != 25 && k != 52 {
+                    ld.items = push(ld.items, It{node: l.v, mod: itemmod, file: fpath})
                 }
                 l = l.next
             }
-            l = items
             let al: own ModEnt = nil
             let nm: own ModEnt = nil
+            l = items
             for l != nil {
                 match l.v {
                     parser.Node.Import{path, alias, names} => {
-                        p := resolve_imp(file, path)
+                        p := resolve_imp(fpath, path)
                         if len(p) == 0 {
-                            diag(ck, "check", "cannot resolve import `" + path + "` (from `" + file + "`)")
+                            diag(ck, "check", "cannot resolve import `" + path + "` (from `" + fpath + "`)")
                         } else {
-                            stem := file_stem(p)
-                            if len(alias) > 0 {
-                                al = new(ModEnt{alias: alias, stem: stem, next: al})
-                            } else {
-                                al = new(ModEnt{alias: stem, stem: stem, next: al})
-                            }
-                            nl := names
-                            for nl != nil {
-                                match nl.v {
-                                    parser.Node.Name(n) => {
-                                        nm = new(ModEnt{alias: n, stem: stem + "." + n, next: nm})
-                                    }
-                                    _ => {
-                                    }
+                            bound := load_pkg(ck, ld, p, path, 1, 0)
+                            if len(bound) > 0 {
+                                if len(alias) > 0 {
+                                    al = new(ModEnt{alias: alias, stem: bound, next: al})
+                                } else {
+                                    al = new(ModEnt{alias: bound, stem: bound, next: al})
                                 }
-                                nl = nl.next
+                                nl := names
+                                for nl != nil {
+                                    match nl.v {
+                                        parser.Node.Name(n) => {
+                                            nm = new(ModEnt{alias: n, stem: bound + "." + n, next: nm})
+                                        }
+                                        _ => {
+                                        }
+                                    }
+                                    nl = nl.next
+                                }
                             }
-                            load_mod(ck, ld, p, stem)
                         }
                     }
                     _ => {
@@ -4874,18 +4929,99 @@ fn load_mod(ck: mut Ck, ld: mut Loader, file: str, mod: str) {
                 }
                 l = l.next
             }
-            ck.file_aliases = push(ck.file_aliases, FileAlias{mod: mod, aliases: al, names: nm, next: nil})
+            ck.file_aliases = push(ck.file_aliases, FileAlias{file: fpath, aliases: al, names: nm, next: nil})
         }
         _ => {
         }
     }
 }
 
+// load every .oxl in a package dir; returns the clause ("" on failure —
+// diagnostics already emitted). Mirrors the Rust load_pkg checks:
+// mixed clauses, clause-vs-dirname, `main` isn't importable.
+fn load_pkg(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int, is_root: int) -> str {
+    if sl_has(ck.loaded, dir) {
+        return clause_of(ck, dir)
+    }
+    ck.loaded = scons(dir, ck.loaded)
+    // .oxl entries of the dir — rt_lsdir presorts so the load order
+    // (and diagnostics) match the Rust loader deterministically
+    fs := mkslice(str, 0)
+    raw := rt_lsdir(dir)
+    for len(raw) > 0 {
+        i := find(raw, "\n")
+        nm := raw
+        if i >= 0 {
+            nm = substr(raw, 0, i)
+            raw = substr(raw, i + 1, len(raw))
+        } else {
+            raw = ""
+        }
+        if strings.endswith(nm, ".oxl") {
+            fs = push(fs, nm)
+        }
+    }
+    if len(fs) == 0 {
+        diag(ck, "check", "no .oxl source files in `" + dir + "`")
+        return ""
+    }
+    // parse all files first — clause validation precedes item collection
+    pfs := mkslice(PFile, 0)
+    i := 0
+    for i < len(fs) {
+        pfs = push(pfs, parse_pfile(ck, dir + "/" + fs[i]))
+        i = i + 1
+    }
+    clause0 := pfs[0].clause
+    i = 1
+    for i < len(pfs) {
+        if pfs[i].clause != clause0 {
+            diag(ck, "check", "found packages `" + clause0 + "` (`" + fs[0] + "`) and `" + pfs[i].clause + "` (`" + fs[i] + "`) in `" + dir + "`")
+            return ""
+        }
+        i = i + 1
+    }
+    if as_import == 1 && clause0 == "main" {
+        diag(ck, "check", "`" + imp + "` is a program, not an importable package")
+        return ""
+    }
+    if clause0 != "main" && clause0 != base_name(dir) {
+        diag(ck, "check", "package name `" + clause0 + "` does not match directory `" + base_name(dir) + "`")
+        return ""
+    }
+    ck.loaded_names = new(ModEnt{alias: dir, stem: clause0, next: ck.loaded_names})
+    itemmod := clause0
+    if is_root == 1 {
+        itemmod = ""
+    }
+    i = 0
+    for i < len(pfs) {
+        pfile_items(ck, ld, pfs[i].path, pfs[i].ast, itemmod)
+        i = i + 1
+    }
+    return clause0
+}
+
+// file-mode root: one file is a one-file package — no dir-name or
+// mixed-clause checks, items stay unqualified; imports still resolve
+// to package directories (mirrors the Rust PkgSrc::Files path)
+fn load_file_root(ck: mut Ck, ld: mut Loader, path: str) -> str {
+    pf := parse_pfile(ck, path)
+    if pf.ast == nil {
+        return ""
+    }
+    pfile_items(ck, ld, pf.path, pf.ast, "")
+    return pf.clause
+}
+
 // result of the whole check pipeline — codegen consumes it too
 struct CkRes { ck: own Ck, items: []It }
 
-// load + register + typecheck + susp analysis for `path`
-fn check_file(path: str) -> own CkRes {
+// load + register + typecheck + susp analysis for `path`.
+// `path` may name a file (file-list mode) or a package directory.
+// `need_main` mirrors compile_mode: building requires `package main`
+// (test mode's generated driver exempts it).
+fn check_file(path: str, need_main: int) -> own CkRes {
     ck := new(Ck)
     ck.tyv = mkslice(T, 0)
     ck.fns = collections.map_new()
@@ -4905,9 +5041,11 @@ fn check_file(path: str) -> own CkRes {
     ck.edges = nil
     ck.susp = nil
     ck.loaded = nil
+    ck.loaded_names = nil
     ck.fnvals = nil
     ck.cur_fn = ""
     ck.cur_mod = ""
+    ck.cur_file = ""
     ck.retk = 0
     ck.ret1 = -1
     ck.in_let2 = 0
@@ -4918,7 +5056,19 @@ fn check_file(path: str) -> own CkRes {
     ck.nerr = 0
     ld := new(Loader)
     ld.items = mkslice(It, 0)
-    load_mod(ck, ld, path, "")
+    root_pkg := ""
+    if rt_isdir(path) == 1 {
+        root_pkg = load_pkg(ck, ld, path, path, 0, 1)
+    } else {
+        root_pkg = load_file_root(ck, ld, path)
+    }
+    if need_main == 1 && len(root_pkg) > 0 && root_pkg != "main" {
+        diag(ck, "check", "package `" + root_pkg + "` is not a main package")
+        r := new(CkRes)
+        r.ck = ck
+        r.items = ld.items
+        return r
+    }
     register(ck, ld.items)
     check_skips(ck, ld.items)
     check_items(ck, ld.items)
@@ -4939,24 +5089,4 @@ fn check_file(path: str) -> own CkRes {
     r.ck = ck
     r.items = ld.items
     return r
-}
-
-fn main() {
-    if argc() < 2 {
-        println("usage: check <file.oxl>")
-        exit(1)
-    }
-    r := check_file(argv(1))
-    ck := r.ck
-    if len(ck.diags) == 0 {
-        println("ok")
-        return
-    }
-    i := 0
-    for i < len(ck.diags) {
-        d := ck.diags[i]
-        println("error [" + d.kind + "] " + d.msg)
-        i = i + 1
-    }
-    exit(1)
 }

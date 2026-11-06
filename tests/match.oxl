@@ -1,3 +1,5 @@
+package main
+
 enum ExprKind {
     Int(int),
     Str(str),

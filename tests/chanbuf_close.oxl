@@ -1,3 +1,5 @@
+package main
+
 // A3 close on a non-empty buffered chan: the ring drains FIFO first,
 // then receivers read the closed state (the chan's slot word — 0 on a
 // buffered chan, which never uses the unbuffered `val` slot). Also

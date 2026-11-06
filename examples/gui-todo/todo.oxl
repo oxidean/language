@@ -1,3 +1,5 @@
+package main
+
 // gui-todo — GTK4 todo list via C FFI (spec F1 pilot).
 //
 // All GTK access goes through gui_shim.c: widgets are opaque int

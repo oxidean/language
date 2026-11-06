@@ -2,6 +2,8 @@ use crate::diag::Span;
 
 #[derive(Clone, Debug)]
 pub struct Crate {
+    /// `package <ident>` — mandatory first item of every file
+    pub pkg: String,
     pub items: Vec<Item>,
 }
 

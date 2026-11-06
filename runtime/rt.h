@@ -321,6 +321,8 @@ int64_t rt_sock_read(int64_t fd, void *buf, int64_t n);  /* read | recv, portabl
 int64_t rt_sock_write(int64_t fd, const char *buf, int64_t n); /* write | send */
 int64_t rt_sock_close(int64_t fd);                       /* close | closesocket */
 int64_t rt_file_readable(const char *path);            /* open+close probe */
+OxlStr rt_lsdir(OxlStr path);
+int64_t rt_isdir(OxlStr path);
 int64_t rt_strlen(const char *s);                         /* strlen, name-safe */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs);      /* SO_RCVTIMEO, portable */
 int64_t rt_set_sndtimo(int64_t fd, int64_t secs);      /* SO_SNDTIMEO, portable */

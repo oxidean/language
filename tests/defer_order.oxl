@@ -1,3 +1,5 @@
+package main
+
 // B5 return-operand timing: `return expr` evaluates expr AFTER the
 // defer drain. A susp-capable operand must start (and park) only once
 // defers have run — a defer that writes state the operand reads must

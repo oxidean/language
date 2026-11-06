@@ -1,3 +1,5 @@
+package main
+
 // Regression: break/continue/return inside a loop-nested scope must
 // join the scope's children before transferring control — the old
 // lowering emitted a bare goto, orphaning the children and leaving the
