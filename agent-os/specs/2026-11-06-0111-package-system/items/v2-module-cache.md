@@ -63,4 +63,8 @@ V1 (queries need semver; MVS runs over the fetched manifests).
   *components* with `/` (never a string replace — a POSIX filename
   may legally contain `\`), and a component with a literal
   backslash is rejected outright: it can't survive a Windows
-  extraction anyway.
+  extraction anyway. The same rule covers case-folding collisions —
+  an archive containing both `Icon.png` and `icon.png` is rejected
+  before extraction (a tree one filesystem can hold and another
+  can't is unportable by definition; Go enforces the identical
+  restriction in module zips).
