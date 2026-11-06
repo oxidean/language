@@ -67,4 +67,12 @@ V1 (queries need semver; MVS runs over the fetched manifests).
   an archive containing both `Icon.png` and `icon.png` is rejected
   before extraction (a tree one filesystem can hold and another
   can't is unportable by definition; Go enforces the identical
-  restriction in module zips).
+  restriction in module zips). Every component is also validated on
+  all platforms against Windows-reserved device names — `CON`,
+  `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, matched
+  case-insensitively and with any extension stripped (`aux.oxl` is
+  `AUX` to Windows) — and against characters Windows forbids in
+  filenames (`<`, `>`, `:`, `"`, `|`, `?`, `*`, and trailing
+  dots/spaces). A Linux checkout may hold `aux.oxl`, but a Windows
+  user could never fetch the same module — same unportable-tree
+  rule, same all-platforms check.
