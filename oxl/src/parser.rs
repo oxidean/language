@@ -314,12 +314,17 @@ impl<'a> Parser<'a> {
         if self.eat_p(P::LBracket) {
             while !self.eat_p(P::RBracket) && !self.at_eof() {
                 let (t, _) = self.ident()?;
-                let c = if let Tok::Ident(c) = self.cur().tok.clone() {
+                // constraint: bare builtin (`any`) or a dotted decl path
+                // (`cmp.Ordered`) — qualification lands in qualify_item
+                let mut c = "any".to_string();
+                if let Tok::Ident(c0) = self.cur().tok.clone() {
                     self.bump();
-                    c
-                } else {
-                    "any".to_string()
-                };
+                    c = c0;
+                    while self.eat_p(P::Dot) {
+                        let (seg, _) = self.ident()?;
+                        c = format!("{c}.{seg}");
+                    }
+                }
                 ty_params.push((t, c));
                 self.eat_p(P::Comma);
             }
@@ -380,7 +385,8 @@ impl<'a> Parser<'a> {
         // bare `own`/`ref`/`mut` = pointer to unknown (Shared cells, FFI handles)
         let void = || TyRef { kind: TyKind::Named("void".into()), span: sp };
         let starts_ty = |p: &Self| matches!(p.cur().tok, Tok::Ident(_)
-            | Tok::Kw(Kw::Own) | Tok::Kw(Kw::Ref) | Tok::Kw(Kw::Mut) | Tok::Kw(Kw::Chan));
+            | Tok::Kw(Kw::Own) | Tok::Kw(Kw::Ref) | Tok::Kw(Kw::Mut) | Tok::Kw(Kw::Chan)
+            | Tok::P(P::LBracket));
         if self.eat_kw(Kw::Own) {
             let inner = if starts_ty(self) { self.ty()? } else { void() };
             return Some(TyRef { kind: TyKind::Own(Box::new(inner)), span: sp });

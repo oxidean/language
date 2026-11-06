@@ -966,6 +966,12 @@ fn p_ty(c: mut PCur) -> own Node {
                 s = s + ", "
             }
             first = false
+            // optional param name — `fn(a: int)` documents like Rust's
+            // parser does; the name is not part of the type
+            if pkind(c) == lexlib.k_ident() && c.t.next != nil && c.t.next.text == ":" {
+                next(c)
+                next(c)
+            }
             pt := p_ty(c) as Node.Ty
             s = s + pt.f0
             if !eat(c, ",") {
@@ -986,7 +992,7 @@ fn p_ty(c: mut PCur) -> own Node {
         // bare `own`/`ref`/`mut` = pointer to void (Rust parity: inner is
         // parsed only when the next token starts a type)
         inner := "void"
-        if pkind(c) == 1 || at(c, "own") || at(c, "ref") || at(c, "mut") || at(c, "chan") {
+        if pkind(c) == 1 || at(c, "[") || at(c, "own") || at(c, "ref") || at(c, "mut") || at(c, "chan") {
             it := p_ty(c) as Node.Ty
             inner = it.f0
         }
@@ -1062,6 +1068,12 @@ fn p_fn(c: mut PCur, ex: bool) -> own Node {
             if pkind(c) == 1 {
                 ct = peek(c)
                 next(c)
+                // `pkg.Constraint` — dotted decl path (Rust: same loop)
+                for at(c, ".") {
+                    next(c)
+                    ct = ct + "." + peek(c)
+                    next(c)
+                }
             }
             typs = ncons(b(Node.TyParam{name: tn, constraint: ct}), typs)
             eat(c, ",")

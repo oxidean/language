@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #endif
 #include <errno.h>
+#include <math.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
@@ -964,6 +965,21 @@ void rt_scope_leave(RtScope *s) {
 int rt_scope_try(RtScope *s) { return join_scope(s); }
 
 void rt_trap(int64_t code) {
+    /* don't lose buffered prints (test FAILED lines) on trap — but a
+     * flush into a closed pipe raises SIGPIPE; swallow it for the
+     * flush only so teardown still runs */
+#ifdef _WIN32
+    fflush(stdout);
+#else
+    {
+        struct sigaction sa, oldsa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = SIG_IGN;
+        sigaction(SIGPIPE, &sa, &oldsa);
+        fflush(stdout);
+        sigaction(SIGPIPE, &oldsa, NULL);
+    }
+#endif
     RtScope *s = tls_scope;
     if (!s) { fprintf(stderr, "trap %lld outside scope\n", (long long)code); abort(); }
     RtTask *t = tls_task;
@@ -2744,6 +2760,75 @@ OxlStr rt_sqlite_query(void *db, const char *sql) {
 void rt_sqlite_close(void *db) { sqlite3_close((sqlite3 *)db); }
 
 #endif /* OXL_SQLITE */
+
+/* ---------------- S3: str ordering, platform probe, clock, libm ---- */
+
+/* byte-wise lexicographic order — Go's str < str semantics: the shared
+ * prefix decides, then length breaks the tie ("a" < "ab") */
+int64_t rt_str_cmp(OxlStr a, OxlStr b) {
+    size_t n = a.n < b.n ? (size_t)a.n : (size_t)b.n;
+    int c = n ? memcmp(a.p, b.p, n) : 0;
+    if (c) return c;
+    return a.n < b.n ? -1 : a.n > b.n ? 1 : 0;
+}
+
+/* the binary knows its own platform — filepath keys OS semantics off it */
+int64_t rt_is_windows(void) {
+#ifdef _WIN32
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/* "YYYY-MM-DD HH:MM:SS" local time — log line stamps, time.stamp() */
+OxlStr rt_timestr(void) {
+    char buf[20];
+    time_t t = time(NULL);
+    struct tm tmv;
+#ifdef _WIN32
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    size_t n = strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &tmv);
+    char *p = rt_alloc((int64_t)n + 1);
+    memcpy(p, buf, n);
+    p[n] = 0;
+    return (OxlStr){ p, (int64_t)n };
+}
+
+/* libm wrappers — the rt_m_ prefix is what the driver greps for
+ * -DOXL_MATH + -lm. Unguarded would force -lm onto every build even
+ * without gc-sections; the flag/lib pair arrives together, like
+ * sqlite. All C99; msvcrt/mingw carry the same names (no -lm). */
+#ifdef OXL_MATH
+double rt_m_sqrt(double x) { return sqrt(x); }
+double rt_m_pow(double x, double y) { return pow(x, y); }
+double rt_m_exp(double x) { return exp(x); }
+double rt_m_log(double x) { return log(x); }
+double rt_m_log10(double x) { return log10(x); }
+double rt_m_log2(double x) { return log2(x); }
+double rt_m_floor(double x) { return floor(x); }
+double rt_m_ceil(double x) { return ceil(x); }
+double rt_m_trunc(double x) { return trunc(x); }
+double rt_m_round(double x) { return round(x); }
+double rt_m_fmod(double x, double y) { return fmod(x, y); }
+double rt_m_fabs(double x) { return fabs(x); }
+double rt_m_hypot(double x, double y) { return hypot(x, y); }
+double rt_m_sin(double x) { return sin(x); }
+double rt_m_cos(double x) { return cos(x); }
+double rt_m_tan(double x) { return tan(x); }
+double rt_m_asin(double x) { return asin(x); }
+double rt_m_acos(double x) { return acos(x); }
+double rt_m_atan(double x) { return atan(x); }
+double rt_m_atan2(double y, double x) { return atan2(y, x); }
+double rt_m_nan(void) { return NAN; }
+double rt_m_inf(int64_t sign) { return sign < 0 ? -INFINITY : INFINITY; }
+int64_t rt_m_isnan(double x) { return isnan(x) ? 1 : 0; }
+int64_t rt_m_isinf(double x) { return isinf(x) ? 1 : 0; }
+int64_t rt_m_signbit(double x) { return signbit(x) ? 1 : 0; }
+#endif /* OXL_MATH */
 
 /* ---------------- entry ---------------- */
 

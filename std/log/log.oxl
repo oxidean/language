@@ -1,0 +1,112 @@
+package log
+
+// std/log — leveled timestamped logger, the small end of Go's log +
+// slog surface. Lines go to stderr in a fixed shape so callers can
+// assert it:
+//
+//     2026-11-06 20:01:02 INFO starting up
+//
+// The timestamp is always 19 chars + space, so substr(line, 20, _)
+// is "LEVEL message" regardless of when it was written.
+import "std/os"
+
+extern fn rt_timestr() -> str
+
+// Level thresholds — package `let`s aren't importable, so each is a
+// one-line fn instead of a Go-style exported constant.
+let g_debug: int = 0
+
+let g_info: int = 1
+
+let g_warn: int = 2
+
+let g_error: int = 3
+
+let g_off: int = 4
+
+/// lvl_debug is the debug threshold value.
+fn lvl_debug() -> int {
+    return g_debug
+}
+
+/// lvl_info is the info threshold value.
+fn lvl_info() -> int {
+    return g_info
+}
+
+/// lvl_warn is the warn threshold value.
+fn lvl_warn() -> int {
+    return g_warn
+}
+
+/// lvl_error is the error threshold value.
+fn lvl_error() -> int {
+    return g_error
+}
+
+/// lvl_off silences the logger entirely.
+fn lvl_off() -> int {
+    return g_off
+}
+
+// global threshold — info and above by default, like log's standard
+// logger printing everything it gets.
+let glevel: int = 1
+
+/// set_level sets the minimum level emitted — messages below it
+/// drop silently. Pass lvl_off to silence the logger.
+fn set_level(l: int) {
+    glevel = l
+}
+
+/// level returns the current threshold.
+fn level() -> int {
+    return glevel
+}
+
+/// line builds one log line — the timestamped LEVEL-prefixed record.
+/// Exported so tests assert the shape without capturing stderr.
+fn line(level: str, msg: str) -> str {
+    return rt_timestr() + " " + level + " " + msg + "\n"
+}
+
+fn emit(l: int, name: str, msg: str) {
+    if l < glevel {
+        return
+    }
+    f := os.stderr()
+    [_, e] = f.write(line(name, msg) as []byte)
+    if e != nil {
+        exit(1) // nowhere left to report the write failing
+    }
+}
+
+/// debug logs at the lowest level — off by default.
+fn debug(msg: str) {
+    emit(g_debug, "DEBUG", msg)
+}
+
+/// info logs routine progress — on by default.
+fn info(msg: str) {
+    emit(g_info, "INFO", msg)
+}
+
+/// warn logs an anomaly that didn't stop the work.
+fn warn(msg: str) {
+    emit(g_warn, "WARN", msg)
+}
+
+/// error logs a failure the program is surviving.
+fn error(msg: str) {
+    emit(g_error, "ERROR", msg)
+}
+
+/// fatal logs at ERROR and exits nonzero — Go's log.Fatal shape.
+fn fatal(msg: str) {
+    f := os.stderr()
+    [_, e] = f.write(line("FATAL", msg) as []byte)
+    if e != nil {
+        exit(1)
+    }
+    exit(1)
+}

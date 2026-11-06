@@ -1,0 +1,129 @@
+package rand
+
+// std/math/rand — Go's math/rand surface over a process-global
+// generator. The language has no shift operators, so the PRNG is
+// drand48's LCG — state = (a·state + c) mod 2^48 — the documented
+// C/POSIX generator, respectable distribution, and multiplication/
+// addition/modulo only. High bits are drawn by division.
+
+// 2^48 and the drand48 multiplier/increment — `let`, not `const`:
+// top-level const doesn't exist; these are never reassigned.
+let modulus: int = 281474976710656
+
+let mul_a: int = 25214903917
+
+let add_c: int = 11
+
+// process-global state — auto-seeded from wall time like Go's
+// post-1.20 global source; `seed` makes runs reproducible. (now_ms
+// is a builtin — importing time here would needlessly couple the
+// packages.)
+let gstate: int = now_ms() % modulus
+
+// advance steps the LCG once. The multiply overflows int64, which is
+// fine: the wrapped value is still congruent mod 2^48 (2^48 | 2^64),
+// and the double-mod normalizes the sign C's % leaves on negatives.
+fn advance() -> int {
+    gstate = ((gstate * mul_a + add_c) % modulus + modulus) % modulus
+    return gstate
+}
+
+/// seed resets the generator — same seed, same stream.
+fn seed(n: int) {
+    gstate = (n % modulus + modulus) % modulus
+    if gstate == 0 {
+        gstate = 1
+    }
+}
+
+// top returns the high `bits` of a fresh state draw — division
+// stands in for the shift the language lacks.
+fn top(bits: int) -> int {
+    s := advance()
+    return s / pow2(48 - bits)
+}
+
+fn pow2(n: int) -> int {
+    r := 1
+    i := 0
+    for i < n {
+        r = r * 2
+        i = i + 1
+    }
+    return r
+}
+
+/// int31 returns a non-negative 31-bit pseudo-random int — Go's
+/// Int31.
+fn int31() -> int {
+    return top(31)
+}
+
+/// intn returns a uniform value in [0, n) — Go's Intn. Draws the
+/// top 31 bits like drand48; the modulo bias is the same one
+// drand48 documents. Panics (fatal err) on n <= 0, like Go.
+fn intn(n: int) -> int {
+    if n <= 0 {
+        exit(1) // Go panics; oxl's process-fatal is exit
+    }
+    return top(31) % n
+}
+
+// (No `int` fn — a package member named `int` shadows the builtin
+// type inside this file; int31 covers Go's Int.)
+
+/// float64 returns a uniform value in [0.0, 1.0) — Go's Float64.
+fn float64() -> float {
+    return itof(advance()) / itof(modulus)
+}
+
+/// perm returns a random permutation of [0, n) — Go's Perm,
+/// Fisher-Yates inside-out.
+fn perm(n: int) -> own []int {
+    v := new(mkslice(int, n))
+    m := mkslice(int, n)
+    i := 0
+    for i < n {
+        m[i] = i
+        i = i + 1
+    }
+    i = n - 1
+    for i > 0 {
+        j := intn(i + 1)
+        t := m[i]
+        m[i] = m[j]
+        m[j] = t
+        i = i - 1
+    }
+    i = 0
+    for i < n {
+        v[i] = m[i]
+        i = i + 1
+    }
+    return v
+}
+
+/// shufflen shuffles an int slice in place — the concrete-shape
+/// Shuffle; slices are already mutable views so no `mut` marker is
+/// needed. Generic callers use shuffleg.
+fn shufflen(v: []int) {
+    i := len(v) - 1
+    for i > 0 {
+        j := intn(i + 1)
+        t := v[i]
+        v[i] = v[j]
+        v[j] = t
+        i = i - 1
+    }
+}
+
+/// shuffle shuffles any slice — Go's rand.Shuffle shape takes a swap
+/// fn; generics let the element type stay abstract.
+fn shuffleg[T any](n: int, swap: fn(int, int)) {
+    i := n - 1
+    for i > 0 {
+        j := intn(i + 1)
+        swap(i, j)
+        i = i - 1
+    }
+}

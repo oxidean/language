@@ -1,0 +1,227 @@
+package math
+
+// std/math — Go's math package: libm-backed externs plus the
+// constants. The rt_m_ prefix is what makes the driver link -lm
+// only when these are referenced.
+extern fn rt_m_sqrt(x: float) -> float
+
+extern fn rt_m_pow(x: float, y: float) -> float
+
+extern fn rt_m_exp(x: float) -> float
+
+extern fn rt_m_log(x: float) -> float
+
+extern fn rt_m_log10(x: float) -> float
+
+extern fn rt_m_log2(x: float) -> float
+
+extern fn rt_m_floor(x: float) -> float
+
+extern fn rt_m_ceil(x: float) -> float
+
+extern fn rt_m_trunc(x: float) -> float
+
+extern fn rt_m_round(x: float) -> float
+
+extern fn rt_m_fmod(x: float, y: float) -> float
+
+extern fn rt_m_fabs(x: float) -> float
+
+extern fn rt_m_hypot(x: float, y: float) -> float
+
+extern fn rt_m_sin(x: float) -> float
+
+extern fn rt_m_cos(x: float) -> float
+
+extern fn rt_m_tan(x: float) -> float
+
+extern fn rt_m_asin(x: float) -> float
+
+extern fn rt_m_acos(x: float) -> float
+
+extern fn rt_m_atan(x: float) -> float
+
+extern fn rt_m_atan2(y: float, x: float) -> float
+
+extern fn rt_m_nan() -> float
+
+extern fn rt_m_inf(sign: int) -> float
+
+extern fn rt_m_isnan(x: float) -> int
+
+extern fn rt_m_isinf(x: float) -> int
+
+extern fn rt_m_signbit(x: float) -> int
+
+/// pi — Go's math.Pi.
+fn pi() -> float {
+    return 3.141592653589793
+}
+
+/// e — Go's math.E.
+fn e() -> float {
+    return 2.718281828459045
+}
+
+/// sqrt2 — Go's math.Sqrt2.
+fn sqrt2() -> float {
+    return 1.4142135623730951
+}
+
+/// ln2 — Go's math.Ln2.
+fn ln2() -> float {
+    return 0.6931471805599453
+}
+
+/// ln10 — Go's math.Ln10.
+fn ln10() -> float {
+    return 2.302585092994046
+}
+
+/// sqrt returns the square root of x.
+fn sqrt(x: float) -> float {
+    return rt_m_sqrt(x)
+}
+
+/// pow returns x**y.
+fn pow(x: float, y: float) -> float {
+    return rt_m_pow(x, y)
+}
+
+/// exp returns e**x.
+fn exp(x: float) -> float {
+    return rt_m_exp(x)
+}
+
+/// log returns the natural logarithm of x.
+fn log(x: float) -> float {
+    return rt_m_log(x)
+}
+
+/// log10 returns the decimal logarithm of x.
+fn log10(x: float) -> float {
+    return rt_m_log10(x)
+}
+
+/// log2 returns the binary logarithm of x.
+fn log2(x: float) -> float {
+    return rt_m_log2(x)
+}
+
+/// floor returns the greatest integer ≤ x, as a float.
+fn floor(x: float) -> float {
+    return rt_m_floor(x)
+}
+
+/// ceil returns the least integer ≥ x, as a float.
+fn ceil(x: float) -> float {
+    return rt_m_ceil(x)
+}
+
+/// trunc returns x with its fractional part dropped.
+fn trunc(x: float) -> float {
+    return rt_m_trunc(x)
+}
+
+/// round returns the nearest integer, ties away from zero.
+fn round(x: float) -> float {
+    return rt_m_round(x)
+}
+
+/// fmod returns the floating-point remainder of x/y.
+fn fmod(x: float, y: float) -> float {
+    return rt_m_fmod(x, y)
+}
+
+/// abs returns |x| — Go's math.Abs.
+fn abs(x: float) -> float {
+    return rt_m_fabs(x)
+}
+
+/// hypot returns sqrt(x*x + y*y) without intermediate overflow.
+fn hypot(x: float, y: float) -> float {
+    return rt_m_hypot(x, y)
+}
+
+/// sin returns the sine of x (radians).
+fn sin(x: float) -> float {
+    return rt_m_sin(x)
+}
+
+/// cos returns the cosine of x (radians).
+fn cos(x: float) -> float {
+    return rt_m_cos(x)
+}
+
+/// tan returns the tangent of x (radians).
+fn tan(x: float) -> float {
+    return rt_m_tan(x)
+}
+
+/// asin returns the arcsine of x.
+fn asin(x: float) -> float {
+    return rt_m_asin(x)
+}
+
+/// acos returns the arccosine of x.
+fn acos(x: float) -> float {
+    return rt_m_acos(x)
+}
+
+/// atan returns the arctangent of x.
+fn atan(x: float) -> float {
+    return rt_m_atan(x)
+}
+
+/// atan2 returns the arctangent of y/x, using the signs of both to
+/// pick the quadrant.
+fn atan2(y: float, x: float) -> float {
+    return rt_m_atan2(y, x)
+}
+
+/// nan returns an IEEE 754 not-a-number.
+fn nan() -> float {
+    return rt_m_nan()
+}
+
+/// inf returns positive infinity; negative when sign < 0.
+fn inf(sign: int) -> float {
+    return rt_m_inf(sign)
+}
+
+/// isnan reports whether x is NaN.
+fn isnan(x: float) -> bool {
+    return rt_m_isnan(x) != 0
+}
+
+/// isinf reports whether x is ±infinity.
+fn isinf(x: float) -> bool {
+    return rt_m_isinf(x) != 0
+}
+
+/// signbit reports whether x's sign bit is set (includes -0.0).
+fn signbit(x: float) -> bool {
+    return rt_m_signbit(x) != 0
+}
+
+/// min returns the smaller of x and y — NaN propagates.
+fn min(x: float, y: float) -> float {
+    if isnan(x) || isnan(y) {
+        return nan()
+    }
+    if x < y {
+        return x
+    }
+    return y
+}
+
+/// max returns the larger of x and y — NaN propagates.
+fn max(x: float, y: float) -> float {
+    if isnan(x) || isnan(y) {
+        return nan()
+    }
+    if x > y {
+        return x
+    }
+    return y
+}

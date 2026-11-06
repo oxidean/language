@@ -1,0 +1,325 @@
+package main
+
+// S3 acceptance: the Go-parity util surface — path/filepath string
+// ops, generic cmp/sort/slices over the widened Ordered constraint
+// (float + str now satisfy it), concrete maps over collections.Map,
+// math wrappers, drand48 rand determinism, and utf8 edge cases.
+import "std/testing"
+
+import "std/cmp"
+
+import "std/sort"
+
+import "std/slices"
+
+import "std/maps"
+
+import "std/collections"
+
+import "std/path"
+
+import "std/path/filepath"
+
+import "std/strings"
+
+import "std/math"
+
+import "std/math/rand"
+
+import "std/unicode/utf8"
+
+fn approx(a: float, b: float) -> bool {
+    return math.abs(a - b) < 0.000000001
+}
+
+fn test_path() {
+    testing.expect_streq(path.clean("/a/./b/../c/"), "/a/c", "clean collapses dot elems")
+    testing.expect_streq(path.clean("a//b"), "a/b", "clean collapses dup slashes")
+    testing.expect_streq(path.clean(""), ".", "clean empty -> .")
+    testing.expect_streq(path.dir("/a/b/c"), "/a/b", "dir")
+    testing.expect_streq(path.base("/a/b/c"), "c", "base")
+    testing.expect_streq(path.base("/"), "/", "base root")
+    testing.expect_streq(path.ext("/a/b.txt"), ".txt", "ext")
+    testing.expect_streq(path.ext("/a/b"), "", "ext none")
+    testing.expect(path.isabs("/x"), "isabs posix")
+    testing.expect(!path.isabs("x/y"), "isabs rel")
+    testing.expect_streq(path.join2("a", "b"), "a/b", "join2")
+    testing.expect_streq(path.join2("a/", "/b"), "a/b", "join2 trims")
+    // join takes the split()-shaped own StrList
+    testing.expect_streq(path.join(strings.split("a/b/c", "/")), "a/b/c", "join StrList")
+    testing.expect(path.matches("*.txt", "a.txt"), "match star")
+    testing.expect(path.matches("a?c", "abc"), "match ?")
+    testing.expect(path.matches("[ab]c", "bc"), "match [set]")
+    testing.expect(!path.matches("*.txt", "a.png"), "match neg")
+    testing.expect(!path.matches("a", "ab"), "match len")
+    // a ".." cancels a normal segment only — retained leading ".."
+    // must survive (Go: clean("../..") == "../..")
+    testing.expect_streq(path.clean("../.."), "../..", "clean keeps leading ..")
+    testing.expect_streq(path.clean("../../b"), "../../b", "clean keeps leading ..x2")
+    testing.expect_streq(path.clean("../a/../.."), "../..", "clean .. cancels seg")
+    testing.expect_streq(path.clean("a/../../b"), "../b", "clean pops past ..")
+    testing.expect_streq(path.clean("/../.."), "/", "clean rooted drops ..")
+}
+
+fn test_filepath() {
+    win := filepath.iswin()
+    // sep/listsep pin the platform branch; both sides asserted so
+    // one file proves both OSes across the CI matrix
+    if win {
+        testing.expect_streq(filepath.sep(), "\\", "sep windows")
+        testing.expect_streq(filepath.listsep(), ";", "listsep windows")
+    } else {
+        testing.expect_streq(filepath.sep(), "/", "sep posix")
+        testing.expect_streq(filepath.listsep(), ":", "listsep posix")
+    }
+    testing.expect_streq(filepath.base(filepath.join2("a", "b.txt")), "b.txt", "join+base")
+    testing.expect_streq(filepath.ext("a/b.txt"), ".txt", "filepath ext")
+    if win {
+        testing.expect_streq(filepath.volume_name("C:\\x\\y"), "C:", "volume c:")
+        testing.expect(filepath.isabs("C:\\x"), "win drive abs")
+        testing.expect(filepath.isabs("\\x"), "win rooted abs")
+        testing.expect(!filepath.isabs("x\\y"), "win rel")
+        testing.expect_streq(filepath.toslash("a\\b\\c"), "a/b/c", "toslash")
+        testing.expect_streq(filepath.fromslash("a/b/c"), "a\\b\\c", "fromslash")
+        testing.expect_streq(filepath.clean("C:\\a\\..\\b"), "C:/b", "win clean -> canonical / form")
+        testing.expect_streq(filepath.clean("..\\..\\b"), "../../b", "win clean leading ..")
+    } else {
+        testing.expect_streq(filepath.volume_name("/a/b"), "", "volume none posix")
+        testing.expect(filepath.isabs("/x"), "posix abs")
+        testing.expect(!filepath.isabs("x/y"), "posix rel")
+        testing.expect_streq(filepath.toslash("a/b"), "a/b", "toslash noop")
+        testing.expect_streq(filepath.clean("/a/./b/../c"), "/a/c", "posix clean")
+        testing.expect_streq(filepath.clean("../../b"), "../../b", "posix clean leading ..")
+    }
+    // abs resolves against the cwd — result must be absolute on both OSes
+    testing.expect(filepath.isabs(filepath.abs(".")), "abs(.) is absolute")
+}
+
+fn test_cmp() {
+    // the widened constraint table: float + str satisfy Ordered too
+    testing.expect_eq(cmp.compare(1, 2), -1, "cmp int lt")
+    testing.expect_eq(cmp.compare(2, 2), 0, "cmp int eq")
+    testing.expect_eq(cmp.compare(3, 2), 1, "cmp int gt")
+    testing.expect_eq(cmp.compare(1.5, 2.5), -1, "cmp float")
+    testing.expect_eq(cmp.compare("abc", "abd"), -1, "cmp str lt")
+    testing.expect_eq(cmp.compare("b", "a"), 1, "cmp str gt")
+    testing.expect_eq(cmp.compare("same", "same"), 0, "cmp str eq")
+    testing.expect_eq(cmp.min(3, 7), 3, "cmp.min")
+    testing.expect_eq(cmp.max(3, 7), 7, "cmp.max")
+    testing.expect_streq(cmp.min("xy", "ab"), "ab", "cmp.min str")
+}
+
+fn test_sort() {
+    v := mkslice(int, 0)
+    v = push(v, 5)
+    v = push(v, 1)
+    v = push(v, 4)
+    v = push(v, 1)
+    v = push(v, 9)
+    sort.sort(v)
+    testing.expect(sort.is_sorted(v), "sort ints sorted")
+    testing.expect_eq(v[0], 1, "sort first")
+    testing.expect_eq(v[4], 9, "sort last")
+
+    s := mkslice(str, 0)
+    s = push(s, "pear")
+    s = push(s, "apple")
+    s = push(s, "fig")
+    sort.sort(s)
+    testing.expect(sort.is_sorted(s), "sort strs sorted")
+    testing.expect_streq(s[0], "apple", "str sort first")
+
+    f := mkslice(float, 0)
+    f = push(f, 2.5)
+    f = push(f, 0.5)
+    f = push(f, 9.9)
+    sort.sort(f)
+    testing.expect(sort.is_sorted(f), "sort floats sorted")
+
+    // sortfn: a custom less — descending ints via fn value
+    d := mkslice(int, 0)
+    d = push(d, 1)
+    d = push(d, 3)
+    d = push(d, 2)
+    sort.sortfn(d, gt_int)
+    testing.expect_eq(d[0], 3, "sortfn desc first")
+
+    r := mkslice(int, 0)
+    r = push(r, 1)
+    r = push(r, 2)
+    r = push(r, 3)
+    sort.reverse(r)
+    testing.expect_eq(r[0], 3, "reverse")
+}
+
+fn gt_int(x: int, y: int) -> bool {
+    return x > y
+}
+
+fn test_slices() {
+    v := mkslice(int, 0)
+    v = push(v, 10)
+    v = push(v, 20)
+    v = push(v, 30)
+    testing.expect_eq(slices.index(v, 20), 1, "index hit")
+    testing.expect_eq(slices.index(v, 99), -1, "index miss")
+    testing.expect(slices.contains(v, 30), "contains")
+    testing.expect(!slices.contains(v, 31), "!contains")
+    c := slices.clone(v)
+    testing.expect(slices.equal(v, c), "clone equal")
+    c[0] = 99
+    testing.expect(!slices.equal(v, c), "clone independent")
+    cc := slices.concat(v, c)
+    testing.expect_eq(len(cc), 6, "concat len")
+    testing.expect_eq(slices.min(v), 10, "slices.min")
+    testing.expect_eq(slices.max(v), 30, "slices.max")
+    // own []T read-coercion: sort consumes clone()'s owned return
+    u := slices.clone(v)
+    u[0] = 7
+    sort.sort(u)
+    testing.expect(sort.is_sorted(u), "sort(clone) composes")
+    // lexicographic slice compare
+    testing.expect_eq(slices.compare(v, v), 0, "compare eq")
+    testing.expect_eq(slices.compare(v, c), -1, "compare lt")
+    // own []T -> []T coercion outside call args: let, assign, return
+    let lv: []int = new(mkslice(int, 1))
+    lv[0] = 11
+    testing.expect_eq(lv[0], 11, "let []int = own slice")
+    let av: []int = mkslice(int, 0)
+    av = new(mkslice(int, 1))
+    av[0] = 22
+    testing.expect_eq(av[0], 22, "assign []int = own slice")
+    // struct field init exercises the same conv_v arm
+    testing.expect_eq(lv[0] + av[0], 33, "own->slice sites emit deref")
+}
+
+fn test_maps() {
+    m := collections.map_new()
+    collections.map_set(m, "a", 1)
+    collections.map_set(m, "b", 2)
+    collections.map_set(m, "c", 3)
+    k := maps.keys(m)
+    testing.expect_eq(len(k), 3, "keys len")
+    sort.sort(k)
+    testing.expect_streq(k[0], "a", "keys[0]")
+    testing.expect_streq(k[2], "c", "keys[2]")
+    vs := maps.values(m)
+    testing.expect_eq(len(vs), 3, "values len")
+
+    n := collections.map_new()
+    maps.copy(n, m)
+    testing.expect(maps.equal(m, n), "copy -> equal")
+    collections.map_set(n, "d", 4)
+    testing.expect(!maps.equal(m, n), "len differs -> !equal")
+    collections.map_del(n, "d")
+    collections.map_set(n, "x", 9)
+    testing.expect(!maps.equal(m, n), "value differs -> !equal")
+
+    s := collections.set_new()
+    collections.set_add(s, "x")
+    collections.set_add(s, "y")
+    sk := maps.skeys(s)
+    testing.expect_eq(len(sk), 2, "skeys len")
+    s2 := collections.set_new()
+    collections.set_add(s2, "x")
+    collections.set_add(s2, "y")
+    testing.expect(maps.sequal(s, s2), "sequal")
+    collections.set_add(s2, "z")
+    testing.expect(!maps.sequal(s, s2), "!sequal")
+}
+
+fn test_math() {
+    testing.expect(approx(math.sqrt(16.0), 4.0), "sqrt")
+    testing.expect(approx(math.pow(2.0, 10.0), 1024.0), "pow")
+    testing.expect(approx(math.exp(math.log(42.0)), 42.0), "exp(log) round trip")
+    testing.expect(approx(math.log10(1000.0), 3.0), "log10")
+    testing.expect(approx(math.log2(8.0), 3.0), "log2")
+    testing.expect_eq(ftoi(math.floor(3.7)), 3, "floor")
+    testing.expect_eq(ftoi(math.ceil(3.2)), 4, "ceil")
+    testing.expect_eq(ftoi(math.trunc(-3.7)), 0 - 3, "trunc")
+    testing.expect_eq(ftoi(math.round(3.5)), 4, "round")
+    testing.expect(approx(math.fmod(7.5, 2.0), 1.5), "fmod")
+    testing.expect(approx(math.abs(-4.25), 4.25), "abs")
+    testing.expect(approx(math.hypot(3.0, 4.0), 5.0), "hypot")
+    testing.expect(approx(math.sin(0.0), 0.0), "sin0")
+    testing.expect(approx(math.cos(0.0), 1.0), "cos0")
+    testing.expect(approx(math.asin(1.0), math.pi() / 2.0), "asin")
+    testing.expect(approx(math.atan2(1.0, 1.0), math.pi() / 4.0), "atan2")
+    testing.expect(math.isnan(math.nan()), "isnan")
+    testing.expect(!math.isnan(1.0), "!isnan")
+    testing.expect(math.isinf(math.inf(1)), "isinf +")
+    testing.expect(math.isinf(math.inf(0 - 1)), "isinf -")
+    testing.expect(!math.isinf(1000000.0), "!isinf")
+    testing.expect(math.signbit(-0.5), "signbit -")
+    testing.expect(!math.signbit(0.5), "signbit +")
+    testing.expect(approx(math.pi(), 3.141592653589793), "pi")
+    testing.expect(approx(math.e(), 2.718281828459045), "e")
+    testing.expect(approx(math.min(1.5, 2.5), 1.5), "math.min")
+    testing.expect(approx(math.max(1.5, 2.5), 2.5), "math.max")
+}
+
+fn test_rand() {
+    // same seed, same stream — the LCG contract
+    rand.seed(42)
+    a := rand.intn(1000)
+    rand.seed(42)
+    testing.expect_eq(rand.intn(1000), a, "seed -> deterministic")
+    rand.seed(7)
+    i := 0
+    ok := true
+    for i < 200 {
+        x := rand.intn(17)
+        if x < 0 || x >= 17 {
+            ok = false
+        }
+        f := rand.float64()
+        if f < 0.0 || f >= 1.0 {
+            ok = false
+        }
+        i = i + 1
+    }
+    testing.expect(ok, "intn bounds + float64 range")
+    p := rand.perm(20)
+    testing.expect_eq(len(p), 20, "perm len")
+    // a permutation covers every index exactly once
+    seen := collections.map_new()
+    j := 0
+    for j < 20 {
+        collections.map_set(seen, itoa(p[j]), 1)
+        j = j + 1
+    }
+    testing.expect_eq(collections.map_len(seen), 20, "perm covers all")
+}
+
+fn test_utf8() {
+    testing.expect_eq(utf8.runelen("hello"), 5, "runelen ascii")
+    testing.expect_eq(utf8.runelen("héllo"), 5, "runelen 2-byte")
+    d := utf8.decode("héllo", 1)
+    testing.expect_eq(d.r, 233, "decode é rune")
+    testing.expect_eq(d.n, 2, "decode é size")
+    // 4-byte (emoji): encode -> decode round trip
+    s4 := utf8.encode(128512)
+    testing.expect_eq(len(s4), 4, "encode 4-byte len")
+    d4 := utf8.decode(s4, 0)
+    testing.expect_eq(d4.r, 128512, "decode 4-byte rune")
+    testing.expect_eq(d4.n, 4, "decode 4-byte size")
+    // malformed: substr mid-rune makes a truncated tail byte seq
+    t := substr("héllo", 0, 2) // "h" + first byte of é
+    testing.expect_eq(len(t), 2, "truncated len")
+    dt := utf8.decode(t, 1)
+    testing.expect_eq(dt.r, utf8.runeerror(), "truncated -> RuneError")
+    testing.expect_eq(dt.n, 1, "truncated -> size 1")
+    testing.expect(!utf8.valid(t), "truncated invalid")
+    // FullRune reports a COMPLETE first rune — "h"+0xC3 starts with
+    // one, but the lone truncated lead byte does not complete
+    testing.expect(utf8.fullrune(t), "fullrune on complete prefix")
+    testing.expect(!utf8.fullrune(substr("héllo", 1, 2)), "truncated !fullrune")
+    testing.expect(utf8.valid("héllo"), "valid")
+    testing.expect(utf8.fullrune("héllo"), "fullrune")
+    testing.expect(utf8.valid(s4), "4-byte valid")
+    // end of input: (RuneError, 0)
+    de := utf8.decode("abc", 3)
+    testing.expect_eq(de.r, utf8.runeerror(), "eof -> RuneError")
+    testing.expect_eq(de.n, 0, "eof -> size 0")
+    testing.expect_eq(utf8.runeerror(), 65533, "RuneError = U+FFFD")
+}

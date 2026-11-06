@@ -1,0 +1,258 @@
+package filepath
+
+// std/path/filepath — OS-aware paths, Go's path/filepath. Both `/`
+// and `\` are separators on Windows; `/` alone on POSIX. oxl-canonical
+// paths are `/`-separated — that's what rt_fullpath and every fs
+// builtin produce — so `abs` and `clean` output `/` form everywhere;
+// `toslash`/`fromslash` convert at the boundary.
+extern fn rt_is_windows() -> int
+
+extern fn rt_fullpath(path: str) -> str
+
+/// iswin reports whether this binary targets Windows — every OS
+/// decision keys off it, so the same source checks both semantic
+/// sets across the CI matrix.
+fn iswin() -> bool {
+    return rt_is_windows() != 0
+}
+
+/// sep returns the OS path separator as a one-char string.
+fn sep() -> str {
+    if iswin() {
+        return "\\"
+    }
+    return "/"
+}
+
+/// listsep returns the PATH-list separator: `;` Windows, `:` POSIX.
+fn listsep() -> str {
+    if iswin() {
+        return ";"
+    }
+    return ":"
+}
+
+// issep reports whether byte c separates segments here.
+fn issep(c: int) -> bool {
+    return c == 47 || iswin() && c == 92
+}
+
+/// volume_name returns the Windows volume prefix — drive `C:` or
+/// UNC `\\host\share` — or "" elsewhere and everywhere on POSIX.
+fn volume_name(p: str) -> str {
+    if !iswin() || len(p) < 2 {
+        return ""
+    }
+    // \\host\share — UNC: prefix runs through the next separator
+    if issep(byteat(p, 0)) && issep(byteat(p, 1)) {
+        i := 2
+        for i < len(p) && !issep(byteat(p, i)) {
+            i = i + 1
+        }
+        if i < len(p) {
+            j := i + 1
+            for j < len(p) && !issep(byteat(p, j)) {
+                j = j + 1
+            }
+            return substr(p, 0, j)
+        }
+        return p
+    }
+    // x: drive prefix
+    c := byteat(p, 0)
+    if byteat(p, 1) == 58 && (c >= 65 && c <= 90 || c >= 97 && c <= 122) {
+        return substr(p, 0, 2)
+    }
+    return ""
+}
+
+struct Seg { v: str, next: own Seg }
+
+fn spush(h: own Seg, v: str) -> own Seg {
+    return new(Seg{v: v, next: h})
+}
+
+/// clean is path.Clean with OS semantics: collapses runs of
+/// separators, resolves `.` and `..`, preserves the volume prefix.
+/// Output is `/`-separated (oxl-canonical).
+fn clean(p: str) -> str {
+    if len(p) == 0 {
+        return "."
+    }
+    vol := volume_name(p)
+    rest := substr(p, len(vol), len(p))
+    rooted := len(rest) > 0 && issep(byteat(rest, 0))
+    // split on either separator
+    let stack: own Seg = nil
+    depth := 0
+    i := 0
+    for i <= len(rest) {
+        j := i
+        for j < len(rest) && !issep(byteat(rest, j)) {
+            j = j + 1
+        }
+        s := substr(rest, i, j)
+        i = j + 1
+        if len(s) == 0 || s == "." {
+            continue
+        }
+        if s == ".." {
+            // ".." cancels a normal segment only — a retained leading
+            // ".." must stay (Go: clean("../..") == "../..")
+            if depth > 0 && stack.v != ".." {
+                stack = stack.next
+                depth = depth - 1
+            } else if !rooted {
+                stack = spush(stack, s)
+                depth = depth + 1
+            }
+            continue
+        }
+        stack = spush(stack, s)
+        depth = depth + 1
+    }
+    let fwd: own Seg = nil
+    for stack != nil {
+        fwd = spush(fwd, stack.v)
+        stack = stack.next
+    }
+    out := vol
+    if rooted {
+        out = out + "/"
+    }
+    first := true
+    for fwd != nil {
+        if !first {
+            out = out + "/"
+        }
+        first = false
+        out = out + fwd.v
+        fwd = fwd.next
+    }
+    if len(out) == 0 {
+        if len(vol) > 0 {
+            return vol + "."
+        }
+        return "."
+    }
+    return out
+}
+
+/// dir returns all but the last element.
+fn dir(p: str) -> str {
+    d := clean(p)
+    i := len(d) - 1
+    for i >= 0 && byteat(d, i) != 47 {
+        i = i - 1
+    }
+    if i < 0 {
+        return "."
+    }
+    if i == 0 {
+        return "/"
+    }
+    return clean(substr(d, 0, i))
+}
+
+/// base returns the last element.
+fn base(p: str) -> str {
+    if len(p) == 0 {
+        return "."
+    }
+    e := len(p)
+    for e > 0 && issep(byteat(p, e - 1)) {
+        e = e - 1
+    }
+    if e == 0 {
+        return sep()
+    }
+    i := e - 1
+    for i >= 0 && !issep(byteat(p, i)) {
+        i = i - 1
+    }
+    return substr(p, i + 1, e)
+}
+
+/// ext returns the suffix from the last `.` in the final element.
+fn ext(p: str) -> str {
+    b := base(p)
+    i := len(b) - 1
+    for i >= 0 {
+        if issep(byteat(b, i)) {
+            break
+        }
+        if byteat(b, i) == 46 {
+            return substr(b, i, len(b))
+        }
+        i = i - 1
+    }
+    return ""
+}
+
+/// isabs reports whether p is absolute: `/`-rooted on POSIX;
+/// volume-rooted (`C:\`, `\\host\share`, `\x`) on Windows.
+fn isabs(p: str) -> bool {
+    if !iswin() {
+        return len(p) > 0 && byteat(p, 0) == 47
+    }
+    if len(p) == 0 {
+        return false
+    }
+    if issep(byteat(p, 0)) {
+        return true
+    }
+    v := volume_name(p)
+    return len(v) > 0 && len(p) > len(v) && issep(byteat(p, len(v)))
+}
+
+/// abs returns the canonical absolute form of p — rt_fullpath,
+/// `/`-separated. "" when the path can't resolve.
+fn abs(p: str) -> str {
+    return rt_fullpath(p)
+}
+
+/// join concatenates segments and cleans — the common two-segment
+/// form is join2; variadic callers build with strings.
+fn join2(a: str, b: str) -> str {
+    if len(a) == 0 {
+        return clean(b)
+    }
+    if len(b) == 0 {
+        return clean(a)
+    }
+    return clean(a + "/" + b)
+}
+
+/// toslash returns p with `\` converted to `/`.
+fn toslash(p: str) -> str {
+    out := ""
+    i := 0
+    for i < len(p) {
+        c := byteat(p, i)
+        if c == 92 {
+            out = out + "/"
+        } else {
+            out = out + substr(p, i, i + 1)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// fromslash returns p with `/` converted to the OS separator.
+fn fromslash(p: str) -> str {
+    if !iswin() {
+        return p
+    }
+    out := ""
+    i := 0
+    for i < len(p) {
+        if byteat(p, i) == 47 {
+            out = out + "\\"
+        } else {
+            out = out + substr(p, i, i + 1)
+        }
+        i = i + 1
+    }
+    return out
+}

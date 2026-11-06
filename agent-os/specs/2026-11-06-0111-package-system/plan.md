@@ -4,7 +4,7 @@ Go-shaped packages, versions, fetching, dead-code elimination, and a
 Go-parity `std/`. Per-item design sketches live in `items/`; this file
 is the order of battle. Milestone-gated, not date-gated.
 
-**Status (2026-11-06): M1 (PR #5), M2 (PR #6), M3 (PR #7), G1 (PR #9), G2 (PR #10), V1 (PR #11), S1 (PR #12), V2 (PR #13), V3 (PR #14), S2 implemented; S3–S5 spec'd.**
+**Status (2026-11-06): M1 (PR #5), M2 (PR #6), M3 (PR #7), G1 (PR #9), G2 (PR #10), V1 (PR #11), S1 (PR #12), V2 (PR #13), V3 (PR #14), S2 (PR #15), S3 implemented; S4–S5 spec'd.**
 Review findings folded into the item files — see threads on the PR.
 
 Execution model: Track M is the critical path — every other track
@@ -95,7 +95,7 @@ it — same diff family.
 `std/bufio`, bounded `std/fmt`. Pulls the `byte`/`[]byte` type it
 needs — that's part of the item, not a side quest.
 
-### Task S3: util & data packages [not started]
+### Task S3: util & data packages [done — this PR]
 
 `items/s3-std-util.md`. `std/path`, `std/path/filepath`, `std/sort` +
 `slices` + `maps` + `cmp` (generics), `std/math`, `std/math/rand`,

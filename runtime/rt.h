@@ -348,6 +348,34 @@ int64_t rt_fd_write(int64_t fd, RtSlice b);  /* n or -errno        */
 int64_t rt_fd_close(int64_t fd);   /* 0 or -errno              */
 int64_t rt_remove(OxlStr path);      /* unlink, 0 or -errno      */
 OxlStr  rt_errstr(int64_t code);      /* strerror text             */
+int64_t rt_str_cmp(OxlStr a, OxlStr b);      /* byte-lex order, Go str<str */
+int64_t rt_is_windows(void);                  /* 1 under _WIN32              */
+OxlStr  rt_timestr(void);                     /* "YYYY-MM-DD HH:MM:SS" local */
+double  rt_m_sqrt(double);
+double  rt_m_pow(double, double);
+double  rt_m_exp(double);
+double  rt_m_log(double);
+double  rt_m_log10(double);
+double  rt_m_log2(double);
+double  rt_m_floor(double);
+double  rt_m_ceil(double);
+double  rt_m_trunc(double);
+double  rt_m_round(double);
+double  rt_m_fmod(double, double);
+double  rt_m_fabs(double);
+double  rt_m_hypot(double, double);
+double  rt_m_sin(double);
+double  rt_m_cos(double);
+double  rt_m_tan(double);
+double  rt_m_asin(double);
+double  rt_m_acos(double);
+double  rt_m_atan(double);
+double  rt_m_atan2(double, double);
+double  rt_m_nan(void);
+double  rt_m_inf(int64_t);
+int64_t rt_m_isnan(double);
+int64_t rt_m_isinf(double);
+int64_t rt_m_signbit(double);
 OxlStr rt_readfile(OxlStr path);
 int64_t rt_writefile(OxlStr path, OxlStr data);
 void rt_exit(int64_t code);

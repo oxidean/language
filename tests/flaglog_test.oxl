@@ -1,0 +1,49 @@
+package main
+
+// S3 acceptance: flag registration/getters/usage/empty-argv parse and
+// log levels + the fixed line shape (argv-bound parse paths live in
+// run.sh's cli cases — oxl test passes no user argv).
+import "std/testing"
+
+import "std/flag"
+
+import "std/log"
+
+fn test_flag() {
+    fs := flag.newset("prog")
+    flag.int_(fs, "n", 3, "count")
+    flag.string(fs, "name", "dflt", "who")
+    flag.boolean(fs, "v", 0, "verbose")
+    // defaults hold until parse
+    testing.expect_eq(flag.geti(fs, "n"), 3, "default int")
+    testing.expect_streq(flag.gets(fs, "name"), "dflt", "default str")
+    testing.expect(!flag.getb(fs, "v"), "default bool")
+    // usage lists every flag with help
+    u := flag.usage(fs)
+    testing.expect(find(u, "Usage of prog:") >= 0, "usage header")
+    testing.expect(find(u, "-n int") >= 0, "usage int flag")
+    testing.expect(find(u, "(default 3)") >= 0, "usage int default")
+    testing.expect(find(u, "-name string") >= 0, "usage str flag")
+    testing.expect(find(u, "-v") >= 0, "usage bool flag")
+    // empty argv (oxl test passes none): parse yields defaults + no
+    // positionals
+    [rc, err] = flag.parse(fs)
+    testing.expect_eq(rc, 0, "parse rc")
+    testing.expect(err == nil, "parse nil err")
+    testing.expect_eq(len(flag.args(fs)), 0, "no positionals")
+    testing.expect_eq(flag.geti(fs, "n"), 3, "int stays default")
+}
+
+fn test_log() {
+    testing.expect_eq(log.level(), 1, "default level info")
+    log.set_level(log.lvl_debug())
+    testing.expect_eq(log.level(), 0, "level set")
+    log.set_level(log.lvl_info())
+    // the line shape is fixed: 19-char timestamp + space + LEVEL + msg
+    l := log.line("INFO", "hello")
+    testing.expect_eq(len(l), 20 + 4 + 1 + 5 + 1, "line len")
+    testing.expect_streq(substr(l, 4, 5), "-", "ts date dash")
+    testing.expect_streq(substr(l, 20, len(l)), "INFO hello\n", "level+msg tail")
+    l2 := log.line("WARN", "x")
+    testing.expect_streq(substr(l2, 20, len(l2)), "WARN x\n", "warn tail")
+}

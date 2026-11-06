@@ -1,0 +1,299 @@
+package flag
+
+// std/flag — Go's flag package surface: defined flags, -x=v and
+// -x v forms, `--` terminator, positional remainder, usage text.
+//
+//     fs := flag.newset("tool")
+//     n := flag.int_(fs, "n", 1, "iterations")
+//     [_, err] = flag.parse(fs)
+//     if err != nil { exit(2) }        // parse already wrote usage
+//
+// A defined flag is a boxed cell (own); after parse it holds the
+// command-line value or its default.
+import "std/strconv"
+
+import "std/os"
+
+import "std/errors"
+
+import "std/slices"
+
+/// IntFlag is a defined int flag — `v` is the parsed value.
+struct IntFlag { name: str, def: int, v: int, help: str, next: own IntFlag }
+
+/// StrFlag is a defined string flag.
+struct StrFlag { name: str, def: str, v: str, help: str, next: own StrFlag }
+
+/// BoolFlag is a defined bool flag — `v` 1/0 (bool fields can't sit
+/// in these next-chained structs' public shape; ints are clearer).
+struct BoolFlag { name: str, def: int, v: int, help: str, next: own BoolFlag }
+
+/// FlagSet holds a program's defined flags and parsed remainder.
+struct FlagSet {
+    prog: str,
+    ints: own IntFlag,
+    strs: own StrFlag,
+    bools: own BoolFlag,
+    pos: own []str,
+}
+
+/// newset creates a flag set named for the program — Go's
+/// flag.NewFlagSet(os.Args[0], ExitOnError) minus the exit.
+fn newset(prog: str) -> own FlagSet {
+    fs := new(FlagSet)
+    fs.prog = prog
+    fs.ints = nil
+    fs.strs = nil
+    fs.bools = nil
+    fs.pos = nil
+    return fs
+}
+
+/// int_ defines an int flag — Go's FlagSet.Int, minus the pointer:
+/// own cells can't be shared out, so parsed values come back
+/// through geti/gets/getb.
+fn int_(fs: mut FlagSet, name: str, def: int, help: str) {
+    c := new(IntFlag)
+    c.name = name
+    c.def = def
+    c.v = def
+    c.help = help
+    c.next = fs.ints
+    fs.ints = c
+}
+
+/// geti returns flag `name`'s parsed int value.
+fn geti(fs: ref FlagSet, name: str) -> int {
+    c := find_int(fs, name)
+    if c == nil {
+        return 0
+    }
+    return c.v
+}
+
+/// gets returns flag `name`'s parsed string value.
+fn gets(fs: ref FlagSet, name: str) -> str {
+    c := find_str(fs, name)
+    if c == nil {
+        return ""
+    }
+    return c.v
+}
+
+/// getb reports flag `name`'s parsed bool value.
+fn getb(fs: ref FlagSet, name: str) -> bool {
+    c := find_bool(fs, name)
+    if c == nil {
+        return false
+    }
+    return c.v != 0
+}
+
+/// string defines a string flag — Go's FlagSet.String. (Not `str`:
+/// a member named `str` shadows the builtin type inside this file.)
+fn string(fs: mut FlagSet, name: str, def: str, help: str) {
+    c := new(StrFlag)
+    c.name = name
+    c.def = def
+    c.v = def
+    c.help = help
+    c.next = fs.strs
+    fs.strs = c
+}
+
+/// boolean defines a bool flag — Go's FlagSet.Bool. Bool flags take
+/// no separate argument: `-v` sets, `-v=false` clears.
+fn boolean(fs: mut FlagSet, name: str, def: int, help: str) {
+    c := new(BoolFlag)
+    c.name = name
+    c.def = def
+    c.v = def
+    c.help = help
+    c.next = fs.bools
+    fs.bools = c
+}
+
+// find_int looks a defined int flag up by name.
+fn find_int(fs: ref FlagSet, name: str) -> own IntFlag {
+    c := fs.ints
+    for c != nil {
+        if c.name == name {
+            return c
+        }
+        c = c.next
+    }
+    return nil
+}
+
+fn find_str(fs: ref FlagSet, name: str) -> own StrFlag {
+    c := fs.strs
+    for c != nil {
+        if c.name == name {
+            return c
+        }
+        c = c.next
+    }
+    return nil
+}
+
+fn find_bool(fs: ref FlagSet, name: str) -> own BoolFlag {
+    c := fs.bools
+    for c != nil {
+        if c.name == name {
+            return c
+        }
+        c = c.next
+    }
+    return nil
+}
+
+/// usage builds the Go-shaped usage block — callers print it on
+/// parse errors and -help.
+fn usage(fs: ref FlagSet) -> str {
+    out := "Usage of " + fs.prog + ":\n"
+    c := fs.ints
+    for c != nil {
+        out = out + "  -" + c.name + " int\n    \t" + c.help + " (default " + itoa(c.def) + ")\n"
+        c = c.next
+    }
+    s := fs.strs
+    for s != nil {
+        out = out + "  -" + s.name + " string\n    \t" + s.help
+        if len(s.def) > 0 {
+            out = out + " (default \"" + s.def + "\")"
+        }
+        out = out + "\n"
+        s = s.next
+    }
+    b := fs.bools
+    for b != nil {
+        out = out + "  -" + b.name + "\n    \t" + b.help
+        if b.def != 0 {
+            out = out + " (default true)"
+        }
+        out = out + "\n"
+        b = b.next
+    }
+    return out
+}
+
+// fail reports a parse error the Go way: message + usage on stderr,
+// then the caller gets an err value back.
+fn fail(fs: ref FlagSet, msg: str) -> err {
+    f := os.stderr()
+    [_, we] = f.write((msg + "\n" + usage(fs)) as []byte)
+    if we != nil {
+        exit(2) // stderr itself is gone — nothing left to do
+    }
+    return errors.new(msg)
+}
+
+/// parse reads os.args for flags — Go's FlagSet.Parse. `-x=v`,
+/// `-x v`, `--x`, and bare `--` all behave like Go; the positional
+/// remainder lands in `pos` (see args). The err return is nil on
+/// success; on failure parse has already written the message and
+/// usage to stderr.
+fn parse(fs: mut FlagSet) -> [int, err] {
+    // plain []str while accumulating — push reassigns; boxed into
+    // fs.pos at the end so it escapes.
+    pos := mkslice(str, 0)
+    n := os.nargs()
+    i := 1 // args(0) is the program name
+
+    for i < n {
+        a := os.args(i)
+        i = i + 1
+        if len(a) < 2 || byteat(a, 0) != 45 {
+            pos = push(pos, a)
+            continue
+        }
+        // - or -- prefix
+        off := 1
+        if byteat(a, 1) == 45 {
+            off = 2
+            if len(a) == 2 {
+                // bare `--`: rest is positional
+                for i < n {
+                    pos = push(pos, os.args(i))
+                    i = i + 1
+                }
+                fs.pos = new(pos)
+                return 0, nil
+            }
+        }
+        body := substr(a, off, len(a))
+        // split =value
+        eq := find(body, "=")
+        name := body
+        val := ""
+        has_val := false
+        if eq >= 0 {
+            name = substr(body, 0, eq)
+            val = substr(body, eq + 1, len(body))
+            has_val = true
+        }
+        if name == "h" || name == "help" {
+            f := os.stderr()
+            [_, we] = f.write(usage(fs) as []byte)
+            if we != nil {
+                exit(2)
+            }
+            return 0, errors.new("help requested")
+        }
+        // bool flag?
+        bc := find_bool(fs, name)
+        if bc != nil {
+            if !has_val {
+                bc.v = 1
+                continue
+            }
+            if val == "true" || val == "1" {
+                bc.v = 1
+                continue
+            }
+            if val == "false" || val == "0" {
+                bc.v = 0
+                continue
+            }
+            return 0, fail(fs, "invalid boolean value \"" + val + "\" for -" + name)
+        }
+        ic := find_int(fs, name)
+        if ic != nil {
+            if !has_val {
+                if i >= n {
+                    return 0, fail(fs, "flag needs an argument: -" + name)
+                }
+                val = os.args(i)
+                i = i + 1
+            }
+            [x, pe] = strconv.atoi(val)
+            if pe != nil {
+                return 0, fail(fs, "invalid value \"" + val + "\" for flag -" + name + ": parse error")
+            }
+            ic.v = x
+            continue
+        }
+        sc := find_str(fs, name)
+        if sc != nil {
+            if !has_val {
+                if i >= n {
+                    return 0, fail(fs, "flag needs an argument: -" + name)
+                }
+                val = os.args(i)
+                i = i + 1
+            }
+            sc.v = val
+            continue
+        }
+        return 0, fail(fs, "flag provided but not defined: -" + name)
+    }
+    fs.pos = new(pos)
+    return 0, nil
+}
+
+/// args returns the positional remainder — Go's FlagSet.Args.
+/// Returns the caller's own box (escape-checked like everything
+/// else that leaves a scope).
+fn args(fs: ref FlagSet) -> own []str {
+    return slices.clone(fs.pos)
+}

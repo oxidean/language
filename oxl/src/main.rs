@@ -1220,6 +1220,14 @@ fn qualify_item(
             } else if let Some(n) = renames.get(&f.name) {
                 f.name = n.clone();
             }
+            for (_, c) in f.ty_params.iter_mut() {
+                // iface constraints are decl names — qualify like any
+                // type ref (`Ordered` -> `cmp.Ordered`, `cc.Ordered` ->
+                // `cmp.Ordered`); builtins aren't names, pass through
+                if !matches!(c.as_str(), "" | "any" | "eq" | "ordered" | "add") {
+                    *c = map_name(c, renames, aliases, used);
+                }
+            }
             for p in &mut f.params {
                 qualify_ty(&mut p.ty, renames, aliases, used);
             }
@@ -1530,6 +1538,15 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
     }
     if needs_net {
         cmd.arg("-DOXL_NET");
+    }
+    // libm only when the program uses rt_m_* wrappers: -DOXL_MATH
+    // compiles the wrappers and -lm links them, together (sqlite
+    // pattern). Windows skips both — msvcrt already carries the fns
+    // and rt.c compiles them there unguarded.
+    if c_src.contains("rt_m_") {
+        cmd.arg("-DOXL_MATH");
+        #[cfg(not(windows))]
+        cmd.arg("-lm");
     }
     if needs_sqlite {
         // -D before sources, -l after: --as-needed linkers (Ubuntu gcc

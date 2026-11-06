@@ -13,10 +13,10 @@ case "$OXL" in /*) ;; *) OXL="$PWD/$OXL";; esac
 # explicitly, drop -pthread (pthread APIs come from the rt.h Win32
 # veneer, not a lib), link ws2_32 for the socket shims, and resolve
 # python by whatever name the image gives it
-EXE=""; THREAD_FLAG="-pthread"; NET_LIBS=""; PY=python3
+EXE=""; THREAD_FLAG="-pthread"; NET_LIBS=""; MATH_LIBS="-lm"; PY=python3
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-        EXE=".exe"; THREAD_FLAG=""; NET_LIBS="-lws2_32"; PY=python ;;
+        EXE=".exe"; THREAD_FLAG=""; NET_LIBS="-lws2_32"; MATH_LIBS=""; PY=python ;;
 esac
 command -v "$PY" >/dev/null 2>&1 || PY=python3
 CC="${LANG_CC:-cc}"
@@ -137,6 +137,35 @@ fn main() { x := '' }
 EOF
 diag=$("$OXL" build "$scratch/badchar.oxl" -o "$scratch/badchar$EXE" 2>&1 || true)
 grep -q "char literal" <<<"$diag" || { echo "FAIL charlit diag: $diag"; exit 1; }
+
+echo "== oxl test: util (s3) =="
+out=$("$OXL" test tests/util_test.oxl)
+printf '%s
+' "$out" >&2
+for t in test_path test_filepath test_cmp test_sort test_slices test_maps test_math test_rand test_utf8; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL util: $out"; exit 1; }
+done
+out=$("$OXL" test tests/flaglog_test.oxl)
+printf '%s
+' "$out" >&2
+for t in test_flag test_log; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL flaglog: $out"; exit 1; }
+done
+# cli exercises std/flag's argv paths end to end: -n=N, --n N, bools,
+# positionals, and the bad-flag usage path
+got=$("$OXL" run examples/cli/main.oxl -- -n=2 Jesse)
+want=$(printf 'hello, Jesse\n0\n1')
+[ "$got" = "$want" ] || { echo "FAIL cli -n=2: $got"; exit 1; }
+got=$("$OXL" run examples/cli/main.oxl -- --n 2 Jesse)
+[ "$got" = "$want" ] || { echo "FAIL cli --n 2: $got"; exit 1; }
+got=$("$OXL" run examples/cli/main.oxl -- -v Jesse)
+want2=$(printf 'hello, Jesse\nverbose mode on')
+[ "$got" = "$want2" ] || { echo "FAIL cli -v: $got"; exit 1; }
+errout=$("$OXL" run examples/cli/main.oxl -- -bogus Jesse 2>&1) && rc=0 || rc=$?
+[ "$rc" -eq 2 ] || { echo "FAIL cli bad-flag rc: $rc $errout"; exit 1; }
+grep -q "Usage of cli:" <<<"$errout" || { echo "FAIL cli bad-flag usage: $errout"; exit 1; }
+out=$("$OXL" run examples/cli/main.oxl -- -- Jesse)
+[ "$out" = "hello, Jesse" ] || { echo "FAIL cli -- positional: $out"; exit 1; }
 
 echo "== stdmods (json/sync/time) =="
 out=$("$OXL" run tests/stdmods_test.oxl)
@@ -691,7 +720,11 @@ cgen() {  # cgen <src> <name> — emit C via codegen.oxl, compile it
     # OXL_NET mirrors emit_and_cc's socket scan — without it rt.c's
     # sock section isn't compiled and rt.h hides the prototypes
     grep -qE 'rt_sock_|rt_bind_any|rt_set_(reuseaddr|rcvtimo|sndtimo)|rt_htons|rt_htonl' "$cgen_dir/$2.c" && net="-DOXL_NET"
-    "$CC" -O2 $THREAD_FLAG -Iruntime $def $net "$cgen_dir/$2.c" runtime/rt.c $lib $NET_LIBS -o "$cgen_dir/$2$EXE" || { echo "FAIL codegen cc $1"; exit 1; }
+    # OXL_MATH mirrors emit_and_cc's rt_m_ scan — the -D compiles the
+    # wrappers and -lm links them; the lib follows the sources
+    mdef=""; mlib=""
+    grep -q 'rt_m_' "$cgen_dir/$2.c" && { mdef="-DOXL_MATH"; mlib="$MATH_LIBS"; }
+    "$CC" -O2 $THREAD_FLAG -Iruntime $def $net $mdef "$cgen_dir/$2.c" runtime/rt.c $lib $mlib $NET_LIBS -o "$cgen_dir/$2$EXE" || { echo "FAIL codegen cc $1"; exit 1; }
 }
 for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl tests/methods.oxl tests/pairfwd.oxl; do
     n=$(basename "$f" .oxl)
@@ -707,11 +740,25 @@ want=$("$OXL" run examples/cli/main.oxl -- Jesse)
 [ "$got" = "$want" ] || { echo "FAIL codegen cli: $got"; exit 1; }
 # --test mode: scope-wrapped runner like `oxl test`
 "$OXL" run bootstrap/cmd/codegen -- --test examples/smoke_test.oxl > "$cgen_dir/t.c"
-tnet=""
+tnet=""; tmath=""; tmathlib=""
 grep -qE 'rt_sock_|rt_bind_any|rt_set_(reuseaddr|rcvtimo|sndtimo)|rt_htons|rt_htonl' "$cgen_dir/t.c" && tnet="-DOXL_NET"
-"$CC" -O2 $THREAD_FLAG -Iruntime $tnet "$cgen_dir/t.c" runtime/rt.c -DOXL_SQLITE $SQLITE_LINK $NET_LIBS -o "$cgen_dir/t$EXE" || { echo "FAIL codegen cc --test"; exit 1; }
+grep -q 'rt_m_' "$cgen_dir/t.c" && { tmath="-DOXL_MATH"; tmathlib="$MATH_LIBS"; }
+"$CC" -O2 $THREAD_FLAG -Iruntime $tnet $tmath "$cgen_dir/t.c" runtime/rt.c -DOXL_SQLITE $SQLITE_LINK $tmathlib $NET_LIBS -o "$cgen_dir/t$EXE" || { echo "FAIL codegen cc --test"; exit 1; }
 out=$("$cgen_dir/t$EXE")
 grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL codegen --test: $out"; exit 1; }
+# s3 generics through the self-hosted emitter + cc — the same util
+# coverage as `oxl test` above, exercising generic inst emission and
+# the rt_m_ math-link scan
+"$OXL" run bootstrap/cmd/codegen -- --test tests/util_test.oxl > "$cgen_dir/util.c"
+um=""; umlib=""
+grep -q 'rt_m_' "$cgen_dir/util.c" && { um="-DOXL_MATH"; umlib="$MATH_LIBS"; }
+"$CC" -O2 $THREAD_FLAG -Iruntime $um "$cgen_dir/util.c" runtime/rt.c $umlib $NET_LIBS -o "$cgen_dir/util$EXE" || { echo "FAIL codegen cc util"; exit 1; }
+out=$("$cgen_dir/util$EXE")
+printf '%s
+' "$out" >&2
+for t in test_path test_filepath test_cmp test_sort test_slices test_maps test_math test_rand test_utf8; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL codegen util: $out"; exit 1; }
+done
 # http pilot through the self-hosted codegen: the Handler param is an
 # iface value, exercising the RtIface/vtab emission end to end
 cgen examples/http-crud-sqlite/main.oxl httpsrv_cgen

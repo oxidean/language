@@ -1315,7 +1315,16 @@ fn ginst_queue(g: mut G, q: str, tpl: ref check.TPList, bind: own collections.Ma
 // and the decl must be attributed to the inst, not the emitter (the
 // text itself is unchanged from the pre-G1 queue-time emission)
 fn ginst_head(g: mut G, q: str, m: str, bind: ref collections.Map) {
-    fi := gfn(g, q)
+    // q is already qualified — direct lookup (see gfunc_inst; a
+    // resolve_named pass would double-prefix under a stale cur_mod
+    // and silently drop the proto).
+    fi := -1
+    if collections.map_has(g.ck.fns, q) {
+        [fi2, fe] = collections.map_get(g.ck.fns, q)
+        if fe == nil {
+            fi = fi2
+        }
+    }
     if fi < 0 {
         return
     }
@@ -1472,11 +1481,20 @@ fn giface_wrap_v(g: mut G, e: ref parser.Node, v: str, w: str, implkey: str) -> 
 // through, other iface rewraps, concrete impls box (Rust conv)
 fn gconv_v(g: mut G, e: ref parser.Node, v: str, want: int) -> str {
     w := gsub(g, want)
+    got := gsub(g, xty(g, e))
+    // own []T -> []T borrow coercion outside call args (the arg loop
+    // derefs via this same arm): own slices are RtSlice* where the
+    // slot wants RtSlice
+    if w >= 0 && tyk(g, w) == check.k_slice() && got >= 0 && tyk(g, got) == check.k_own() {
+        gi := g.ck.tyv[got].i
+        if gi >= 0 && tyk(g, gi) == check.k_slice() {
+            return "(*" + v + ")"
+        }
+    }
     if w < 0 || tyk(g, w) != check.k_iface() {
         return v
     }
     wn := g.ck.tyv[w].name
-    got := gsub(g, xty(g, e))
     gk := tyk(g, got)
     if gk == check.k_err() {
         return "(RtIface){ 0, 0 }"
@@ -2006,18 +2024,22 @@ fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> str {
     // byte arithmetic wraps mod 256 — C would promote to int and
     // carry bits the oxl type says don't exist. Any byte operand
     // makes it byte arithmetic (`255 as byte + 1` wraps to 0).
-    if tyk(g, gdt(g, lt)) == check.k_byte() && (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^") {
+    ltk := tyk(g, gdt(g, gsub(g, lt)))
+    if ltk == check.k_byte() && (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^") {
         return "((uint8_t)(" + lv + " " + op + " " + rv + "))"
     }
-    if op == "+" && tyk(g, gdt(g, lt)) == check.k_str() {
+    if op == "+" && ltk == check.k_str() {
         return "rt_strcat(" + lv + ", " + rv + ")"
     }
-    if (op == "==" || op == "!=") && tyk(g, gdt(g, lt)) == check.k_str() {
+    if (op == "==" || op == "!=") && ltk == check.k_str() {
         neg := ""
         if op == "!=" {
             neg = "!"
         }
         return "(" + neg + "rt_streq(" + lv + ", " + rv + "))"
+    }
+    if (op == "<" || op == "<=" || op == ">" || op == ">=") && ltk == check.k_str() {
+        return "(rt_str_cmp(" + lv + ", " + rv + ") " + op + " 0)"
     }
     // iface eq/ne compares the erased data ptr (Rust binary op)
     if op == "==" || op == "!=" {
@@ -4356,7 +4378,17 @@ fn gfunc_inst(g: mut G, iq: str, im: str, ibind: own collections.Map) {
         return
     }
     g.ck.cur_mod = g.its[fi].mod
-    si := gfn(g, iq)
+    // iq is already qualified — look it up directly; gfn's
+    // resolve_named would re-prefix it (cur_mod "sort" + head "sort"
+    // -> "sort.sort.sifto") and miss, leaving ty_scope unset so the
+    // inst body's []T params parsed as []?.
+    si := -1
+    if collections.map_has(g.ck.fns, iq) {
+        [si2, se] = collections.map_get(g.ck.fns, iq)
+        if se == nil {
+            si = si2
+        }
+    }
     if si >= 0 {
         g.ck.ty_scope = check.tp_names(g.ck.fnsv[si].typarams)
         g.ck.cur_ty_params = check.tp_clone(g.ck.fnsv[si].typarams)

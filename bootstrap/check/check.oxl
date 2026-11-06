@@ -688,13 +688,13 @@ fn ret_eq(ck: ref Ck, k1: int, r1: int, k2: int, r2: int) -> bool {
 fn op_ok(ck: ref Ck, op: str, t: int) -> bool {
     k := ck.tyv[t].k
     if op == "eq" {
-        return k == k_int() || k == k_bool() || k == k_str() || k == k_chan() || k == k_var()
+        return k == k_int() || k == k_bool() || k == k_str() || k == k_chan() || k == k_var() || k == k_float() || k == k_byte() || k == k_err()
     }
     if op == "ordered" {
-        return k == k_int() || k == k_var()
+        return k == k_int() || k == k_float() || k == k_byte() || k == k_str() || k == k_var()
     }
     if op == "add" {
-        return k == k_int() || k == k_str() || k == k_var()
+        return k == k_int() || k == k_str() || k == k_float() || k == k_byte() || k == k_var()
     }
     return false
 }
@@ -786,6 +786,14 @@ fn bind_vars(ck: mut Ck, want: int, got: int, bind: mut collections.Map) {
     if wk == k_slice() && gk == k_slice() {
         if ck.tyv[want].i >= 0 && ck.tyv[got].i >= 0 {
             bind_vars(ck, ck.tyv[want].i, ck.tyv[got].i, bind)
+        }
+        return
+    }
+    // own []T into []T param — binds the element through the borrow view
+    if wk == k_slice() && gk == k_own() {
+        gi := ck.tyv[got].i
+        if gi >= 0 && ck.tyv[gi].k == k_slice() && ck.tyv[want].i >= 0 && ck.tyv[gi].i >= 0 {
+            bind_vars(ck, ck.tyv[want].i, ck.tyv[gi].i, bind)
         }
         return
     }
@@ -1538,6 +1546,12 @@ fn assignable(ck: mut Ck, want: int, got: int) {
             ok = ty_eq(ck, ck.tyv[want].i, ck.tyv[got].i)
         }
     }
+    if !ok && wk == k_slice() && gk == k_own() {
+        // own []T reads as a []T borrow — the view is scope-bounded
+        // like every slice; the owner's heap backing outlives it
+        gi := ck.tyv[got].i
+        ok = gi >= 0 && ck.tyv[gi].k == k_slice() && ty_eq(ck, ck.tyv[want].i, ck.tyv[gi].i)
+    }
     if !ok && wk == k_iface() {
         // interface want: method-set satisfaction, iface coverage, a
         // constrained Var, or nil
@@ -2187,7 +2201,10 @@ fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, recv: ref parser.Node, typa
     for tl != nil {
         match tl.v {
             parser.Node.TyParam{name, constraint} => {
-                te := new(TPEnt{n: name, c: constraint})
+                // iface constraints store qualified — every later lookup
+                // (satisfies/req_op/iface_ent) hits ck.ifaces directly;
+                // builtins pass through resolve_named unchanged
+                te := new(TPEnt{n: name, c: resolve_named(ck, constraint)})
                 tc := new(TPList)
                 tc.v = te
                 tc.next = tp
@@ -2679,6 +2696,8 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
         } else if lk == k_float() || rk == k_float() {
             assignable(ck, tk(ck, k_float()), lt)
             assignable(ck, tk(ck, k_float()), rt)
+        } else if lk == k_str() && rk == k_str() {
+            // Go parity: str < str is byte-lex — codegen emits rt_str_cmp
         } else {
             assignable(ck, t_int(ck), lt)
             assignable(ck, t_int(ck), rt)
@@ -3409,7 +3428,7 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             for al != nil {
                 t := expr(ck, al.v, env)
                 tk2 := ck.tyv[t].k
-                if tk2 != k_int() && tk2 != k_byte() && tk2 != k_err() && tk2 != k_bool() && tk2 != k_cstr() && tk2 != k_str() && tk2 != k_slice() && tk2 != k_own() && tk2 != k_ref() && tk2 != k_mut() && tk2 != k_chan() && tk2 != k_shared() && tk2 != k_fn() && tk2 != k_unk() {
+                if tk2 != k_int() && tk2 != k_float() && tk2 != k_byte() && tk2 != k_err() && tk2 != k_bool() && tk2 != k_cstr() && tk2 != k_str() && tk2 != k_slice() && tk2 != k_own() && tk2 != k_ref() && tk2 != k_mut() && tk2 != k_chan() && tk2 != k_shared() && tk2 != k_fn() && tk2 != k_unk() {
                     diag(ck, "ffi", "`" + ty_name(ck, t) + "` cannot cross the FFI boundary")
                 }
                 al = al.next
