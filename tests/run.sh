@@ -81,6 +81,10 @@ trap cleanup EXIT
 echo "== hello =="
 out=$("$OXL" run examples/hello.oxl)
 [ "$out" = "hello, world" ] || { echo "FAIL hello: $out"; exit 1; }
+# G2: informational binary size — section GC + feature gates should
+# keep hello tiny; printed like the a1 memory timings, no hard assert
+"$OXL" build examples/hello.oxl -o "$scratch/hello$EXE" || { echo "FAIL hello build"; exit 1; }
+echo "  hello.oxl binary: $(wc -c <"$scratch/hello$EXE") bytes"
 
 echo "== features =="
 out=$("$OXL" run examples/features.oxl)
@@ -436,9 +440,12 @@ cgen() {  # cgen <src> <name> — emit C via codegen.oxl, compile it
     # sqlite only when the emitted C calls it — mirrors emit_and_cc;
     # -l must follow the sources: with --as-needed a library listed
     # before them is dropped and rt.o's sqlite refs go undefined
-    def=""; lib=""
+    def=""; lib=""; net=""
     grep -q 'rt_sqlite_' "$cgen_dir/$2.c" && { def="-DOXL_SQLITE"; lib="$SQLITE_LINK"; }
-    "$CC" -O2 $THREAD_FLAG -Iruntime $def "$cgen_dir/$2.c" runtime/rt.c $lib $NET_LIBS -o "$cgen_dir/$2$EXE" || { echo "FAIL codegen cc $1"; exit 1; }
+    # OXL_NET mirrors emit_and_cc's socket scan — without it rt.c's
+    # sock section isn't compiled and rt.h hides the prototypes
+    grep -qE 'rt_sock_|rt_bind_any|rt_set_(reuseaddr|rcvtimo|sndtimo)|rt_htons|rt_htonl' "$cgen_dir/$2.c" && net="-DOXL_NET"
+    "$CC" -O2 $THREAD_FLAG -Iruntime $def $net "$cgen_dir/$2.c" runtime/rt.c $lib $NET_LIBS -o "$cgen_dir/$2$EXE" || { echo "FAIL codegen cc $1"; exit 1; }
 }
 for f in examples/hello.oxl examples/features.oxl tests/match.oxl tests/chanbuf.oxl tests/methods.oxl tests/pairfwd.oxl; do
     n=$(basename "$f" .oxl)
@@ -454,7 +461,9 @@ want=$("$OXL" run examples/cli/main.oxl -- Jesse)
 [ "$got" = "$want" ] || { echo "FAIL codegen cli: $got"; exit 1; }
 # --test mode: scope-wrapped runner like `oxl test`
 "$OXL" run bootstrap/cmd/codegen -- --test examples/smoke_test.oxl > "$cgen_dir/t.c"
-"$CC" -O2 $THREAD_FLAG -Iruntime "$cgen_dir/t.c" runtime/rt.c -DOXL_SQLITE $SQLITE_LINK $NET_LIBS -o "$cgen_dir/t$EXE" || { echo "FAIL codegen cc --test"; exit 1; }
+tnet=""
+grep -qE 'rt_sock_|rt_bind_any|rt_set_(reuseaddr|rcvtimo|sndtimo)|rt_htons|rt_htonl' "$cgen_dir/t.c" && tnet="-DOXL_NET"
+"$CC" -O2 $THREAD_FLAG -Iruntime $tnet "$cgen_dir/t.c" runtime/rt.c -DOXL_SQLITE $SQLITE_LINK $NET_LIBS -o "$cgen_dir/t$EXE" || { echo "FAIL codegen cc --test"; exit 1; }
 out=$("$cgen_dir/t$EXE")
 grep -q "test_chan ... ok" <<<"$out" || { echo "FAIL codegen --test: $out"; exit 1; }
 # http pilot through the self-hosted codegen: the Handler param is an
@@ -481,7 +490,9 @@ kill $srv_pid 2>/dev/null || true
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists gtk4 2>/dev/null; then
     "$CC" -O2 $(pkg-config --cflags gtk4) -c examples/gui-todo/gui_shim.c -o "$cgen_dir/gui_shim.o"
     "$OXL" run bootstrap/cmd/codegen -- examples/gui-todo/todo.oxl > "$cgen_dir/todo.c"
-    "$CC" -O2 $THREAD_FLAG -Iruntime "$cgen_dir/todo.c" runtime/rt.c "$cgen_dir/gui_shim.o" $(pkg-config --libs gtk4) $NET_LIBS -o "$cgen_dir/todo$EXE" || { echo "FAIL codegen cc gui"; exit 1; }
+    todonet=""
+    grep -qE 'rt_sock_|rt_bind_any|rt_set_(reuseaddr|rcvtimo|sndtimo)|rt_htons|rt_htonl' "$cgen_dir/todo.c" && todonet="-DOXL_NET"
+    "$CC" -O2 $THREAD_FLAG -Iruntime $todonet "$cgen_dir/todo.c" runtime/rt.c "$cgen_dir/gui_shim.o" $(pkg-config --libs gtk4) $NET_LIBS -o "$cgen_dir/todo$EXE" || { echo "FAIL codegen cc gui"; exit 1; }
     if [ -n "${DISPLAY:-}" ]; then
         out=$(with_timeout 30 "$cgen_dir/todo$EXE" --selftest 2>/dev/null)
         grep -q "selftest rows=2" <<<"$out" || { echo "FAIL codegen gui selftest: $out"; exit 1; }
