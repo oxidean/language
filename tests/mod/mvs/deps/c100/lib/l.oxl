@@ -1,0 +1,5 @@
+package lib
+
+fn n() -> int {
+    return 1
+}

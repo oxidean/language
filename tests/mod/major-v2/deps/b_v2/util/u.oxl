@@ -1,0 +1,5 @@
+package util
+
+fn answer() -> int {
+    return 7
+}

@@ -431,6 +431,17 @@ if [ "$rust_rc" = 0 ] || [ "$self_rc" = 0 ] || [ "$rust_out" != "$self_out" ]; t
 fi
 unset OXLMODCACHE
 
+echo "== v1 build list (oxl list -m all) =="
+# MVS: depb wins at v1.2.0 (depc's edge), versioned replace supplies
+# the dir; depb@v1.0.0 is never fetched and needn't exist. Point the
+# cache at scratch so nothing in the user cache can leak a depb
+# manifest (or any edge) into selection.
+export OXLMODCACHE="$scratch/modcache-empty"
+( cd tests/mod/mvs && "$OXL" list -m all ) > "$scratch/mvlist" 2>&1 || { echo "FAIL oxl list rc"; cat "$scratch/mvlist"; exit 1; }
+grep -qx 'mvstest' "$scratch/mvlist" || { echo "FAIL list main"; cat "$scratch/mvlist"; exit 1; }
+grep -q 'depb v1\.2\.0 => ' "$scratch/mvlist" || { echo "FAIL list depb"; cat "$scratch/mvlist"; exit 1; }
+grep -q 'depc v1\.0\.0 => ' "$scratch/mvlist" || { echo "FAIL list depc"; cat "$scratch/mvlist"; exit 1; }
+
 echo "== bootstrap codegen =="
 # the self-hosted C emitter must produce working binaries — every
 # example plus representative tests, run-and-compared end to end

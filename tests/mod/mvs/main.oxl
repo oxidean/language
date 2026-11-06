@@ -1,0 +1,9 @@
+package main
+
+import "depb/util"
+
+import "depc/lib"
+
+fn main() {
+    println(itoa(util.answer() + lib.n()))
+}
