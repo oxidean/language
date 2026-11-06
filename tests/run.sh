@@ -611,6 +611,41 @@ grep -q 'dropped file://' "$tv/tidy7" || { echo "FAIL tidy7 drop"; cat "$tv/tidy
 grep -q "file://$tv/libx v1.2.0" "$tv/rapp/oxl.mod" || { echo "FAIL floor not raised"; cat "$tv/rapp/oxl.mod"; exit 1; }
 ( cd "$tv/rapp" && OXLMODCACHE="$tv/cache" "$OXL" build rapp -o "$tv/rbin" ) || { echo "FAIL rapp build"; exit 1; }
 [ "$("$tv/rbin")" = "lv=5" ] || { echo "FAIL rapp run"; "$tv/rbin"; exit 1; }
+# two-hop floor bump: dropping the unused raiser lowers mida below
+# its checked selection so its floor moves — but the raised version
+# drops the edge that was holding libb at the checked version. A
+# single recheck pass would leave libb's floor untouched and write a
+# manifest whose build selects a version lacking the package
+mkdir -p "$tv/libb" "$tv/mida/a" "$tv/raiser2/r" "$tv/tapp/tapp"
+( cd "$tv/libb" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/libb\noxl 0.3\n' "$tv" > oxl.mod
+  git add -A && git commit -qm v1 && git tag v1.0.0
+  mkdir b && printf 'package b\n\nfn bval() -> int { return 3 }\n' > b/b.oxl
+  git add -A && git commit -qm v2 && git tag v1.2.0 )
+( cd "$tv/mida" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/mida\noxl 0.3\nrequire file://%s/libb v1.2.0\n' "$tv" "$tv" > oxl.mod
+  printf 'package a\n\nfn aval() -> int { return 10 }\n' > a/a.oxl
+  git add -A && git commit -qm v1 && git tag v1.0.0
+  printf 'module file://%s/mida\noxl 0.3\n' "$tv" > oxl.mod
+  git add -A && git commit -qm v2 && git tag v1.1.0 )
+( cd "$tv/raiser2" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/raiser2\noxl 0.3\nrequire file://%s/mida v1.1.0\nrequire file://%s/libb v1.2.0\n' "$tv" "$tv" "$tv" > oxl.mod
+  printf 'package r\n\nfn rval() -> int { return 0 }\n' > r/r.oxl
+  git add -A && git commit -qm r && git tag v1.0.0 )
+printf 'package main\nimport "file://%s/mida/a"\nimport "file://%s/libb/b"\n\nfn main() { println("ab=" + itoa(a.aval()) + "/" + itoa(b.bval())) }\n' "$tv" "$tv" > "$tv/tapp/tapp/main.oxl"
+( cd "$tv/tapp" && printf 'module file://%s/tapp\noxl 0.3\n' "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/mida@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/mida@v1.1.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/libb@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/libb@v1.2.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/raiser2@v1.0.0" >/dev/null
+  printf 'module file://%s/tapp\noxl 0.3\n\nrequire file://%s/mida v1.0.0\nrequire file://%s/libb v1.0.0\nrequire file://%s/raiser2 v1.0.0\n' "$tv" "$tv" "$tv" "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy8" 2>&1 || { echo "FAIL tidy8 rc"; cat "$tv/tidy8"; exit 1; }
+grep -q "file://$tv/mida v1.1.0" "$tv/tapp/oxl.mod" || { echo "FAIL tidy8 mida floor"; cat "$tv/tapp/oxl.mod"; exit 1; }
+grep -q "file://$tv/libb v1.2.0" "$tv/tapp/oxl.mod" || { echo "FAIL tidy8 libb floor"; cat "$tv/tapp/oxl.mod"; exit 1; }
+! grep -q raiser2 "$tv/tapp/oxl.mod" || { echo "FAIL tidy8 raiser kept"; cat "$tv/tapp/oxl.mod"; exit 1; }
+( cd "$tv/tapp" && OXLMODCACHE="$tv/cache" "$OXL" build tapp -o "$tv/tbin" ) || { echo "FAIL tidy8 build"; exit 1; }
+[ "$("$tv/tbin")" = "ab=10/3" ] || { echo "FAIL tidy8 run"; "$tv/tbin"; exit 1; }
 ;;
 esac
 

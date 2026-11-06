@@ -2716,8 +2716,14 @@ fn mod_tidy(args: &[String], cwd: &Path) {
     // module the rewrite lowers gets its floor moved to the version
     // the walk actually checked (Go pins the raiser as // indirect;
     // moving the kept module's floor selects the same version without
-    // retaining a dead module name)
-    if let Ok(fc) = mk_ctx(&root, &new_text, sums.clone()) {
+    // retaining a dead module name). Raising one floor can itself
+    // remove an edge that held another needed selection up, so the
+    // pass repeats until no needed module sits below its checked
+    // version — floors only ever rise, so it terminates
+    loop {
+        let Ok(fc) = mk_ctx(&root, &new_text, sums.clone()) else {
+            break;
+        };
         let mut bumped = false;
         for mp in needed.keys() {
             let (Some(checked), Some(fin)) =
@@ -2742,9 +2748,10 @@ fn mod_tidy(args: &[String], cwd: &Path) {
                 bumped = true;
             }
         }
-        if bumped {
-            new_text = rewrite_requires(&mtext, &want);
+        if !bumped {
+            break;
         }
+        new_text = rewrite_requires(&mtext, &want);
     }
     // the sums the new require set needs: every non-replaced require's
     // selected version gets its h1 pair — kept lines carry over,
