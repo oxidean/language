@@ -1,0 +1,7 @@
+package main
+
+import "depb/v2/util"
+
+fn main() {
+    println(itoa(util.answer()))
+}

@@ -322,7 +322,7 @@ struct LL { names: own SList, next: own LL }
 struct ArmSt { mv: own LL, ft: int, next: own ArmSt }
 
 // per-file import aliases (qualifier -> stem) and selective names
-struct ModEnt { alias: str, stem: str, next: own ModEnt }
+struct ModEnt { alias: str, stem: str, ver: str, next: own ModEnt }
 
 // M3: one import's checkable bindings — `qual` = local qualifier the
 // file must reference ("" when this bind is a selective name), `tgt` =
@@ -389,7 +389,8 @@ struct Ck {
     mod_root: str, // dir holding oxl.mod
     mod_floor: str, // `oxl` directive as written
     mod_reqs: own ModEnt, // require path -> version
-    mod_reps: own ModEnt, // replace path -> resolved local dir
+    mod_reps: own ModEnt, // replace path(+ver) -> resolved local dir
+    mod_sel: own ModEnt, // MVS build list: module path -> selected version
     modcache: str, // module cache root
     entry_dir: str, // root package dir — anchors the source-tree std walk
     fnvals: own SList, // named fns used as values
@@ -4933,6 +4934,255 @@ fn mod_ver_ok(v: str) -> bool {
     return n == 3
 }
 
+// ---------- V1 semver: parse, compare, /vN rule, MVS ----------
+struct SVer { ok: int, maj: int, min: int, pat: int, pre: str }
+
+fn num_field(s: str) -> int {
+    // digits only, no leading zeros (mirrors Rust num_field); -1 bad
+    if len(s) == 0 || all_digits(s) == false {
+        return -1
+    }
+    if len(s) > 1 && byteat(s, 0) == 48 {
+        return -1
+    }
+    return atoi(s)
+}
+
+fn ident_ok(s: str) -> bool {
+    if len(s) == 0 {
+        return false
+    }
+    i := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if (c < 48 || c > 57) && (c < 65 || c > 90) && (c < 97 || c > 122) && c != 45 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn pre_idents(s: str) -> int {
+    // every dot-separated prerelease ident well-formed; numeric ones
+    // carry no leading zeros — mirrors Rust pre_idents
+    parts := strings.split(s, ".")
+    for parts != nil {
+        i := parts.v
+        if ident_ok(i) == false {
+            return 0
+        }
+        if all_digits(i) && len(i) > 1 && byteat(i, 0) == 48 {
+            return 0
+        }
+        parts = parts.next
+    }
+    return 1
+}
+
+// `vX.Y.Z[-pre][+build]`; leading v and full triplet required — the
+// require/replace version shape (mirrors Rust semver::parse)
+fn sver_parse(v: str) -> SVer {
+    r := SVer{ok: 0, maj: 0, min: 0, pat: 0, pre: ""}
+    if strings.startswith(v, "v") == false {
+        return r
+    }
+    s := substr(v, 1, len(v))
+    build := ""
+    bi := find(s, "+")
+    if bi >= 0 {
+        build = substr(s, bi + 1, len(s))
+        s = substr(s, 0, bi)
+    }
+    pre := ""
+    has_pre := 0
+    hi := find(s, "-")
+    if hi >= 0 {
+        has_pre = 1
+        pre = substr(s, hi + 1, len(s))
+        s = substr(s, 0, hi)
+    }
+    parts := strings.split(s, ".")
+    nums := mkslice(int, 0)
+    for parts != nil {
+        n := num_field(parts.v)
+        if n < 0 {
+            return r
+        }
+        nums = push(nums, n)
+        parts = parts.next
+    }
+    if len(nums) != 3 {
+        return r
+    }
+    if has_pre == 1 && pre_idents(pre) == 0 {
+        return r
+    }
+    if len(build) > 0 {
+        bp := strings.split(build, ".")
+        for bp != nil {
+            if ident_ok(bp.v) == false {
+                return r
+            }
+            bp = bp.next
+        }
+    } else if bi >= 0 {
+        return r // `v1.2.3+` — empty build is malformed
+    }
+    r.ok = 1
+    r.maj = nums[0]
+    r.min = nums[1]
+    r.pat = nums[2]
+    if has_pre == 1 {
+        r.pre = pre
+    }
+    return r
+}
+
+// bytewise lexical order for ASCII version idents — str has no <
+// operator here, so spell it out
+fn str_cmp(a: str, b: str) -> int {
+    n := len(a)
+    if len(b) < n {
+        n = len(b)
+    }
+    i := 0
+    for i < n {
+        ca := byteat(a, i)
+        cb := byteat(b, i)
+        if ca != cb {
+            if ca < cb {
+                return -1
+            }
+            return 1
+        }
+        i = i + 1
+    }
+    if len(a) != len(b) {
+        if len(a) < len(b) {
+            return -1
+        }
+        return 1
+    }
+    return 0
+}
+
+fn ident_num(s: str) -> int {
+    if all_digits(s) {
+        return 1
+    }
+    return 0
+}
+
+// prerelease precedence: no pre > any pre; per-ident numeric<alpha,
+// numeric numerically, alpha lexically; prefix sorts shorter.
+// returns -1/0/1 (mirrors Rust cmp_pre)
+fn pre_cmp(a: str, b: str) -> int {
+    if len(a) == 0 && len(b) == 0 {
+        return 0
+    }
+    if len(a) == 0 {
+        return 1
+    }
+    if len(b) == 0 {
+        return -1
+    }
+    pa := strings.split(a, ".")
+    pb := strings.split(b, ".")
+    for pa != nil && pb != nil {
+        x := pa.v
+        y := pb.v
+        xn := ident_num(x)
+        yn := ident_num(y)
+        if xn == 1 && yn == 1 {
+            xv := atoi(x)
+            yv := atoi(y)
+            if xv != yv {
+                if xv < yv {
+                    return -1
+                }
+                return 1
+            }
+            if len(x) != len(y) {
+                if len(x) < len(y) {
+                    return -1
+                }
+                return 1
+            }
+        } else if xn == 1 {
+            return -1
+        } else if yn == 1 {
+            return 1
+        } else {
+            c := str_cmp(x, y)
+            if c != 0 {
+                return c
+            }
+        }
+        pa = pa.next
+        pb = pb.next
+    }
+    if pa != nil {
+        return 1
+    }
+    if pb != nil {
+        return -1
+    }
+    return 0
+}
+
+// -1/0/1 — mirrors Rust semver::compare (build metadata ignored)
+fn sver_cmp(a: SVer, b: SVer) -> int {
+    if a.maj != b.maj {
+        if a.maj < b.maj {
+            return -1
+        }
+        return 1
+    }
+    if a.min != b.min {
+        if a.min < b.min {
+            return -1
+        }
+        return 1
+    }
+    if a.pat != b.pat {
+        if a.pat < b.pat {
+            return -1
+        }
+        return 1
+    }
+    return pre_cmp(a.pre, b.pre)
+}
+
+// trailing `/vN` suffix, N >= 2 (semantic import versioning) — 0 none
+fn path_major(path: str) -> int {
+    last := base_name(path)
+    if len(last) < 2 || strings.startswith(last, "v") == false {
+        return 0
+    }
+    n := num_field(substr(last, 1, len(last)))
+    if n < 2 {
+        return 0
+    }
+    return n
+}
+
+// Go's require rule — the version's major must match the path's /vN
+// suffix; "" = ok (mirrors Rust semver::require_ok)
+fn require_ok_s(path: str, raw: str, maj: int) -> str {
+    pm := path_major(path)
+    if pm > 0 {
+        if pm == maj {
+            return ""
+        }
+        return "version \"" + raw + "\" invalid: should be v" + itoa(pm) + ", not v" + itoa(maj)
+    }
+    if maj <= 1 {
+        return ""
+    }
+    return "version \"" + raw + "\" invalid: should be v0 or v1, not v" + itoa(maj)
+}
+
 // first path segment carrying a `.` reads as a remote module path —
 // drives the `oxl get` hint on `cannot find package`
 fn remoteish(imp: str) -> bool {
@@ -5113,8 +5363,14 @@ fn manifest_entry(ck: mut Ck, kw: str, rest: str, lineno: int) -> int {
         }
         p := sl_at(toks, 0)
         v := sl_at(toks, 1)
-        if mod_ver_ok(v) == false {
+        sv := sver_parse(v)
+        if sv.ok == 0 {
             merr(ck, lineno, "bad version \"" + v + "\"")
+            return 0
+        }
+        ve := require_ok_s(p, v, sv.maj)
+        if len(ve) > 0 {
+            merr(ck, lineno, ve)
             return 0
         }
         l := ck.mod_reqs
@@ -5125,7 +5381,7 @@ fn manifest_entry(ck: mut Ck, kw: str, rest: str, lineno: int) -> int {
             }
             l = l.next
         }
-        ck.mod_reqs = new(ModEnt{alias: p, stem: v, next: ck.mod_reqs})
+        ck.mod_reqs = new(ModEnt{alias: p, stem: v, ver: "", next: ck.mod_reqs})
         return 1
     }
     // replace <path> [ver] => <dir>
@@ -5146,15 +5402,19 @@ fn manifest_entry(ck: mut Ck, kw: str, rest: str, lineno: int) -> int {
         merr(ck, lineno, "expected `path [version] => dir`")
         return 0
     }
-    if arrow == 2 && mod_ver_ok(sl_at(toks, 1)) == false {
-        merr(ck, lineno, "bad version \"" + sl_at(toks, 1) + "\"")
-        return 0
+    lver := ""
+    if arrow == 2 {
+        if sver_parse(sl_at(toks, 1)).ok == 0 {
+            merr(ck, lineno, "bad version \"" + sl_at(toks, 1) + "\"")
+            return 0
+        }
+        lver = sl_at(toks, 1)
     }
     dir := sl_at(toks, arrow + 1)
     if is_abs(dir) == false {
         dir = ck.mod_root + "/" + dir
     }
-    ck.mod_reps = new(ModEnt{alias: sl_at(toks, 0), stem: dir, next: ck.mod_reps})
+    ck.mod_reps = new(ModEnt{alias: sl_at(toks, 0), stem: dir, ver: lver, next: ck.mod_reps})
     return 1
 }
 
@@ -5238,6 +5498,232 @@ fn parse_manifest(ck: mut Ck, text: str) -> int {
 // find + parse the nearest oxl.mod into ck's module fields — 0 on
 // manifest error (diags emitted), 1 ok including module-off (no
 // oxl.mod anywhere: mod_on stays 0 and only `std/` imports resolve)
+// a dep manifest's require edges — silent strict scan; nil on ANY
+// malformed directive (mirrors Rust build_list's parse_manifest gate:
+// a bad dep manifest contributes no edges)
+// returns a fresh unlinked ModEnt for a require; nil for a valid
+// replace; err on any malformed line — the caller dup-checks + links
+fn dep_entry(kw: str, rest: str) -> [own ModEnt, err] {
+    toks := split_ws(rest)
+    n := sl_len(toks)
+    if kw == "require" {
+        if n != 2 {
+            return nil, 1
+        }
+        p := sl_at(toks, 0)
+        v := sl_at(toks, 1)
+        sv := sver_parse(v)
+        if sv.ok == 0 || len(require_ok_s(p, v, sv.maj)) > 0 {
+            return nil, 1
+        }
+        return new(ModEnt{alias: p, stem: v, ver: "", next: nil}), nil
+    }
+    // replace <path> [ver] => <dir> — validated, edges not needed
+    arrow := -1
+    i := 0
+    for i < n {
+        if sl_at(toks, i) == "=>" {
+            arrow = i
+            break
+        }
+        i = i + 1
+    }
+    if arrow <= 0 || arrow > 2 || arrow + 1 != n - 1 {
+        return nil, 1
+    }
+    if arrow == 2 && sver_parse(sl_at(toks, 1)).ok == 0 {
+        return nil, 1
+    }
+    return nil, nil
+}
+
+fn dep_manifest_reqs(text: str) -> own ModEnt {
+    // pass 1: tokenize into (kw, rest) directive lines — block entries
+    // flatten to the same shape so pass 2 needs one destructure site
+    // (each [v, err] site emits a fixed C `err` decl — two collide)
+    let kwl: own ModEnt = nil
+    have_module := 0
+    bad := 0
+    lines := strings.split(text, "\n")
+    block := ""
+    for lines != nil && bad == 0 {
+        t := lines.v
+        lines = lines.next
+        ci := find(t, "//")
+        if ci >= 0 {
+            t = substr(t, 0, ci)
+        }
+        t = strings.trim(t)
+        if len(t) == 0 {
+            continue
+        }
+        if len(block) > 0 {
+            if t == ")" {
+                block = ""
+            } else {
+                kwl = new(ModEnt{alias: block, stem: t, ver: "", next: kwl})
+            }
+            continue
+        }
+        toks := split_ws(t)
+        kw := sl_at(toks, 0)
+        n := sl_len(toks)
+        if kw == "module" {
+            if have_module == 1 || n != 2 {
+                bad = 1
+            } else {
+                have_module = 1
+            }
+        } else if kw == "oxl" {
+            if n != 2 || ver_tuple(sl_at(toks, 1)) < 0 {
+                bad = 1
+            }
+        } else if kw == "require" || kw == "replace" {
+            if n == 2 && sl_at(toks, 1) == "(" {
+                block = kw
+            } else {
+                kwl = new(ModEnt{alias: kw, stem: substr(t, len(kw), len(t)), ver: "", next: kwl})
+            }
+        } else {
+            bad = 1
+        }
+    }
+    if len(block) > 0 || have_module == 0 || bad == 1 {
+        return nil
+    }
+    // pass 2: validate + collect require edges
+    let reqs: own ModEnt = nil
+    for kwl != nil {
+        [n, err] = dep_entry(kwl.alias, kwl.stem)
+        if err != nil {
+            return nil
+        }
+        if n != nil {
+            if modent_has(reqs, n.alias) == 1 {
+                return nil // duplicate require
+            }
+            n.next = reqs
+            reqs = n
+        }
+        kwl = kwl.next
+    }
+    return reqs
+}
+
+// the dir a required module version occupies: version-specific
+// replace beats a blanket one, else the `path@ver` cache slot —
+// "" = not fetched (mirrors Rust module_dir)
+fn module_dir(ck: ref Ck, mp: str, ver: str) -> str {
+    blanket := ""
+    rl := ck.mod_reps
+    for rl != nil {
+        if rl.alias == mp {
+            if len(rl.ver) > 0 {
+                if rl.ver == ver {
+                    return rl.stem
+                }
+            } else {
+                blanket = rl.stem
+            }
+        }
+        rl = rl.next
+    }
+    if len(blanket) > 0 {
+        return blanket
+    }
+    d := ck.modcache + "/" + mp + "@" + ver
+    if rt_isdir(d) == 1 {
+        return d
+    }
+    return ""
+}
+
+// minimal version selection: BFS the requirement graph from the main
+// module's requires; each (module, version) node's manifest adds
+// edges; per path keep the MAX version seen — Go's MVS, mirrored
+// from build_list. Fills ck.mod_sel.
+fn mod_build_list(ck: mut Ck) {
+    seen := collections.map_new()
+    selidx := collections.map_new()
+    selpaths := mkslice(str, 0)
+    selvers := mkslice(str, 0)
+    queue := mkslice(str, 0) // "path|ver" — | can't appear in either
+    l := ck.mod_reqs
+    for l != nil {
+        queue = push(queue, l.alias + "|" + l.stem)
+        l = l.next
+    }
+    qi := 0
+    for qi < len(queue) {
+        ent := queue[qi]
+        qi = qi + 1
+        sep := find(ent, "|")
+        mp := substr(ent, 0, sep)
+        mv := substr(ent, sep + 1, len(ent))
+        sv := sver_parse(mv)
+        if sv.ok == 0 {
+            continue
+        }
+        // selection: keep the max version offered for this path
+        [si, err] = collections.map_get(selidx, mp)
+        if err != nil {
+            selpaths = push(selpaths, mp)
+            selvers = push(selvers, mv)
+            collections.map_set(selidx, mp, len(selpaths) - 1)
+        } else {
+            cur := sver_parse(selvers[si])
+            if cur.ok == 1 && sver_cmp(sv, cur) > 0 {
+                selvers[si] = mv
+            }
+        }
+        // dedup nodes: each (path, version) manifest read once
+        if collections.map_has(seen, ent) {
+            continue
+        }
+        collections.map_set(seen, ent, 1)
+        d := module_dir(ck, mp, mv)
+        if len(d) == 0 {
+            continue
+        }
+        mf := d + "/oxl.mod"
+        if rt_fexists(mf) == 0 {
+            continue
+        }
+        reqs := dep_manifest_reqs(readfile(mf))
+        for reqs != nil {
+            queue = push(queue, reqs.alias + "|" + reqs.stem)
+            reqs = reqs.next
+        }
+    }
+    // fold the selected set into the ModEnt list resolve_imp reads
+    i := 0
+    for i < len(selpaths) {
+        ck.mod_sel = new(ModEnt{alias: selpaths[i], stem: selvers[i], ver: "", next: ck.mod_sel})
+        i = i + 1
+    }
+}
+
+// the version selection assigns to a required module path — the
+// build list's entry when present, else the require's own floor
+// (mirrors Rust selected_ver)
+fn selected_ver(ck: ref Ck, mp: str) -> str {
+    l := ck.mod_sel
+    for l != nil {
+        if l.alias == mp {
+            return l.stem
+        }
+        l = l.next
+    }
+    l = ck.mod_reqs
+    for l != nil {
+        if l.alias == mp {
+            return l.stem
+        }
+        l = l.next
+    }
+    return ""
+}
+
 fn mod_ctx_load(ck: mut Ck, start: str) -> int {
     root := find_root(start)
     if len(root) == 0 {
@@ -5249,6 +5735,7 @@ fn mod_ctx_load(ck: mut Ck, start: str) -> int {
     if parse_manifest(ck, text) == 0 {
         return 0
     }
+    mod_build_list(ck)
     ck.mod_on = 1
     return 1
 }
@@ -5303,14 +5790,13 @@ fn resolve_imp(ck: mut Ck, imp: str) -> RRes {
         }
         return r
     }
-    // requires — longest path prefix wins
+    // requires — longest path prefix wins; the build list's
+    // selection decides which version dir resolves
     best_alias := ""
-    best_ver := ""
     l := ck.mod_reqs
     for l != nil {
         if (imp == l.alias || strings.startswith(imp, l.alias + "/")) && len(l.alias) > len(best_alias) {
             best_alias = l.alias
-            best_ver = l.stem
         }
         l = l.next
     }
@@ -5319,19 +5805,17 @@ fn resolve_imp(ck: mut Ck, imp: str) -> RRes {
         if len(imp) > len(best_alias) {
             rest = substr(imp, len(best_alias) + 1, len(imp))
         }
-        rl := ck.mod_reps
-        for rl != nil {
-            if rl.alias == best_alias {
-                p := rl.stem
-                if len(rest) > 0 {
-                    p = p + "/" + rest
-                }
-                if rt_isdir(p) == 1 {
-                    r.dir = p
-                }
-                return r
+        best_ver := selected_ver(ck, best_alias)
+        d := module_dir(ck, best_alias, best_ver)
+        if len(d) > 0 {
+            p := d
+            if len(rest) > 0 {
+                p = p + "/" + rest
             }
-            rl = rl.next
+            if rt_isdir(p) == 1 {
+                r.dir = p
+            }
+            return r
         }
         base := ck.modcache + "/" + best_alias + "@" + best_ver
         p := base
@@ -5491,7 +5975,7 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
                                     diag(ck, "check", "`" + qual + "` redeclared as imported package name")
                                     ck.load_fail = 1
                                 } else {
-                                    al = new(ModEnt{alias: qual, stem: bound, next: al})
+                                    al = new(ModEnt{alias: qual, stem: bound, ver: "", next: al})
                                     binds = new(ImpBind{path: path, qual: qual, tgt: "", used: 0, next: binds})
                                     nl := names
                                     for nl != nil {
@@ -5502,7 +5986,7 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
                                                     ck.load_fail = 1
                                                     break
                                                 }
-                                                nm = new(ModEnt{alias: n, stem: bound + "." + n, next: nm})
+                                                nm = new(ModEnt{alias: n, stem: bound + "." + n, ver: "", next: nm})
                                                 binds = new(ImpBind{path: path, qual: "", tgt: bound + "." + n, used: 0, next: binds})
                                             }
                                             _ => {
@@ -5553,7 +6037,7 @@ fn load_pkg(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int, is_r
         return clause_of(ck, dir)
     }
     ck.loaded = scons(dir, ck.loaded)
-    ck.loading = new(ModEnt{alias: dir, stem: imp, next: ck.loading})
+    ck.loading = new(ModEnt{alias: dir, stem: imp, ver: "", next: ck.loading})
     r := load_pkg_inner(ck, ld, dir, imp, as_import, is_root)
     ck.loading = ck.loading.next
     return r
@@ -5605,7 +6089,7 @@ fn load_pkg_inner(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int
         diag(ck, "check", "package name `" + clause0 + "` does not match directory `" + base_name(dir) + "`")
         return ""
     }
-    ck.loaded_names = new(ModEnt{alias: dir, stem: clause0, next: ck.loaded_names})
+    ck.loaded_names = new(ModEnt{alias: dir, stem: clause0, ver: "", next: ck.loaded_names})
     itemmod := clause0
     if is_root == 1 {
         itemmod = ""

@@ -5,6 +5,7 @@ mod diag;
 mod fmt;
 mod lexer;
 mod parser;
+mod semver;
 
 use crate::diag::Span;
 use std::io::{BufRead, Read, Write};
@@ -18,7 +19,7 @@ fn main() {
         return;
     }
     if args.len() < 2 {
-        eprintln!("oxl — one toolchain binary\n\n  oxl build [<pkg dir>|<file.oxl>...] [-o out]\n  oxl run [<pkg dir>|<file.oxl>...]\n  oxl test [<pkg dir>|<file.oxl>...]\n  oxl fmt <file.oxl>...\n  oxl doc <file.oxl>\n  oxl lsp");
+        eprintln!("oxl — one toolchain binary\n\n  oxl build [<pkg dir>|<file.oxl>...] [-o out]\n  oxl run [<pkg dir>|<file.oxl>...]\n  oxl test [<pkg dir>|<file.oxl>...]\n  oxl fmt <file.oxl>...\n  oxl doc <file.oxl>\n  oxl list -m all\n  oxl lsp");
         exit(2);
     }
     match args[1].as_str() {
@@ -27,6 +28,7 @@ fn main() {
         "test" => cmd_test(&args),
         "fmt" => cmd_fmt(&args),
         "doc" => cmd_doc(&args),
+        "list" => cmd_list(&args),
         "lsp" => cmd_lsp(),
         other => {
             eprintln!("unknown command `{other}`");
@@ -81,9 +83,13 @@ struct ModCtx {
     path: String,
     root: PathBuf,
     requires: Vec<(String, String)>,
-    /// replace LHS path -> local dir (v1 accepts dir RHS only)
-    replaces: Vec<(String, PathBuf)>,
+    /// replace LHS (path, optional version) -> local dir
+    replaces: Vec<(String, Option<String>, PathBuf)>,
     modcache: PathBuf,
+    /// MVS build list: each required module path at its selected
+    /// (max) version — resolution reads dirs at THESE versions, not
+    /// the raw require lines
+    selected: Vec<(String, String)>,
 }
 
 /// nearest ancestor of `dir` holding `oxl.mod`, if any — nearest wins,
@@ -127,11 +133,11 @@ fn modcache_dir() -> PathBuf {
 /// always AT the module root, so the bare name locates it).
 fn parse_manifest(
     src: &str,
-) -> Result<(String, Option<String>, Vec<(String, String)>, Vec<(String, PathBuf)>), String> {
+) -> Result<(String, Option<String>, Vec<(String, String)>, Vec<(String, Option<String>, PathBuf)>), String> {
     let mut module = String::new();
     let mut floor: Option<String> = None;
     let mut requires: Vec<(String, String)> = Vec::new();
-    let mut replaces: Vec<(String, PathBuf)> = Vec::new();
+    let mut replaces: Vec<(String, Option<String>, PathBuf)> = Vec::new();
     let mut lines = src.lines().enumerate().peekable();
     while let Some((ln, raw)) = lines.next() {
         let line_no = ln + 1;
@@ -189,8 +195,11 @@ fn parse_manifest(
                         if bt.len() != 2 {
                             return Err(berr("expected `path version`".into()));
                         }
-                        if !mod_ver_ok(&bt[1]) {
+                        let Some(rv) = semver::parse(&bt[1]) else {
                             return Err(berr(format!("bad version \"{}\"", bt[1])));
+                        };
+                        if let Err(e) = semver::require_ok(&bt[0], &bt[1], &rv) {
+                            return Err(berr(e));
                         }
                         if requires.iter().any(|(p, _)| p == &bt[0]) {
                             return Err(berr(format!("duplicate require \"{}\"", bt[0])));
@@ -205,10 +214,11 @@ fn parse_manifest(
                         if arrow == 0 || arrow > 2 || arrow + 1 != bt.len() - 1 {
                             return Err(berr("expected `path [version] => dir`".into()));
                         }
-                        if arrow == 2 && !mod_ver_ok(&bt[1]) {
+                        if arrow == 2 && semver::parse(&bt[1]).is_none() {
                             return Err(berr(format!("bad version \"{}\"", bt[1])));
                         }
-                        replaces.push((bt[0].clone(), PathBuf::from(&bt[arrow + 1])));
+                        let lver = (arrow == 2).then(|| bt[1].clone());
+                        replaces.push((bt[0].clone(), lver, PathBuf::from(&bt[arrow + 1])));
                     }
                 }
             }
@@ -260,18 +270,21 @@ fn mod_ctx(start: &Path, loud: bool) -> Result<Option<ModCtx>, ()> {
     // replace dirs resolve against the module root
     let replaces = replaces
         .into_iter()
-        .map(|(p, d)| {
+        .map(|(p, v, d)| {
             let d = if d.is_absolute() { d } else { root.join(&d) };
-            (p, d)
+            (p, v, d)
         })
         .collect();
-    Ok(Some(ModCtx {
+    let mut ctx = ModCtx {
         path,
         root,
         requires,
         replaces,
         modcache: modcache_dir(),
-    }))
+        selected: Vec::new(),
+    };
+    ctx.selected = build_list(&ctx);
+    Ok(Some(ctx))
 }
 
 enum Resolve {
@@ -280,6 +293,96 @@ enum Resolve {
     /// carries the `path@ver` the diagnostic names
     Missing(String),
     NotFound,
+}
+
+/// the directory a required module version occupies: the matching
+/// replace RHS (version-specific replaces beat blanket ones) or the
+/// module-cache `path@ver` slot. None = not fetched.
+fn module_dir(ctx: &ModCtx, mp: &str, ver: &str) -> Option<PathBuf> {
+    let mut blanket: Option<&PathBuf> = None;
+    for (rp, rv, rd) in &ctx.replaces {
+        if rp != mp {
+            continue;
+        }
+        match rv {
+            Some(v) if v == ver => return Some(rd.clone()),
+            None => blanket = Some(rd),
+            _ => {}
+        }
+    }
+    if let Some(rd) = blanket {
+        return Some(rd.clone());
+    }
+    let d = ctx.modcache.join(format!("{mp}@{ver}"));
+    d.is_dir().then_some(d)
+}
+
+/// minimal version selection: BFS the requirement graph from the main
+/// module's requires; every (module, version) node's own manifest
+/// contributes edges; per path keep the MAX version seen — Go's MVS,
+/// deterministic with no backtracking. Unfetched nodes still count
+/// toward selection; their edges just can't be read.
+fn build_list(ctx: &ModCtx) -> Vec<(String, String)> {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    let mut sel: BTreeMap<String, semver::Ver> = BTreeMap::new();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut queue: VecDeque<(String, String)> = VecDeque::new();
+    let mut offer = |sel: &mut BTreeMap<String, semver::Ver>,
+                     queue: &mut VecDeque<(String, String)>,
+                     mp: &str,
+                     mv: &str| {
+        if let Some(v) = semver::parse(mv) {
+            let better = sel.get(mp).map_or(true, |cur| semver::compare(&v, cur) == std::cmp::Ordering::Greater);
+            if better {
+                sel.insert(mp.to_string(), v);
+            }
+            queue.push_back((mp.to_string(), mv.to_string()));
+        }
+    };
+    for (mp, mv) in &ctx.requires {
+        offer(&mut sel, &mut queue, mp, mv);
+    }
+    while let Some((mp, mv)) = queue.pop_front() {
+        if !seen.insert((mp.clone(), mv.clone())) {
+            continue;
+        }
+        let Some(dir) = module_dir(ctx, &mp, &mv) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(dir.join("oxl.mod")) else {
+            continue;
+        };
+        let Ok((_, _, reqs, _)) = parse_manifest(&text) else {
+            continue;
+        };
+        for (rp, rv) in reqs {
+            offer(&mut sel, &mut queue, &rp, &rv);
+        }
+    }
+    sel.into_iter()
+        .map(|(p, v)| {
+            let mut vs = format!("v{}.{}.{}", v.maj, v.min, v.pat);
+            if !v.pre.is_empty() {
+                vs.push('-');
+                vs.push_str(&v.pre.join("."));
+            }
+            if !v.build.is_empty() {
+                vs.push('+');
+                vs.push_str(&v.build);
+            }
+            (p, vs)
+        })
+        .collect()
+}
+
+/// the version selection assigns to a required module path — the
+/// build list's entry when present, else the main require's floor
+fn selected_ver<'a>(ctx: &'a ModCtx, mp: &str) -> Option<&'a str> {
+    ctx.selected
+        .iter()
+        .find(|(p, _)| p == mp)
+        .map(|(_, v)| v.as_str())
+        .or_else(|| ctx.requires.iter().find(|(p, _)| p == mp).map(|(_, v)| v.as_str()))
 }
 
 /// resolve an import path to a package directory under the module
@@ -322,34 +425,28 @@ fn resolve_pkg(ctx: Option<&ModCtx>, entry: &Path, imp: &str) -> Resolve {
             Resolve::NotFound
         };
     }
-    // requires — longest path prefix wins (module-path boundaries only)
-    let mut best: Option<&(String, String)> = None;
-    for r in &ctx.requires {
-        if (imp == r.0 || imp.starts_with(&format!("{}/", r.0)))
-            && best.map_or(true, |b| r.0.len() > b.0.len())
+    // requires — longest path prefix wins (module-path boundaries only);
+    // the build list's selection decides which version dir resolves
+    let mut best: Option<&String> = None;
+    for (mp, _) in &ctx.requires {
+        if (imp == *mp || imp.starts_with(&format!("{mp}/")))
+            && best.map_or(true, |b| mp.len() > b.len())
         {
-            best = Some(r);
+            best = Some(mp);
         }
     }
-    if let Some((mp, v)) = best {
+    if let Some(mp) = best {
         let rest = imp[mp.len()..].trim_start_matches('/');
-        if let Some((_, rhs)) = ctx.replaces.iter().find(|(rp, _)| rp == mp) {
-            let d = rhs.join(rest);
+        let v = selected_ver(ctx, mp).unwrap_or("");
+        if let Some(base) = module_dir(ctx, mp, v) {
+            let d = base.join(rest);
             return if d.is_dir() {
                 Resolve::Dir(d)
             } else {
                 Resolve::NotFound
             };
         }
-        let base = ctx.modcache.join(format!("{mp}@{v}"));
-        let d = base.join(rest);
-        return if base.is_dir() && d.is_dir() {
-            Resolve::Dir(d)
-        } else if base.is_dir() {
-            Resolve::NotFound // fetched, but the package isn't in it
-        } else {
-            Resolve::Missing(format!("{mp}@{v}"))
-        };
+        return Resolve::Missing(format!("{mp}@{v}"));
     }
     Resolve::NotFound
 }
@@ -1401,6 +1498,36 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
             eprintln!("cc failed (emitted C kept at {})", c_file.display());
             false
         }
+    }
+}
+
+/// `oxl list -m all` — the resolved build list: main module then every
+/// selected requirement at its winning version (Go's `go list -m all`).
+fn cmd_list(args: &[String]) {
+    let mflag = args.iter().any(|a| a == "-m" || a.starts_with("-m="));
+    let all = args.iter().any(|a| a == "all");
+    if !mflag || !all || args.len() != 4 {
+        eprintln!("usage: oxl list -m all");
+        exit(2);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(ctx) = (match mod_ctx(&cwd, true) {
+        Ok(c) => c,
+        Err(()) => exit(1),
+    }) else {
+        eprintln!("error [check] not a module — no oxl.mod found above {}", cwd.display());
+        exit(1);
+    };
+    println!("{}", ctx.path);
+    for (mp, mv) in &ctx.selected {
+        // `=> dir` only when a replace actually matched this version
+        let rep = ctx
+            .replaces
+            .iter()
+            .find(|(rp, rv, _)| rp == mp && rv.as_deref() == Some(mv.as_str()))
+            .or_else(|| ctx.replaces.iter().find(|(rp, rv, _)| rp == mp && rv.is_none()));
+        let suffix = rep.map_or(String::new(), |(_, _, d)| format!(" => {}", d.display()));
+        println!("{mp} {mv}{suffix}");
     }
 }
 
