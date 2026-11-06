@@ -40,8 +40,8 @@ requires to `<cache>/<path>@<ver>` via `module_dir` and MVS `selected`.
   else untar to a sibling tmp dir → seal → rename into place
   (remove_tree on failure).
 - oxl.mod upsert: `require <path>` line exists ⇒ version replaced in
-  place; else append `require <path> <ver>` (block form respected if a
-  `require (` block exists — line added inside it).
+  place (single-line or inside a `require (` block); else a
+  single-line `require <path> <ver>` is appended at the end.
 - oxl.sum upsert: drop stale lines for that path, add tree + `/mod`
   lines, write `sums_text` output.
 - Report: `added` / `upgraded` / `unchanged` `{path}@{ver}`.

@@ -6015,8 +6015,7 @@ fn b64_of(b: []int) -> str {
 }
 
 // "rel|hex" entries for every regular file under dir — `|` can't be a
-// filename char here (fetch's component check bans it), so the joined
-// form sorts like Rust's (name, hex) tuples: names are unique
+// filename char here (fetch's component check bans it)
 fn dir_walk(base: str, dir: str, acc: mut SAcc) {
     raw := rt_lsdir(dir)
     for len(raw) > 0 {
@@ -6051,7 +6050,12 @@ fn dir_h1(dir: str) -> str {
     for i < len(ent) {
         j := i + 1
         for j < len(ent) {
-            if str_cmp(ent[j], ent[i]) < 0 {
+            // compare the name portion only — sorting the joined
+            // "name|hex" reverses prefix pairs (README vs README.md,
+            // `|` > `.`) and diverges from Rust's tuple sort
+            nj := substr(ent[j], 0, find(ent[j], "|"))
+            ni := substr(ent[i], 0, find(ent[i], "|"))
+            if str_cmp(nj, ni) < 0 {
                 t := ent[i]
                 ent[i] = ent[j]
                 ent[j] = t

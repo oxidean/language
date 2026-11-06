@@ -1767,6 +1767,30 @@ fn cmd_get(args: &[String]) {
     }
     let cache = modcache_dir();
     let slot = modcache::slot(&cache, &mpath, &f.ver);
+    if slot.is_dir() {
+        // reuse path: the cached tree must still equal the fetched
+        // archive — verify by extracting fresh and comparing dirhash,
+        // or a hand-edited slot would be re-pinned as trustworthy
+        let tmp = cache.join(format!(".verify-{}-{}", std::process::id(), sanitize_tag(&f.ver)));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let ok = std::fs::create_dir_all(&tmp)
+            .and_then(|_| modcache::untar(&f.tar, &tmp).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+            .map_err(|e| e.to_string())
+            .and_then(|_| modcache::dir_h1(&tmp))
+            .and_then(|fresh| modcache::dir_h1(&slot).map(|cached| fresh == cached));
+        modcache::remove_tree(&tmp);
+        match ok {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("error: cached {mpath}@{} does not match the fetched archive — remove the slot and get again", f.ver);
+                exit(1);
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                exit(1);
+            }
+        }
+    }
     if !slot.is_dir() {
         let tmp = cache.join(format!(".tmp-{}-{}", std::process::id(), sanitize_tag(&f.ver)));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1828,7 +1852,7 @@ fn cmd_get(args: &[String]) {
             exit(1);
         }
     };
-    sums.retain(|l| l.path != mpath);
+    sums.retain(|l| !(l.path == mpath && l.ver == f.ver));
     let tree_h = match modcache::dir_h1(&slot) {
         Ok(h) => h,
         Err(e) => {

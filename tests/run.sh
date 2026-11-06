@@ -460,6 +460,7 @@ mkdir -p "$getwork/dep/util" "$getwork/app/app" "$getwork/cache"
 ( cd "$getwork/dep" && git init -q . && git config user.email t@t && git config user.name t
   printf 'module file://%s/dep\noxl 0.3\n' "$getwork" > oxl.mod
   printf 'package util\nfn answer() -> int { return 42 }\n' > util/u.oxl
+  printf 'root readme\n' > README && printf 'ext readme\n' > README.md
   git add -A && git commit -qm init && git tag v1.0.0 )
 printf 'module local/app\noxl 0.3\n' > "$getwork/app/oxl.mod"
 printf 'package main\nimport "file://%s/dep/util"\n\nfn main() { println("answer=" + itoa(util.answer())) }\n' "$getwork" > "$getwork/app/app/main.oxl"
@@ -491,7 +492,13 @@ chmod -R u+w "$getwork/cache" 2>/dev/null; rm -rf "$getwork/cache" && mkdir -p "
 ( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" get "file://$getwork/dep@v1.0.0" >/dev/null && OXLMODCACHE="$getwork/cache" "$OXL" get "file://$getwork/dep@latest" ) > "$getwork/get2" 2>&1 || { echo "FAIL latest rc"; cat "$getwork/get2"; exit 1; }
 grep -q 'upgraded file://' "$getwork/get2" || { echo "FAIL upgrade report"; cat "$getwork/get2"; exit 1; }
 grep -q "require file://$getwork/dep v1.1.0" "$getwork/app/oxl.mod" || { echo "FAIL upgrade require"; cat "$getwork/app/oxl.mod"; exit 1; }
-[ "$(grep -c ' h1:' "$getwork/app/oxl.sum")" = 2 ] || { echo "FAIL upgrade sum"; cat "$getwork/app/oxl.sum"; exit 1; }
+# v1.0.0's sum lines survive the upgrade — another module may still
+# select it via MVS and needs them to verify (4 lines: 2 per version)
+[ "$(grep -c ' h1:' "$getwork/app/oxl.sum")" = 4 ] || { echo "FAIL upgrade sum"; cat "$getwork/app/oxl.sum"; exit 1; }
+# re-get of the same version hits the sealed slot — validated against
+# the archive and reported unchanged
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" get "file://$getwork/dep@v1.1.0" ) > "$getwork/get3" 2>&1 || { echo "FAIL reget rc"; cat "$getwork/get3"; exit 1; }
+grep -q 'unchanged file://' "$getwork/get3" || { echo "FAIL reget report"; cat "$getwork/get3"; exit 1; }
 # missing oxl.sum -> missing-entry error (Go wording), byte-identical
 rm "$getwork/app/oxl.sum"
 ( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" build app -o /dev/null ) > "$getwork/nosum.rust" 2>&1 && { echo "FAIL missing-sum accepted (rust)"; exit 1; }
