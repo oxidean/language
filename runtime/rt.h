@@ -332,6 +332,7 @@ int64_t rt_htons(int64_t v);
 int64_t rt_htonl(int64_t v);
 OxlStr rt_getenv(OxlStr name);
 int64_t rt_fexists(OxlStr path);
+OxlStr rt_fullpath(OxlStr path);
 OxlStr rt_readfile(OxlStr path);
 int64_t rt_writefile(OxlStr path, OxlStr data);
 void rt_exit(int64_t code);

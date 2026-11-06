@@ -28,6 +28,10 @@ extern fn rt_getenv(name: str) -> str
 
 extern fn rt_fexists(path: str) -> int
 
+// canonical absolute path (`/`-separated); "" on failure — find_root and
+// the internal rule compare real ancestors, not lexical ones
+extern fn rt_fullpath(path: str) -> str
+
 // ---------- interned types ----------
 fn k_unk() -> int {
     return 0
@@ -4993,8 +4997,27 @@ fn norm_path(p: str) -> str {
     return out
 }
 
+// canonical absolute path or the input when it doesn't resolve —
+// mirrors the Rust canonicalize-fallback
+fn canon_or(p: str) -> str {
+    c := rt_fullpath(p)
+    if len(c) == 0 {
+        return p
+    }
+    return c
+}
+
 // nearest ancestor dir holding oxl.mod — "" when none (module-off)
 fn find_root(d: str) -> str {
+    // canonicalize the start: a lexical walk stalls at "."/"" and never
+    // reaches the cwd's real ancestors (mirrors the Rust find_root)
+    c := canon_or(d)
+    if len(c) == 0 {
+        c = canon_or(".")
+    }
+    if len(c) > 0 {
+        d = c
+    }
     for len(d) > 0 {
         if rt_fexists(d + "/oxl.mod") == 1 {
             return d
@@ -5151,10 +5174,6 @@ fn parse_manifest(ck: mut Ck, text: str) -> int {
                 return 0
             }
             ck.mod_floor = sl_at(toks, 1)
-            if ver_tuple(sl_at(toks, 1)) > ver_tuple(tool_ver()) {
-                diag(ck, "check", "oxl.mod: requires oxl " + sl_at(toks, 1) + ", toolchain is " + tool_ver())
-                return 0
-            }
         } else if kw == "require" || kw == "replace" {
             if n == 2 && sl_at(toks, 1) == "(" {
                 block = kw
@@ -5173,6 +5192,10 @@ fn parse_manifest(ck: mut Ck, text: str) -> int {
     }
     if len(ck.mod_path) == 0 {
         diag(ck, "check", "oxl.mod: missing module directive")
+        return 0
+    }
+    if len(ck.mod_floor) > 0 && ver_tuple(ck.mod_floor) > ver_tuple(tool_ver()) {
+        diag(ck, "check", "oxl.mod: requires oxl " + ck.mod_floor + ", toolchain is " + tool_ver())
         return 0
     }
     return 1
@@ -5223,7 +5246,7 @@ fn resolve_imp(ck: mut Ck, imp: str) -> RRes {
         // exe ancestors first (shipped-tree std beside the binary),
         // then the entry's ancestors — a self-hosted checker compiled
         // into a scratch dir still finds the SOURCE tree's std
-        r.dir = std_at(dir_of(argv(0)), rest)
+        r.dir = std_at(canon_or(dir_of(argv(0))), rest)
         if len(r.dir) == 0 {
             r.dir = std_at(ck.entry_dir, rest)
         }
@@ -5297,14 +5320,21 @@ fn resolve_imp(ck: mut Ck, imp: str) -> RRes {
 // `internal` segment's parent — mirrors the Rust component scan over
 // normalized paths
 fn internal_ok(resolved: str, importer_dir: str) -> bool {
-    rd := norm_path(resolved)
-    id := norm_path(importer_dir)
+    rd := norm_path(canon_or(resolved))
+    id := norm_path(canon_or(importer_dir))
+    abs := strings.startswith(rd, "/")
     segs := strings.split(rd, "/")
     prefix := ""
     for segs != nil {
         s := segs.v
         if s == "internal" && len(prefix) > 0 {
-            if id != prefix && strings.startswith(id, prefix + "/") == false {
+            // the split drops the leading "/" — restore it for absolute
+            // resolved paths so the importer's canonical prefix matches
+            p := prefix
+            if abs {
+                p = "/" + p
+            }
+            if id != p && strings.startswith(id, p + "/") == false {
                 return false
             }
         }

@@ -2124,6 +2124,32 @@ int64_t rt_fexists(OxlStr path) {
     return 1;
 }
 
+/* absolute canonical path, `/`-separated; "" when the path doesn't
+ * resolve. find_root and the internal-package rule walk/compare real
+ * ancestors, so `.`/relative starts must resolve before the walk */
+OxlStr rt_fullpath(OxlStr path) {
+    char *cp = rt_alloc(path.n + 1);
+    memcpy(cp, path.p, (size_t)path.n);
+    cp[path.n] = 0;
+#ifdef _WIN32
+    char *r = _fullpath(NULL, cp, 0);
+#else
+    char *r = realpath(cp, NULL);
+#endif
+    if (!r) return rt_str("");
+    size_t n = strlen(r);
+    char *out = rt_alloc((int64_t)n + 1);
+#ifdef _WIN32
+    /* canonical paths compare by prefix — emit the oxl separator */
+    for (size_t i = 0; i < n; i++) out[i] = r[i] == '\\' ? '/' : r[i];
+#else
+    memcpy(out, r, n);
+#endif
+    out[n] = 0;
+    free(r);
+    return (OxlStr){ out, (int64_t)n };
+}
+
 OxlStr rt_readfile(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);
