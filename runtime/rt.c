@@ -965,7 +965,21 @@ void rt_scope_leave(RtScope *s) {
 int rt_scope_try(RtScope *s) { return join_scope(s); }
 
 void rt_trap(int64_t code) {
-    fflush(stdout); /* don't lose buffered prints (test FAILED lines) on trap */
+    /* don't lose buffered prints (test FAILED lines) on trap — but a
+     * flush into a closed pipe raises SIGPIPE; swallow it for the
+     * flush only so teardown still runs */
+#ifdef _WIN32
+    fflush(stdout);
+#else
+    {
+        struct sigaction sa, oldsa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = SIG_IGN;
+        sigaction(SIGPIPE, &sa, &oldsa);
+        fflush(stdout);
+        sigaction(SIGPIPE, &oldsa, NULL);
+    }
+#endif
     RtScope *s = tls_scope;
     if (!s) { fprintf(stderr, "trap %lld outside scope\n", (long long)code); abort(); }
     RtTask *t = tls_task;
