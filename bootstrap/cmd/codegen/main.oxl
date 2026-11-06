@@ -1481,11 +1481,20 @@ fn giface_wrap_v(g: mut G, e: ref parser.Node, v: str, w: str, implkey: str) -> 
 // through, other iface rewraps, concrete impls box (Rust conv)
 fn gconv_v(g: mut G, e: ref parser.Node, v: str, want: int) -> str {
     w := gsub(g, want)
+    got := gsub(g, xty(g, e))
+    // own []T -> []T borrow coercion outside call args (the arg loop
+    // derefs via this same arm): own slices are RtSlice* where the
+    // slot wants RtSlice
+    if w >= 0 && tyk(g, w) == check.k_slice() && got >= 0 && tyk(g, got) == check.k_own() {
+        gi := g.ck.tyv[got].i
+        if gi >= 0 && tyk(g, gi) == check.k_slice() {
+            return "(*" + v + ")"
+        }
+    }
     if w < 0 || tyk(g, w) != check.k_iface() {
         return v
     }
     wn := g.ck.tyv[w].name
-    got := gsub(g, xty(g, e))
     gk := tyk(g, got)
     if gk == check.k_err() {
         return "(RtIface){ 0, 0 }"
@@ -1645,14 +1654,6 @@ fn garg_c(g: mut G, e: ref parser.Node, v: str, pt: int, bind: ref collections.M
     pt2 = gsub(g, pt2)
     o.v = gconv_v(g, e, o.v, pt2)
     raw := gsub(g, xty(g, e))
-    // own []T into a []T param — own slices are RtSlice* where the
-    // param wants RtSlice; the checker admits the view, emit the deref
-    if tyk(g, pt2) == check.k_slice() && tyk(g, raw) == check.k_own() {
-        ri := g.ck.tyv[raw].i
-        if ri >= 0 && tyk(g, ri) == check.k_slice() {
-            o.v = "(*" + o.v + ")"
-        }
-    }
     if tyk(g, pt2) == check.k_cstr() && tyk(g, raw) == check.k_str() {
         o.v = "rt_cstr(" + o.v + ")"
     }

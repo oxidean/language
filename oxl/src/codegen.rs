@@ -2521,6 +2521,14 @@ impl<'a> Gen<'a> {
     /// conv on an already-emitted `v` — e's ty still decides the wrap
     fn conv_v(&mut self, e: &Expr, v: String, want: &Ty) -> String {
         let got = self.dt(&self.expr_ty(e));
+        // own []T -> []T borrow coercion outside call args (the arg
+        // loop derefs inline): own slices are RtSlice* where the slot
+        // wants RtSlice
+        if matches!(self.dt(want), Ty::Slice(_))
+            && matches!(&got, Ty::Own(b) if matches!(b.as_ref(), Ty::Slice(_)))
+        {
+            return format!("(*{v})");
+        }
         let Ty::Iface(w) = self.dt(want) else { return v };
         match &got {
             Ty::Err => "(RtIface){ 0, 0 }".into(),

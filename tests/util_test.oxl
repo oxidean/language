@@ -52,6 +52,13 @@ fn test_path() {
     testing.expect(path.matches("[ab]c", "bc"), "match [set]")
     testing.expect(!path.matches("*.txt", "a.png"), "match neg")
     testing.expect(!path.matches("a", "ab"), "match len")
+    // a ".." cancels a normal segment only — retained leading ".."
+    // must survive (Go: clean("../..") == "../..")
+    testing.expect_streq(path.clean("../.."), "../..", "clean keeps leading ..")
+    testing.expect_streq(path.clean("../../b"), "../../b", "clean keeps leading ..x2")
+    testing.expect_streq(path.clean("../a/../.."), "../..", "clean .. cancels seg")
+    testing.expect_streq(path.clean("a/../../b"), "../b", "clean pops past ..")
+    testing.expect_streq(path.clean("/../.."), "/", "clean rooted drops ..")
 }
 
 fn test_filepath() {
@@ -75,12 +82,14 @@ fn test_filepath() {
         testing.expect_streq(filepath.toslash("a\\b\\c"), "a/b/c", "toslash")
         testing.expect_streq(filepath.fromslash("a/b/c"), "a\\b\\c", "fromslash")
         testing.expect_streq(filepath.clean("C:\\a\\..\\b"), "C:/b", "win clean -> canonical / form")
+        testing.expect_streq(filepath.clean("..\\..\\b"), "../../b", "win clean leading ..")
     } else {
         testing.expect_streq(filepath.volume_name("/a/b"), "", "volume none posix")
         testing.expect(filepath.isabs("/x"), "posix abs")
         testing.expect(!filepath.isabs("x/y"), "posix rel")
         testing.expect_streq(filepath.toslash("a/b"), "a/b", "toslash noop")
         testing.expect_streq(filepath.clean("/a/./b/../c"), "/a/c", "posix clean")
+        testing.expect_streq(filepath.clean("../../b"), "../../b", "posix clean leading ..")
     }
     // abs resolves against the cwd — result must be absolute on both OSes
     testing.expect(filepath.isabs(filepath.abs(".")), "abs(.) is absolute")
@@ -172,6 +181,16 @@ fn test_slices() {
     // lexicographic slice compare
     testing.expect_eq(slices.compare(v, v), 0, "compare eq")
     testing.expect_eq(slices.compare(v, c), -1, "compare lt")
+    // own []T -> []T coercion outside call args: let, assign, return
+    let lv: []int = new(mkslice(int, 1))
+    lv[0] = 11
+    testing.expect_eq(lv[0], 11, "let []int = own slice")
+    let av: []int = mkslice(int, 0)
+    av = new(mkslice(int, 1))
+    av[0] = 22
+    testing.expect_eq(av[0], 22, "assign []int = own slice")
+    // struct field init exercises the same conv_v arm
+    testing.expect_eq(lv[0] + av[0], 33, "own->slice sites emit deref")
 }
 
 fn test_maps() {
