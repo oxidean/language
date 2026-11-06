@@ -891,6 +891,7 @@ fn load_pkg_inner(
     }
     let mut items = Vec::new();
     let mut item_files: Vec<PathBuf> = Vec::new();
+    let mut dead = false;
     for (fpath, _, fitems) in pfiles {
         // per-file maps: package-shared decls + this file's own imports
         let mut renames = shared.clone();
@@ -982,7 +983,6 @@ fn load_pkg_inner(
         }
         // M3: each import must have been touched by the qualify walk —
         // one diag per dead binding, source order, then abort
-        let mut dead = false;
         for (path, qual, sels) in &binds {
             if !used.quals.contains(qual) {
                 if loud {
@@ -1000,12 +1000,12 @@ fn load_pkg_inner(
                 }
             }
         }
-        if dead && loud {
-            return None;
-        }
         item_files.extend(
             std::iter::repeat(fpath.clone()).take(items.len() - item_files.len()),
         );
+    }
+    if dead && loud {
+        return None;
     }
     debug_assert_eq!(items.len(), item_files.len());
     Some((ast::Crate { pkg: clause0, pkg_span: Span::new(0, 0), items }, item_files))
