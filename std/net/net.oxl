@@ -1,0 +1,209 @@
+package net
+
+// std/net — TCP sockets behind Go-shaped Conn/Listener types. Conn
+// implements io.Reader/Writer/Closer (S2's interfaces); Listener wraps
+// the accept socket. Hosts are dotted IPv4 literals — name resolution
+// stays parked (Go parity for numeric hosts covers loopback and every
+// internal service).
+import "std/io"
+
+import "std/errors"
+
+extern fn rt_sock_open(domain: int, ty: int, proto: int) -> int
+
+extern fn rt_sock_connect_ipv4(fd: int, ip_h32: int, port: int, tmo_ms: int) -> int
+
+extern fn rt_sock_listen(fd: int, backlog: int) -> int
+
+extern fn rt_sock_accept(fd: int) -> int
+
+extern fn rt_sock_read(fd: int, b: []byte) -> int
+
+extern fn rt_sock_write(fd: int, b: []byte) -> int
+
+extern fn rt_sock_close(fd: int) -> int
+
+extern fn rt_set_reuseaddr(fd: int) -> int
+
+extern fn rt_bind_any(fd: int, port: int) -> int
+
+extern fn rt_errstr(code: int) -> str
+
+/// Conn is one end of a TCP connection — read/write/close satisfy
+/// io.Reader, io.Writer and io.Closer.
+struct Conn { fd: int }
+
+/// Listener is a bound, listening TCP socket.
+struct Listener { fd: int }
+
+// parse_ipv4 reads "a.b.c.d" into a host-order u32 — rejects empty
+// octets, >255, non-digits, and wrong part counts. No getaddrinfo:
+// names are a documented non-goal (see impl-s4).
+fn parse_ipv4(host: str) -> [int, err] {
+    ip := 0
+    oct := -1
+    parts := 0
+    i := 0
+    bad := errors.new("net: dial: host is not a dotted IPv4 address: " + host)
+    for i < len(host) {
+        c := byteat(host, i)
+        if c == 46 {
+            if oct < 0 || oct > 255 {
+                return 0, bad
+            }
+            ip = ip * 256 + oct
+            oct = -1
+            parts = parts + 1
+        } else {
+            if c < 48 || c > 57 {
+                return 0, bad
+            }
+            if oct < 0 {
+                oct = 0
+            }
+            oct = oct * 10 + (c - 48)
+            if oct > 255 {
+                return 0, bad
+            }
+        }
+        i = i + 1
+    }
+    if oct < 0 || oct > 255 || parts != 3 {
+        return 0, bad
+    }
+    return ip * 256 + oct, nil
+}
+
+/// dial opens a TCP connection to host:port — host must be a dotted
+/// IPv4 literal ("127.0.0.1"), connect bounded at 30s (Go's default
+/// transport timeout). Returns [conn, nil] or an error.
+fn dial(host: str, port: int) -> [Conn, err] {
+    return dial_timeout(host, port, 30000)
+}
+
+/// dial_timeout is dial with a caller-set connect deadline in ms — a
+/// dropped SYN otherwise hangs the call forever (connect has no
+/// timeout of its own).
+fn dial_timeout(host: str, port: int, tmo_ms: int) -> [Conn, err] {
+    [ip, pe] = parse_ipv4(host)
+    if pe != nil {
+        return Conn{fd: -1}, pe
+    }
+    if port <= 0 || port > 65535 {
+        return Conn{fd: -1}, errors.new("net: dial: bad port " + itoa(port))
+    }
+    fd := rt_sock_open(2, 1, 0) // AF_INET, SOCK_STREAM
+    if fd < 0 {
+        return Conn{fd: -1}, errors.new("net: dial: socket failed")
+    }
+    rc := rt_sock_connect_ipv4(fd, ip, port, tmo_ms)
+    if rc != 0 {
+        rt_sock_close(fd)
+        return Conn{fd: -1}, errors.new("net: dial: connect " + host + ":" + itoa(port) + ": " + rt_errstr(0 - rc))
+    }
+    return Conn{fd: fd}, nil
+}
+
+/// listen binds port on INADDR_ANY and starts listening. The bounded
+/// backoff is load-bearing: on Windows SO_EXCLUSIVEADDRUSE keeps the
+/// port unavailable while a just-dead process's accepted sockets
+/// finish kernel teardown, so a restart during live traffic would
+/// otherwise fail on EADDRINUSE though the port frees moments later.
+/// ~25s of ramping retries, then a real error.
+fn listen(port: int) -> [Listener, err] {
+    fd := -1
+    delay := 100
+    tries := 0
+    for fd < 0 {
+        cand := rt_sock_open(2, 1, 0)
+        if cand >= 0 && rt_set_reuseaddr(cand) == 0 && rt_bind_any(cand, port) == 0 && rt_sock_listen(cand, 64) == 0 {
+            fd = cand
+        } else {
+            if cand >= 0 {
+                rt_sock_close(cand)
+            }
+            tries = tries + 1
+            if tries > 15 {
+                return Listener{fd: -1}, errors.new("net: listen: bind/listen failed on :" + itoa(port))
+            }
+            usleep(delay * 1000)
+            if delay < 2000 {
+                delay = delay * 2
+            }
+        }
+    }
+    return Listener{fd: fd}, nil
+}
+
+/// accept returns the next inbound connection.
+fn (l mut Listener) accept() -> [Conn, err] {
+    fd := rt_sock_accept(l.fd)
+    if fd < 0 {
+        return Conn{fd: -1}, errors.new("net: accept failed")
+    }
+    return Conn{fd: fd}, nil
+}
+
+/// close releases the listener socket — safe to call twice.
+fn (l mut Listener) close() -> err {
+    if l.fd < 0 {
+        return nil
+    }
+    rt_sock_close(l.fd)
+    l.fd = -1
+    return nil
+}
+
+/// read pulls up to len(b) bytes from the connection — io.Reader
+/// contract: 0+io.eof() on orderly close, errno message on failure.
+fn (c mut Conn) read(b: []byte) -> [int, err] {
+    n := rt_sock_read(c.fd, b)
+    if n < 0 {
+        return 0, errors.new("net: read: " + rt_errstr(0 - n))
+    }
+    if n == 0 {
+        return 0, io.eof()
+    }
+    return n, nil
+}
+
+/// write pushes bytes onto the connection — io.Writer contract; may
+/// write short like any Writer (callers loop, or use io.copy).
+fn (c mut Conn) write(b: []byte) -> [int, err] {
+    n := rt_sock_write(c.fd, b)
+    if n < 0 {
+        return 0, errors.new("net: write: " + rt_errstr(0 - n))
+    }
+    return n, nil
+}
+
+/// close releases the connection — safe to call twice.
+fn (c mut Conn) close() -> err {
+    if c.fd < 0 {
+        return nil
+    }
+    rt_sock_close(c.fd)
+    c.fd = -1
+    return nil
+}
+
+/// fd exposes the raw socket — escape hatch for code that needs the
+/// fd-level builtins (timeouts, sigpipe handling).
+fn (c ref Conn) rawfd() -> int {
+    return c.fd
+}
+
+/// asreader views the conn as io.Reader.
+fn (c mut Conn) asreader() -> io.Reader {
+    return c
+}
+
+/// aswriter views the conn as io.Writer.
+fn (c mut Conn) aswriter() -> io.Writer {
+    return c
+}
+
+/// asreadwriter views the conn as io.ReadWriter.
+fn (c mut Conn) asreadwriter() -> io.ReadWriter {
+    return c
+}

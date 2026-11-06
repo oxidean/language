@@ -1,7 +1,7 @@
 package http
 
-// std/net/http — minimal HTTP/1.1 server written in the language over libc
-// sockets. Import with `import "std/net/http"` and hand `serve` a Handler:
+// std/net/http — HTTP/1.1 server + client over std/net. Import with
+// `import "std/net/http"` and hand `serve` a Handler:
 //
 //   interface Handler { route(method: str, path: str, body: str) -> Resp }
 //   fn (a App) route(method: str, path: str, body: str) -> Resp { ... }
@@ -9,30 +9,16 @@ package http
 //
 // `h.route` is dispatched per request on the blocking pool; it returns a
 // Resp — the status becomes the response's HTTP status line and the body
-// is sent as text/plain.
-extern fn rt_sock_open(domain: int, ty: int, proto: int) -> int
+// is sent as text/plain. Client side: `get`/`post` or a `Client` with a
+// dial/read budget. HTTPS stays parked (no TLS — see impl-s4).
+import "std/net"
 
-// SO_REUSEADDR + sockaddr_in layout differ per OS — runtime owns both
-extern fn rt_set_reuseaddr(fd: int) -> int
+import "std/errors"
 
-extern fn rt_bind_any(fd: int, port: int) -> int
-
-extern fn rt_sock_listen(fd: int, backlog: int) -> int
-
-extern fn rt_sock_accept(fd: int) -> int
-
-extern fn rt_sock_read(fd: int, buf: mut void, n: int) -> int
-
-extern fn rt_sock_write(fd: int, buf: cstr, n: int) -> int
-
-extern fn rt_sock_close(fd: int) -> int
-
-// explicit release for `own ?` buffers (mkbuf) — scope arenas don't
-// reclaim them, so a per-request scratch must be freed by hand
-extern fn rt_free(p: own void)
+import "std/strconv"
 
 // a client that resets mid-write must not kill the process before
-// rt_sock_write() returns EPIPE — runtime wrapper (libc signal can't be
+// Conn.write() returns EPIPE — runtime wrapper (libc signal can't be
 // extern'd portably: its real prototype clashes with int args)
 extern fn rt_sigpipe_ignore()
 
@@ -122,19 +108,19 @@ let REQ_MS = 30000
 /// release the conn slot and the fd on EVERY exit — normal return,
 /// early read failure, and handler trap (the runtime drains task
 /// defers on trap unwind, so a trapping route can't leak either)
-fn conn_cleanup(fd: int, inflight: shared) {
-    rt_sock_close(fd)
+fn conn_cleanup(c: net.Conn, inflight: shared) {
+    c.close()
     sadd(inflight, -1)
 }
 
-/// rt_sock_write() may return short — loop until the whole response is on the
-/// wire or the conn dies (n <= 0 covers EPIPE + resets). Dropping the
-/// raw return would silently truncate bodies on a partial write.
-fn write_all(fd: int, s: str) {
+/// Conn.write() may return short — loop until the whole response is on
+/// the wire or the conn dies (n <= 0 covers EPIPE + resets). Dropping the
+/// raw count would silently truncate bodies on a partial write.
+fn write_all(c: net.Conn, s: str) {
     off := 0
     for off < len(s) {
-        n := rt_sock_write(fd, cstr(substr(s, off, len(s))), len(s) - off)
-        if n <= 0 {
+        [n, e] = c.write(substr(s, off, len(s)) as []byte)
+        if e != nil || n <= 0 {
             return
         }
         off = off + n
@@ -145,28 +131,27 @@ fn write_all(fd: int, s: str) {
 /// Spawned inside the conn's try-scope — a trap in here marks only
 /// that scope, so serve's shared scope and every sibling connection
 /// survive a bad handler
-fn route_serve(h: Handler, method: str, path: str, body: str, fd: int) {
+fn route_serve(h: Handler, method: str, path: str, body: str, c: net.Conn) {
     r := h.route(method, path, body)
     resp := http_resp_ct(r.status, r.body, r.ctype)
-    write_all(fd, resp)
+    write_all(c, resp)
 }
 
 /// lowercase copy for case-insensitive header lookup — header names
 /// are case-insensitive but find() is byte-exact
 fn lwr(s: str) -> str {
-    buf := mkbuf(len(s) + 1)
+    b := s as []byte
+    out := mkslice(byte, len(s))
     i := 0
     for i < len(s) {
-        c := byteat(s, i)
+        c := b[i]
         if c >= 65 && c <= 90 {
             c = c + 32
         }
-        poke8(buf, i, c)
+        out[i] = c
         i = i + 1
     }
-    out := bufstr(buf, len(s))
-    rt_free(buf)
-    return out
+    return out as str
 }
 
 /// index of needle in s at or after `from`, -1 when absent — find()
@@ -231,45 +216,39 @@ fn content_length(req: str, hdr_end: int) -> int {
     return v
 }
 
-/// read a full request. One rt_sock_read() is NOT a request — TCP splits
+/// read a full request. One Conn.read() is NOT a request — TCP splits
 /// segments anywhere, so >4KiB bodies and split header/body deliveries
 /// (curl's Expect: 100-continue) silently truncate. Accumulate until
 /// the header terminator, then drain exactly Content-Length bytes.
-fn read_request(fd: int) -> ReqRead {
-    scratch := mkbuf(4096)
+fn read_request(c: net.Conn) -> ReqRead {
+    scratch := mkslice(byte, 4096)
     req := ""
     hdr_end := -1
     deadline := now_ms() + REQ_MS
     for hdr_end < 0 && len(req) <= 16384 {
         if now_ms() > deadline {
-            rt_free(scratch)
             return ReqRead{status: 400, req: "", body: ""}
         }
-        n := rt_sock_read(fd, scratch, 4095)
-        if n <= 0 {
-            rt_free(scratch)
+        [n, e] = c.read(scratch)
+        if e != nil || n <= 0 {
             return ReqRead{status: 400, req: "", body: ""}
         }
-        req = req + bufstr(scratch, n)
+        req = req + scratch[0:n] as str
         hdr_end = find(req, "\r\n\r\n")
     }
     if hdr_end < 0 {
-        rt_free(scratch) // headers never terminated inside the 16KiB cap
         return ReqRead{status: 400, req: "", body: ""}
     }
     cl := content_length(req, hdr_end)
     if cl < 0 {
-        rt_free(scratch)
         return ReqRead{status: 400, req: "", body: ""}
     }
     // no chunked decoding: a TE body has no length to drain, so the
     // chunk bytes stay on the wire and desync the next request — refuse
     if find_from(lwr(substr(req, 0, hdr_end)), "\r\ntransfer-encoding:", 0) >= 0 {
-        rt_free(scratch)
         return ReqRead{status: 400, req: "", body: ""}
     }
     if cl > MAX_BODY {
-        rt_free(scratch)
         return ReqRead{status: 413, req: "", body: ""}
     }
     // copy the already-arrived tail, then drain into a sized buffer —
@@ -279,53 +258,42 @@ fn read_request(fd: int) -> ReqRead {
     if have > cl {
         have = cl // pipelined bytes past the length are dropped
     }
-    bbuf := mkbuf(cl + 1)
+    bbuf := mkslice(byte, cl)
     i := 0
     for i < have {
-        poke8(bbuf, i, byteat(tail, i))
+        bbuf[i] = byteat(tail, i)
         i = i + 1
     }
     for have < cl {
         if now_ms() > deadline {
-            rt_free(bbuf)
-            rt_free(scratch)
             return ReqRead{status: 400, req: "", body: ""}
         }
-        want := cl - have
-        if want > 4095 {
-            want = 4095
-        }
-        n := rt_sock_read(fd, scratch, want) // never past cl: bbuf is cl+1
-        if n <= 0 {
-            rt_free(bbuf)
-            rt_free(scratch)
+        [n, e] = c.read(scratch)
+        if e != nil || n <= 0 {
             return ReqRead{status: 400, req: "", body: ""}
         }
-        chunk := bufstr(scratch, n)
+        chunk := scratch[0:n] as str
         j := 0
         for j < n {
-            poke8(bbuf, have + j, byteat(chunk, j))
+            bbuf[have + j] = byteat(chunk, j)
             j = j + 1
         }
         have = have + n
     }
-    body := bufstr(bbuf, cl)
-    rt_free(bbuf)
-    rt_free(scratch)
-    return ReqRead{status: 0, req: req, body: body}
+    return ReqRead{status: 0, req: req, body: bbuf as str}
 }
 
-fn handle_conn(h: Handler, fd: int, inflight: shared) {
-    defer conn_cleanup(fd, inflight)
+fn handle_conn(h: Handler, c: net.Conn, inflight: shared) {
+    defer conn_cleanup(c, inflight)
     // conn-scoped arena: the request buffer + parse garbage die when the
     // handler returns instead of accumulating in the serve scope
     scope {
-        set_rcvtimo(fd, 10) // slowloris guard: reads give up after 10s
-        set_sndtimo(fd, 10) // a client that stops reading can't pin the conn in rt_sock_write()
-        rr := read_request(fd)
+        set_rcvtimo(c.rawfd(), 10) // slowloris guard: reads give up after 10s
+        set_sndtimo(c.rawfd(), 10) // a client that stops reading can't pin the conn in write()
+        rr := read_request(c)
         if rr.status != 0 {
             resp := http_resp(rr.status, status_text(rr.status) + "\n")
-            write_all(fd, resp)
+            write_all(c, resp)
         } else {
             // "METHOD PATH HTTP/1.x" — split on the first two spaces; a
             // line missing either (or opening with one) is malformed —
@@ -343,7 +311,7 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
             }
             if sp1 <= 0 || sp2 <= 0 {
                 resp := http_resp(400, "malformed request line\n")
-                write_all(fd, resp)
+                write_all(c, resp)
             } else {
                 path := substr(rest, 0, sp2)
                 method := substr(line, 0, sp1)
@@ -353,10 +321,10 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
                 // rt_scope_join_free instead of propagating through serve's
                 // shared spawn scope and cancelling sibling handlers
                 rsc := rt_scope_new()
-                spawnBlocking route_serve(h, method, path, rr.body, fd)
+                spawnBlocking route_serve(h, method, path, rr.body, c)
                 if rt_scope_join_free(rsc) != 0 {
                     resp := http_resp(500, "handler trapped\n")
-                    write_all(fd, resp)
+                    write_all(c, resp)
                 }
             }
         }
@@ -366,49 +334,24 @@ fn handle_conn(h: Handler, fd: int, inflight: shared) {
 /// listen+serve on port; dispatches `h.route` per request
 fn serve(port: int, h: Handler) {
     rt_sigpipe_ignore() // reset clients must not kill us on write
-    // bounded backoff retry on bind: on Windows SO_EXCLUSIVEADDRUSE
-    // keeps the port unavailable while a just-dead process's accepted
-    // sockets finish kernel teardown — a restart during live traffic
-    // would otherwise die on EADDRINUSE though the port frees moments
-    // later. Each attempt recreates the socket (option + bind state
-    // doesn't carry) and the wait ramps to 2s; ~25s total, then give
-    // up — a failed bind/listen makes every accept return -1 at once
-    // and the serve loop would spin at 100% CPU serving nothing.
-    srv := -1
-    delay := 100
-    tries := 0
-    for srv < 0 {
-        cand := rt_sock_open(2, 1, 0) // AF_INET, SOCK_STREAM
-        if cand >= 0 && rt_set_reuseaddr(cand) == 0 && rt_bind_any(cand, port) == 0 && rt_sock_listen(cand, 64) == 0 {
-            srv = cand
-        } else {
-            if cand >= 0 {
-                rt_sock_close(cand)
-            }
-            tries = tries + 1
-            if tries > 15 {
-                println("serve: bind/listen failed on :" + itoa(port))
-                exit(1)
-            }
-            usleep(delay * 1000)
-            if delay < 2000 {
-                delay = delay * 2
-            }
-        }
+    [l, le] = net.listen(port)
+    if le != nil {
+        println("serve: listen failed on :" + itoa(port))
+        exit(1)
     }
     println("listening on :" + itoa(port))
 
     inflight := mkshared(0)
     scope {
         for true {
-            cfd := rt_sock_accept(srv)
-            if cfd >= 0 {
+            [c, ae] = l.accept()
+            if ae == nil {
                 // claim a slot before spawning; sadd returns the OLD count
                 if sadd(inflight, 1) >= MAX_CONN {
                     sadd(inflight, -1)
-                    rt_sock_close(cfd)
+                    c.close()
                 } else {
-                    spawnBlocking handle_conn(h, cfd, inflight)
+                    spawnBlocking handle_conn(h, c, inflight)
                 }
             } else {
                 // persistent accept errors (EMFILE and friends) would
@@ -417,4 +360,165 @@ fn serve(port: int, h: Handler) {
             }
         }
     }
+}
+
+/// a parsed request URL — `http://` only; port defaults to 80, path to /
+struct Url { host: str, port: int, path: str }
+
+/// `http://host[:port][/path]` — IPv4 or host names net.dial accepts.
+/// Anything else (https, userinfo, query-less garbage) is an err, not a
+/// silent misparsed request
+fn parse_url(url: str) -> [Url, err] {
+    bad := Url{host: "", port: 0, path: ""}
+    u := url
+    if len(u) >= 7 && substr(u, 0, 7) == "http://" {
+        u = substr(u, 7, len(u))
+    } else if find(u, "://") >= 0 {
+        return bad, errors.new("http: unsupported scheme in " + url)
+    }
+    if len(u) == 0 {
+        return bad, errors.new("http: empty url")
+    }
+    slash := find(u, "/")
+    hostport := u
+    path := "/"
+    if slash >= 0 {
+        hostport = substr(u, 0, slash)
+        path = substr(u, slash, len(u))
+    }
+    colon := find(hostport, ":")
+    host := hostport
+    port := 80
+    if colon >= 0 {
+        host = substr(hostport, 0, colon)
+        ps := substr(hostport, colon + 1, len(hostport))
+        [p, pe] = strconv.atoi(ps)
+        if pe != nil || p <= 0 || p > 65535 {
+            return bad, errors.new("http: bad port in " + url)
+        }
+        port = p
+    }
+    if len(host) == 0 {
+        return bad, errors.new("http: empty host in " + url)
+    }
+    return Url{host: host, port: port, path: path}, nil
+}
+
+/// default dial+read budget for the package-level get/post (ms)
+let CLIENT_MS = 30000
+
+/// a client with its own dial/read budget — one request at a time
+struct Client { tmo: int }
+
+/// one request: dial, write, read-until-close (bounded by the client's
+/// budget). Status/ctype come off the status line and headers; the body
+/// is whatever follows \r\n\r\n verbatim.
+fn (cl ref Client) request(method: str, url: str, ctype: str, body: str) -> [Resp, err] {
+    bad := Resp{status: 0, body: "", ctype: ""}
+    [u, ue] = parse_url(url)
+    if ue != nil {
+        return bad, ue
+    }
+    [c, de] = net.dial_timeout(u.host, u.port, cl.tmo)
+    if de != nil {
+        return bad, de
+    }
+    req := method + " " + u.path + " HTTP/1.1\r\nhost: " + u.host
+    if u.port != 80 {
+        req = req + ":" + itoa(u.port)
+    }
+    req = req + "\r\nconnection: close\r\n"
+    if len(ctype) > 0 && !has_crlf(ctype) {
+        req = req + "content-type: " + ctype + "\r\n"
+    }
+    if len(body) > 0 {
+        req = req + "content-length: " + itoa(len(body)) + "\r\n"
+    }
+    req = req + "\r\n" + body
+    write_all(c, req)
+    // response: connection: close means read-until-EOF is well-defined
+    set_rcvtimo(c.rawfd(), 10)
+    deadline := now_ms() + cl.tmo
+    scratch := mkslice(byte, 8192)
+    resp := ""
+    for true {
+        if now_ms() > deadline {
+            c.close()
+            return bad, errors.new("http: read deadline exceeded")
+        }
+        [n, e] = c.read(scratch)
+        if n > 0 {
+            resp = resp + scratch[0:n] as str
+        }
+        if e != nil {
+            break
+        }
+        if n <= 0 {
+            break
+        }
+    }
+    c.close()
+    he := find(resp, "\r\n\r\n")
+    if he < 0 {
+        return bad, errors.new("http: response never completed headers")
+    }
+    // "HTTP/1.1 200 OK" — code is the token after the first space
+    eol := find(resp, "\r\n")
+    line := substr(resp, 0, eol)
+    sp := find(line, " ")
+    code := 0
+    if sp > 0 {
+        rest := substr(line, sp + 1, len(line))
+        sp2 := find(rest, " ")
+        tok := rest
+        if sp2 > 0 {
+            tok = substr(rest, 0, sp2)
+        }
+        [v, ae] = strconv.atoi(tok)
+        if ae == nil {
+            code = v
+        }
+    }
+    // content-type out of the header block, case-insensitively
+    rctype := ""
+    hdrs := lwr(substr(resp, 0, he))
+    ct := find_from(hdrs, "\r\ncontent-type:", 0)
+    if ct >= 0 {
+        val := substr(resp, ct + 16, len(resp))
+        e2 := find(val, "\r\n")
+        if e2 > 0 {
+            val = substr(val, 0, e2)
+        }
+        // trim surrounding spaces/tabs
+        lo := 0
+        for lo < len(val) && (byteat(val, lo) == 32 || byteat(val, lo) == 9) {
+            lo = lo + 1
+        }
+        hi := len(val)
+        for hi > lo && (byteat(val, hi - 1) == 32 || byteat(val, hi - 1) == 9) {
+            hi = hi - 1
+        }
+        rctype = substr(val, lo, hi)
+    }
+    return Resp{status: code, body: substr(resp, he + 4, len(resp)), ctype: rctype}, nil
+}
+
+fn (cl ref Client) get(url: str) -> [Resp, err] {
+    return cl.request("GET", url, "", "")
+}
+
+fn (cl ref Client) post(url: str, ctype: str, body: str) -> [Resp, err] {
+    return cl.request("POST", url, ctype, body)
+}
+
+/// package-level GET with the default budget — build a Client to tune it
+fn get(url: str) -> [Resp, err] {
+    cl := Client{tmo: CLIENT_MS}
+    return cl.get(url)
+}
+
+/// package-level POST with the default budget
+fn post(url: str, ctype: str, body: str) -> [Resp, err] {
+    cl := Client{tmo: CLIENT_MS}
+    return cl.post(url, ctype, body)
 }

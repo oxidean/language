@@ -1,0 +1,68 @@
+package main
+
+// S4 acceptance: http client against the real serve() on loopback —
+// get/post round-trip, status + body + ctype asserts. Runs under
+// `oxl run` (not `oxl test`): exit(0) ends the spawned accept loop,
+// which has no shutdown path.
+import "std/net/http"
+
+import "std/testing"
+
+import "std/errors"
+
+fn ck(e: err, m: str) {
+    testing.expect(e == nil, m + ": " + errors.msg(e))
+}
+
+let PORT2 = 18342
+
+struct App {}
+
+fn (a App) route(method: str, path: str, body: str) -> http.Resp {
+    if path == "/echo" {
+        return http.Resp{status: 200, body: method + ":" + body, ctype: "text/plain"}
+    }
+    return http.Resp{status: 200, body: "ok", ctype: "application/json"}
+}
+
+fn serve_it() {
+    http.serve(PORT2, App{})
+}
+
+fn get_retry(url: str) -> [http.Resp, err] {
+    tries := 0
+    for tries < 40 {
+        [r, e] = http.get(url)
+        if e == nil {
+            return r, nil
+        }
+        usleep(50000)
+        tries = tries + 1
+    }
+    return http.get(url)
+}
+
+fn main() {
+    spawnBlocking serve_it()
+    // dial may beat listen — retry through the client until it answers
+    [r, e] = get_retry("http://127.0.0.1:18342/")
+    ck(e, "client connects")
+    if e != nil {
+        exit(1)
+    }
+    testing.expect(r.status == 200, "get status")
+    testing.expect(r.body == "ok", "get body")
+    testing.expect(r.ctype == "application/json", "get ctype got " + r.ctype)
+
+    [pr, pe] = http.post("http://127.0.0.1:18342/echo", "text/plain", "hello")
+    ck(pe, "post")
+    testing.expect(pr.status == 200, "post status")
+    testing.expect(pr.body == "POST:hello", "post echo body got " + pr.body)
+    testing.expect(pr.ctype == "text/plain", "post ctype")
+
+    // bad url is an error, not a crash
+    [br, be] = http.get("noscheme://x")
+    testing.expect(be != nil || br.status == 0, "bad url handled")
+    println("httpclient done")
+    exit(0)
+}

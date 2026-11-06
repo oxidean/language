@@ -1788,10 +1788,12 @@ impl<'a> Gen<'a> {
                     BinOp::And => "&&", BinOp::Or => "||",
                 };
                 // byte arithmetic wraps mod 256 — C would promote to int
-                // and carry bits the oxl type says don't exist. Any byte
-                // operand makes the op byte arithmetic (the untyped-
-                // constant case in Go: `255 as byte + 1` wraps to 0).
-                if self.dt(&lt) == Ty::Byte && matches!(op,
+                // and carry bits the oxl type says don't exist. Wrap iff
+                // the RESULT ty is byte (byte op byte): byte op int
+                // widens to int per the checker, and C's promotion is
+                // already the right width there (`b[i] * 65536` must not
+                // truncate).
+                if self.dt(&self.expr_ty(e)) == Ty::Byte && matches!(op,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
                     | BinOp::BitAnd | BinOp::BitOr | BinOp::Xor)
                 {
@@ -2521,6 +2523,12 @@ impl<'a> Gen<'a> {
     /// conv on an already-emitted `v` — e's ty still decides the wrap
     fn conv_v(&mut self, e: &Expr, v: String, want: &Ty) -> String {
         let got = self.dt(&self.expr_ty(e));
+        // nil (Err-typed) into a slice slot: the zero RtSlice — bare
+        // `0` isn't a valid struct initializer (`RtSlice x = 0` fails
+        // to compile); pointer slots keep `0`, it's already right
+        if matches!(got, Ty::Err) && matches!(self.dt(want), Ty::Slice(_)) {
+            return "(RtSlice){ 0, 0, 0, 0 }".into();
+        }
         // own []T -> []T borrow coercion outside call args (the arg
         // loop derefs inline): own slices are RtSlice* where the slot
         // wants RtSlice
@@ -2600,10 +2608,16 @@ impl<'a> Gen<'a> {
             for p in &ps {
                 sig += &format!(", {}", self.cty(p));
             }
-            let argl = if argvs.is_empty() {
+            let cargs: Vec<String> = args.iter().enumerate()
+                .map(|(i, a)| match ps.get(i) {
+                    Some(p) => self.conv(a, p),
+                    None => self.expr(a),
+                })
+                .collect();
+            let argl = if cargs.is_empty() {
                 String::new()
             } else {
-                format!(", {}", argvs.join(", "))
+                format!(", {}", cargs.join(", "))
             };
             return format!(
                 "({{ RtFnv _fv = {fv}; (({ret_c} (*)({sig}))_fv.fp)(_fv.env{argl}); }})");
@@ -2659,10 +2673,19 @@ impl<'a> Gen<'a> {
                         for p in &params {
                             sig += &format!(", {}", self.cty(p));
                         }
-                        let argl = if argvs.is_empty() {
+                        // conv each arg to the iface-declared param —
+                        // vtab calls went through raw argvs before, so
+                        // nil/own into slice params emitted wrong C
+                        let cargs: Vec<String> = args.iter().enumerate()
+                            .map(|(i, a)| match params.get(i) {
+                                Some(p) => self.conv(a, p),
+                                None => self.expr(a),
+                            })
+                            .collect();
+                        let argl = if cargs.is_empty() {
                             String::new()
                         } else {
-                            format!(", {}", argvs.join(", "))
+                            format!(", {}", cargs.join(", "))
                         };
                         return format!(
                             "({{ RtIface _iv = {ov}; (({ret_c} (*)({sig}))_iv.vtab[{midx}])(_iv.data{argl}); }})");
@@ -2817,20 +2840,13 @@ impl<'a> Gen<'a> {
                             };
                             let mut v = if i == 0 && recv_e.is_some() {
                                 self.adapt_recv(a, &pt)
-                            } else if matches!(pt, Ty::Iface(_)) {
-                                self.conv(a, &pt)
                             } else {
-                                self.expr(a)
+                                // conv is a no-op for plain wants but
+                                // carries the iface wrap, nil->slice
+                                // zero, and own->slice deref cases
+                                self.conv(a, &pt)
                             };
                             let raw_at = self.expr_ty(a);
-                            // own []T into a []T param — own slices are
-                            // RtSlice* where the param wants RtSlice;
-                            // the checker admits the view, emit the deref
-                            if matches!(pt, Ty::Slice(_))
-                                && matches!(self.dt(&raw_at), Ty::Own(b) if matches!(b.as_ref(), Ty::Slice(_)))
-                            {
-                                v = format!("(*{v})");
-                            }
                             if pt == Ty::CStr && self.dt(&raw_at) == Ty::Str {
                                 // a literal already is a C string — an
                                 // rt_cstr copy would only sit in the

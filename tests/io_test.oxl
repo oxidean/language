@@ -116,7 +116,7 @@ fn test_bytes() {
     x := 65 as byte
     testing.expect(x == 65, "int->byte + char literal")
     testing.expect(97 == 97 && 10 == 10 && 92 == 92 && 39 == 39, "char literals")
-    testing.expect(255 as byte + 1 == 0, "byte wrap")
+    testing.expect(255 as byte + 1 as byte == 0, "byte wrap")
     testing.expect(bytes.equal("ab" as []byte, "ab" as []byte), "equal")
     testing.expect(!bytes.equal("ab" as []byte, "ac" as []byte), "!equal")
     testing.expect(bytes.compare("a" as []byte, "b" as []byte) < 0, "compare")

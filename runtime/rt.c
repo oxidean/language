@@ -18,6 +18,7 @@
 #ifndef _WIN32
 #include <dirent.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -2559,6 +2560,78 @@ int64_t rt_bind_any(int64_t fd, int64_t port) {
     return bind((oxl_sock_t)fd, (struct sockaddr *)&a, sizeof a);
 }
 
+/* connect to a dotted-quad IPv4 (host-order u32) with a millisecond
+ * timeout — nonblocking + poll-for-writable, because a raw blocking
+ * connect has no timeout knob and a silently dropped SYN would hang
+ * the caller forever. Blocking mode is restored before returning;
+ * -errno convention, ETIMEDOUT when the deadline wins. */
+int64_t rt_sock_connect_ipv4(int64_t fd, int64_t ip_h32, int64_t port, int64_t tmo_ms) {
+    struct sockaddr_in a;
+    int rc, err = 0;
+    socklen_t el = sizeof err;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = htonl((uint32_t)ip_h32);
+#ifdef _WIN32
+    {
+        u_long nb = 1;
+        WSAPOLLFD pfd;
+        ioctlsocket((oxl_sock_t)fd, FIONBIO, &nb);
+        rc = connect((oxl_sock_t)fd, (struct sockaddr *)&a, sizeof a);
+        if (rc == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+            pfd.fd = (SOCKET)fd;
+            pfd.events = POLLOUT;
+            pfd.revents = 0;
+            rc = WSAPoll(&pfd, 1, (INT)tmo_ms);
+            if (rc == 1) {
+                getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR, (char *)&err, &el);
+                rc = err == 0 ? 0 : SOCKET_ERROR;
+            } else if (rc == 0) {
+                err = WSAETIMEDOUT;
+                rc = SOCKET_ERROR;
+            } else {
+                err = WSAGetLastError();
+                rc = SOCKET_ERROR;
+            }
+        } else if (rc == SOCKET_ERROR) {
+            err = WSAGetLastError();
+        }
+        nb = 0;
+        ioctlsocket((oxl_sock_t)fd, FIONBIO, &nb);
+        return rc == 0 ? 0 : -(int64_t)(err ? err : WSAGetLastError());
+    }
+#else
+    {
+        int fl = fcntl((int)fd, F_GETFL, 0);
+        struct pollfd pfd;
+        fcntl((int)fd, F_SETFL, fl | O_NONBLOCK);
+        rc = connect((int)fd, (struct sockaddr *)&a, sizeof a);
+        if (rc < 0 && errno == EINPROGRESS) {
+            pfd.fd = (int)fd;
+            pfd.events = POLLOUT;
+            pfd.revents = 0;
+            rc = poll(&pfd, 1, (int)tmo_ms);
+            if (rc == 1) {
+                err = 0;
+                getsockopt((int)fd, SOL_SOCKET, SO_ERROR, &err, &el);
+                rc = err == 0 ? 0 : -1;
+            } else if (rc == 0) {
+                err = ETIMEDOUT;
+                rc = -1;
+            } else {
+                err = errno;
+                rc = -1;
+            }
+        } else if (rc < 0) {
+            err = errno;
+        }
+        fcntl((int)fd, F_SETFL, fl);
+        return rc == 0 ? 0 : -(int64_t)(err ? err : errno);
+    }
+#endif
+}
+
 /* portable receive timeout — SO_RCVTIMEO's constant differs by OS */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
 #ifdef _WIN32
@@ -2624,20 +2697,24 @@ int64_t rt_sock_accept(int64_t fd) {
 
 /* POSIX read/write/close have no socket counterpart on Win32
  * (recv/send/closesocket live in ws2_32), so .oxl code names these
- * instead of libc directly */
-int64_t rt_sock_read(int64_t fd, void *buf, int64_t n) {
+ * instead of libc directly. RtSlice + -errno: the S2 fd contract. */
+int64_t rt_sock_read(int64_t fd, RtSlice b) {
 #ifdef _WIN32
-    return recv((SOCKET)fd, (char *)buf, (int)n, 0);
+    int n = recv((SOCKET)fd, (char *)b.ptr, (int)b.len, 0);
+    return n < 0 ? -(int64_t)WSAGetLastError() : (int64_t)n;
 #else
-    return read((int)fd, buf, (size_t)n);
+    ssize_t n = read((int)fd, b.ptr, (size_t)b.len);
+    return n < 0 ? -(int64_t)errno : (int64_t)n;
 #endif
 }
 
-int64_t rt_sock_write(int64_t fd, const char *buf, int64_t n) {
+int64_t rt_sock_write(int64_t fd, RtSlice b) {
 #ifdef _WIN32
-    return send((SOCKET)fd, (const char *)buf, (int)n, 0);
+    int n = send((SOCKET)fd, (const char *)b.ptr, (int)b.len, 0);
+    return n < 0 ? -(int64_t)WSAGetLastError() : (int64_t)n;
 #else
-    return write((int)fd, buf, (size_t)n);
+    ssize_t n = write((int)fd, b.ptr, (size_t)b.len);
+    return n < 0 ? -(int64_t)errno : (int64_t)n;
 #endif
 }
 

@@ -186,6 +186,9 @@ already in sync tidies offline.
 | `tests/io_test.oxl` | `std/io`, `std/bytes`, `std/bufio`, `std/strconv`, `std/fmt` end-to-end |
 | `tests/util_test.oxl` | `std/path`+`filepath`, `cmp`/`sort`/`slices`/`maps`, `math`+`rand`, `unicode/utf8` |
 | `tests/flaglog_test.oxl` | `std/flag` registration/usage/parse + `std/log` level/line shape |
+| `tests/enc_test.oxl` | `std/encoding/{base64,hex,binary,csv}` RFC vectors + round-trips |
+| `tests/hash_test.oxl`, `tests/crypto_test.oxl` | `std/hash` one-shots + `crypto/{sha256,md5,hmac}` published vectors |
+| `tests/net_test.oxl`, `tests/httpclient_test.oxl` | `std/net` loopback dial/listen + `net/http` client get/post |
 | `examples/gui-todo/` | GTK todo app over `extern fn` FFI (see `docs/gui-pilot.md`) |
 | `bootstrap/cmd/lex` | **self-host**: the language's lexer written in the language |
 | `bootstrap/parser/` | **self-host**: the language's parser written in the language — parses itself, zero skips |
@@ -206,7 +209,7 @@ curl localhost:8080/items                      # → {"items":[{"id":1,"name":"w
 oxl/          the compiler (Rust): lexer → parser → check → codegen → C → cc
 runtime/       rt.c/rt.h — arenas, ObjHdr checks, scopes/traps, executor, channels
 docs/          design doc, semantics annex, prototype report
-std/           the standard library, written in the language (strings, testing, http/net, json, sync, time, os, errors, io, bytes, bufio, fmt, strconv, path, filepath, sort, slices, maps, cmp, math, rand, unicode/utf8, flag, log, collections)
+std/           the standard library, written in the language (strings, testing, http/net, json, csv, base64, hex, binary, sync, time, os, errors, io, bytes, bufio, fmt, strconv, path, filepath, sort, slices, maps, cmp, math, rand, unicode/utf8, flag, log, net, net/http, hash, crypto/{sha256,md5,hmac}, collections)
 bootstrap/     self-host components — lexlib, parser, check libraries + cmd/ drivers (docs/self-hosting.md)
 oxl.mod        this repo's module manifest (`module oxl`)
 examples/      pilot programs (see above)

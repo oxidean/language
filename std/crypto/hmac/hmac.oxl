@@ -1,0 +1,85 @@
+package hmac
+
+// std/crypto/hmac — RFC 2104 HMAC over any hash.Hash. Pure .oxl:
+// key pads to blocksize (long keys hash first), inner/outer hashes
+// stream (key^0x36)|msg and (key^0x5c)|inner.
+import "std/hash"
+
+/// Hmac is an incremental HMAC state — implements hash.Hash.
+struct Hmac {
+    inner: hash.Hash,
+    outer: hash.Hash,
+    ipad: []byte,
+    opad: []byte,
+    bs: int,
+}
+
+/// new builds an HMAC keyed hasher — Go's hmac.New(h, key): `hf` is a
+/// hash factory (sha256.new, md5.new), `key` the raw key bytes.
+fn new(hf: fn() -> hash.Hash, key: []byte) -> hash.Hash {
+    inner := hf()
+    outer := hf()
+    bs := inner.blocksize()
+    // key into exactly bs bytes: over-long keys hash down (RFC 2104
+    // step 1), then zero-pad to the block boundary
+    kb := mkslice(byte, bs)
+    i := 0
+    if len(key) > bs {
+        k3 := hf()
+        [k3n, k3e] = k3.write(key)
+        dk := k3.sum(nil)
+        for i < bs {
+            v := 0
+            if i < len(dk) {
+                v = dk[i]
+            }
+            kb[i] = v
+            i = i + 1
+        }
+    } else {
+        for i < len(key) {
+            kb[i] = key[i]
+            i = i + 1
+        }
+    }
+    ipad := mkslice(byte, bs)
+    opad := mkslice(byte, bs)
+    i = 0
+    for i < bs {
+        ipad[i] = kb[i] ^ 54
+        opad[i] = kb[i] ^ 92
+        i = i + 1
+    }
+    [in, ie] = inner.write(ipad)
+    [on, oe] = outer.write(opad)
+    m := Hmac{inner: inner, outer: outer, ipad: ipad, opad: opad, bs: bs}
+    return m.ashash()
+}
+
+fn (h mut Hmac) write(b: []byte) -> [int, err] {
+    return h.inner.write(b)
+}
+
+fn (h mut Hmac) sum(b: []byte) -> own []byte {
+    // Go's Sum: append inner's digest to b, then outer(opad|that)
+    d := h.inner.sum(b)
+    h.outer.reset()
+    [w1, e1] = h.outer.write(h.opad)
+    [w2, e2] = h.outer.write(d[len(b):])
+    return h.outer.sum(d[0:len(b)])
+}
+
+fn (h mut Hmac) reset() {
+    h.inner.reset()
+    h.outer.reset()
+    [w1, e1] = h.inner.write(h.ipad)
+    [w2, e2] = h.outer.write(h.opad)
+}
+
+fn (h mut Hmac) blocksize() -> int {
+    return h.bs
+}
+
+fn (h Hmac) ashash() -> hash.Hash {
+    return h
+}

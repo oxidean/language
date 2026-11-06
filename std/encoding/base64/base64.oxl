@@ -1,0 +1,172 @@
+package base64
+
+// std/encoding/base64 — RFC 4648 §4 (std alphabet, padded) plus the
+// raw (unpadded) and URL-safe (-_) variants Go ships. Decoders
+// reject non-alphabet bytes, bad padding, and truncated groups.
+import "std/errors"
+
+let STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+let URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+fn enc_body(alpha: str, b: []byte, pad: bool) -> str {
+    out := ""
+    i := 0
+    for i + 3 <= len(b) {
+        n := b[i] * 65536 + b[i + 1] * 256 + b[i + 2]
+        out = out + substr(alpha, n / 262144, n / 262144 + 1) + substr(alpha, n / 4096 % 64, n / 4096 % 64 + 1) + substr(alpha, n / 64 % 64, n / 64 % 64 + 1) + substr(alpha, n % 64, n % 64 + 1)
+        i = i + 3
+    }
+    rem := len(b) - i
+    if rem == 1 {
+        n := b[i] * 65536
+        out = out + substr(alpha, n / 262144, n / 262144 + 1) + substr(alpha, n / 4096 % 64, n / 4096 % 64 + 1)
+        if pad {
+            out = out + "=="
+        }
+    }
+    if rem == 2 {
+        n := b[i] * 65536 + b[i + 1] * 256
+        out = out + substr(alpha, n / 262144, n / 262144 + 1) + substr(alpha, n / 4096 % 64, n / 4096 % 64 + 1) + substr(alpha, n / 64 % 64, n / 64 % 64 + 1)
+        if pad {
+            out = out + "="
+        }
+    }
+    return out
+}
+
+/// encode returns padded std-alphabet base64 of b.
+fn encode(b: []byte) -> str {
+    return enc_body(STD, b, true)
+}
+
+/// encode_raw is encode without '=' padding.
+fn encode_raw(b: []byte) -> str {
+    return enc_body(STD, b, false)
+}
+
+/// url_encode is encode with the URL-safe alphabet.
+fn url_encode(b: []byte) -> str {
+    return enc_body(URL, b, true)
+}
+
+/// url_encode_raw is url_encode without padding.
+fn url_encode_raw(b: []byte) -> str {
+    return enc_body(URL, b, false)
+}
+
+fn val(alpha: str, c: int) -> int {
+    i := 0
+    for i < 64 {
+        if byteat(alpha, i) == c {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn dec_body(alpha: str, s: str, pad: bool) -> [own []byte, err] {
+    end := len(s)
+    pads := 0
+    if pad {
+        for end > 0 && byteat(s, end - 1) == 61 {
+            end = end - 1
+            pads = pads + 1
+        }
+        if pads > 2 || (len(s) - pads) % 4 == 1 {
+            return nil, errors.new("base64: bad padding")
+        }
+        // '=' may only trail — a mid-string '=' corrupts alignment
+        j := 0
+        for j < end {
+            if byteat(s, j) == 61 {
+                return nil, errors.new("base64: padding not at end")
+            }
+            j = j + 1
+        }
+        // the padded total must be a multiple of 4 — `end` itself is
+        // legally 2 or 3 mod 4 once '=' is stripped
+        if len(s) % 4 != 0 {
+            return nil, errors.new("base64: truncated input")
+        }
+    } else if end % 4 == 1 {
+        return nil, errors.new("base64: truncated input")
+    }
+    out := mkslice(byte, end * 3 / 4 + 2)
+    oi := 0
+    i := 0
+    for i + 4 <= end {
+        a := val(alpha, byteat(s, i))
+        b := val(alpha, byteat(s, i + 1))
+        c := val(alpha, byteat(s, i + 2))
+        d := val(alpha, byteat(s, i + 3))
+        if a < 0 || b < 0 || c < 0 || d < 0 {
+            return nil, errors.new("base64: invalid byte in input")
+        }
+        n := a * 262144 + b * 4096 + c * 64 + d
+        out[oi] = n / 65536
+        out[oi + 1] = n / 256 % 256
+        out[oi + 2] = n % 256
+        oi = oi + 3
+        i = i + 4
+    }
+    rem := end - i
+    if rem == 2 {
+        a := val(alpha, byteat(s, i))
+        b := val(alpha, byteat(s, i + 1))
+        if a < 0 || b < 0 {
+            return nil, errors.new("base64: invalid byte in input")
+        }
+        n := a * 262144 + b * 4096
+        out[oi] = n / 65536
+        oi = oi + 1
+    }
+    if rem == 3 {
+        a := val(alpha, byteat(s, i))
+        b := val(alpha, byteat(s, i + 1))
+        c := val(alpha, byteat(s, i + 2))
+        if a < 0 || b < 0 || c < 0 {
+            return nil, errors.new("base64: invalid byte in input")
+        }
+        n := a * 262144 + b * 4096 + c * 64
+        out[oi] = n / 65536
+        out[oi + 1] = n / 256 % 256
+        oi = oi + 2
+    }
+    return new(out[0:oi]), nil
+}
+
+/// decode parses padded std-alphabet base64.
+fn decode(s: str) -> [own []byte, err] {
+    return dec_body(STD, s, true)
+}
+
+/// decode_raw parses unpadded base64 — '=' is rejected inside input.
+fn decode_raw(s: str) -> [own []byte, err] {
+    j := 0
+    for j < len(s) {
+        if byteat(s, j) == 61 {
+            return nil, errors.new("base64: raw input has padding")
+        }
+        j = j + 1
+    }
+    return dec_body(STD, s, false)
+}
+
+/// url_decode parses padded URL-safe base64.
+fn url_decode(s: str) -> [own []byte, err] {
+    return dec_body(URL, s, true)
+}
+
+/// url_decode_raw parses unpadded URL-safe base64.
+fn url_decode_raw(s: str) -> [own []byte, err] {
+    j := 0
+    for j < len(s) {
+        if byteat(s, j) == 61 {
+            return nil, errors.new("base64: raw input has padding")
+        }
+        j = j + 1
+    }
+    return dec_body(URL, s, false)
+}

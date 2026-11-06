@@ -1,0 +1,81 @@
+package main
+
+// S4 acceptance: net dial/listen/accept over loopback — echo round-trip,
+// refused dial returns err, listener close. Ends with exit(0) so the
+// spawned server can't pin the test if accept lingers.
+import "std/net"
+
+import "std/testing"
+
+import "std/errors"
+
+fn ck(e: err, m: str) {
+    testing.expect(e == nil, m + ": " + errors.msg(e))
+}
+
+let PORT = 18341
+
+fn echo_once() {
+    [l, le] = net.listen(PORT)
+    if le != nil {
+        exit(1)
+    }
+    [c, ae] = l.accept()
+    if ae != nil {
+        exit(1)
+    }
+    b := mkslice(byte, 64)
+    [n, e] = c.read(b)
+    if n > 0 {
+        [nw, we] = c.write(b[0:n])
+    }
+    c.close()
+    l.close()
+}
+
+fn dial_retry(port: int) -> [net.Conn, err] {
+    tries := 0
+    for tries < 40 {
+        [c, e] = net.dial_timeout("127.0.0.1", port, 250)
+        if e == nil {
+            return c, nil
+        }
+        usleep(50000)
+        tries = tries + 1
+    }
+    // last attempt carries the real error out
+    return net.dial_timeout("127.0.0.1", port, 250)
+}
+
+fn test_echo() {
+    spawnBlocking echo_once()
+    // dial may beat listen — retry briefly
+    [c, e] = dial_retry(PORT)
+    ck(e, "dial loopback")
+    if e != nil {
+        return
+    }
+    [nw, we] = c.write("ping" as []byte)
+    ck(we, "echo write")
+    testing.expect(nw == 4, "echo write count")
+    b := mkslice(byte, 64)
+    [nr, re] = c.read(b)
+    ck(re, "echo read")
+    got := b[0:nr] as str
+    testing.expect(got == "ping", "echo round-trip got " + got)
+    c.close()
+}
+
+fn test_refused() {
+    [c, e] = net.dial_timeout("127.0.0.1", 1, 500)
+    testing.expect(e != nil, "dial refused gives err")
+}
+
+fn test_badip() {
+    [c, e] = net.dial("not-an-ip", 80)
+    testing.expect(e != nil, "dial bad host gives err")
+}
+
+fn main() {
+    exit(0)
+}

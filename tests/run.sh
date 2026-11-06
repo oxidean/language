@@ -167,6 +167,38 @@ grep -q "Usage of cli:" <<<"$errout" || { echo "FAIL cli bad-flag usage: $errout
 out=$("$OXL" run examples/cli/main.oxl -- -- Jesse)
 [ "$out" = "hello, Jesse" ] || { echo "FAIL cli -- positional: $out"; exit 1; }
 
+echo "== oxl test: net & enc (s4) =="
+out=$("$OXL" test tests/enc_test.oxl)
+printf '%s
+' "$out" >&2
+for t in test_base64 test_hex test_binary test_csv; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL enc: $out"; exit 1; }
+done
+out=$("$OXL" test tests/hash_test.oxl)
+printf '%s
+' "$out" >&2
+for t in test_fnv test_adler_crc test_incremental; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL hash: $out"; exit 1; }
+done
+out=$("$OXL" test tests/crypto_test.oxl)
+printf '%s
+' "$out" >&2
+for t in test_sha256 test_md5 test_hmac; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL crypto: $out"; exit 1; }
+done
+out=$("$OXL" test tests/net_test.oxl)
+printf '%s
+' "$out" >&2
+for t in test_echo test_refused test_badip; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL net: $out"; exit 1; }
+done
+# the client test runs under `oxl run`: it exits the process to end
+# serve()'s accept loop, so the oxl-test task drain can't hang on it
+out=$("$OXL" run tests/httpclient_test.oxl)
+printf '%s
+' "$out" >&2
+grep -q "httpclient done" <<<"$out" || { echo "FAIL httpclient: $out"; exit 1; }
+
 echo "== stdmods (json/sync/time) =="
 out=$("$OXL" run tests/stdmods_test.oxl)
 grep -q '"name":"widget"' <<<"$out" || { echo "FAIL stdmods json: $out"; exit 1; }
@@ -758,6 +790,24 @@ printf '%s
 ' "$out" >&2
 for t in test_path test_filepath test_cmp test_sort test_slices test_maps test_math test_rand test_utf8; do
     grep -q "$t ... ok" <<<"$out" || { echo "FAIL codegen util: $out"; exit 1; }
+done
+# s4 enc/hash/crypto through the self-hosted emitter + cc — exercises
+# [][]str return emission (csv.read_all) and hash/crypto under -test
+for tf in enc hash crypto; do
+    "$OXL" run bootstrap/cmd/codegen -- --test "tests/${tf}_test.oxl" > "$cgen_dir/$tf.c"
+    "$CC" -O2 $THREAD_FLAG -Iruntime "$cgen_dir/$tf.c" runtime/rt.c $NET_LIBS -o "$cgen_dir/$tf$EXE" || { echo "FAIL codegen cc $tf"; exit 1; }
+    "$cgen_dir/$tf$EXE" > "$cgen_dir/$tf.out"
+    printf '%s
+' "$(cat "$cgen_dir/$tf.out")" >&2
+done
+for t in test_base64 test_hex test_binary test_csv; do
+    grep -q "$t ... ok" "$cgen_dir/enc.out" || { echo "FAIL codegen enc $t"; cat "$cgen_dir/enc.out"; exit 1; }
+done
+for t in test_fnv test_adler_crc test_incremental; do
+    grep -q "$t ... ok" "$cgen_dir/hash.out" || { echo "FAIL codegen hash $t"; cat "$cgen_dir/hash.out"; exit 1; }
+done
+for t in test_sha256 test_md5 test_hmac; do
+    grep -q "$t ... ok" "$cgen_dir/crypto.out" || { echo "FAIL codegen crypto $t"; cat "$cgen_dir/crypto.out"; exit 1; }
 done
 # http pilot through the self-hosted codegen: the Handler param is an
 # iface value, exercising the RtIface/vtab emission end to end
