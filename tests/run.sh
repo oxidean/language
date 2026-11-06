@@ -561,6 +561,30 @@ printf 'package main\nimport "file://%s/nosuch/pkg"\n\nfn main() {}\n' "$tv" > "
 printf 'module file://%s/app\noxl 0.3\n' "$tv" > "$tv/app/oxl.mod" && rm -f "$tv/app/oxl.sum"
 ( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy5" 2>&1 && { echo "FAIL tidy5 accepted"; cat "$tv/tidy5"; exit 1; }
 grep -q 'no required module provides package' "$tv/tidy5" || { echo "FAIL tidy5 text"; cat "$tv/tidy5"; exit 1; }
+# restore keeps the floor: a require pinned at v1.0.0 whose MVS
+# selection is bumped to v1.2.0 by a dependency's own manifest gets
+# re-fetched at the SELECTED version — but the require line is a
+# minimum and must not move; only the missing sums are rewritten
+mkdir -p "$tv/escdep/util" "$tv/esclib/leaf" "$tv/escapp/escapp"
+( cd "$tv/esclib" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/esclib\noxl 0.3\n' "$tv" > oxl.mod
+  printf 'package leaf\n\nfn leafval() -> int { return 1 }\n' > leaf/leaf.oxl
+  git add -A && git commit -qm v1 && git tag v1.0.0
+  printf 'package leaf\n\nfn leafval() -> int { return 2 }\n' > leaf/leaf.oxl
+  git add -A && git commit -qm v2 && git tag v1.2.0 )
+( cd "$tv/escdep" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/escdep\noxl 0.3\nrequire file://%s/esclib v1.2.0\n' "$tv" "$tv" > oxl.mod
+  printf 'package util\nimport "file://%s/esclib/leaf"\n\nfn answer() -> int { return leaf.leafval() + 40 }\n' "$tv" > util/util.oxl
+  git add -A && git commit -qm dep && git tag v1.0.0 )
+printf 'package main\nimport "file://%s/escdep/util"\nimport "file://%s/esclib/leaf"\n\nfn main() { println("esc=" + itoa(util.answer()) + "/" + itoa(leaf.leafval())) }\n' "$tv" "$tv" > "$tv/escapp/escapp/main.oxl"
+( cd "$tv/escapp" && printf 'module file://%s/escapp\noxl 0.3\n\nrequire file://%s/escdep v1.0.0\nrequire file://%s/esclib v1.0.0\n' "$tv" "$tv" "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/escdep@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/esclib@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy6" 2>&1 || { echo "FAIL tidy6 rc"; cat "$tv/tidy6"; exit 1; }
+grep -q "file://$tv/esclib v1.0.0" "$tv/escapp/oxl.mod" || { echo "FAIL floor bumped"; cat "$tv/escapp/oxl.mod"; exit 1; }
+grep -q "file://$tv/esclib v1.2.0 h1:" "$tv/escapp/oxl.sum" || { echo "FAIL restore sums"; cat "$tv/escapp/oxl.sum"; exit 1; }
+( cd "$tv/escapp" && OXLMODCACHE="$tv/cache" "$OXL" build escapp -o "$tv/escbin" ) || { echo "FAIL esc build"; exit 1; }
+[ "$("$tv/escbin")" = "esc=42/2" ] || { echo "FAIL esc run"; "$tv/escbin"; exit 1; }
 ;;
 esac
 

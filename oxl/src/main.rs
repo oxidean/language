@@ -1902,6 +1902,19 @@ fn pin_require(
     slot: &Path,
 ) -> Result<Option<String>, String> {
     let old = upsert_require(mtext, mp, &f.ver)?;
+    pin_sums(sums, mp, f, slot)?;
+    Ok(old)
+}
+
+/// record the two oxl.sum lines for a fetched module — split from
+/// pin_require so the tidy restore branch can refresh sums without
+/// moving the require floor
+fn pin_sums(
+    sums: &mut Vec<modcache::SumLine>,
+    mp: &str,
+    f: &fetch::Fetched,
+    slot: &Path,
+) -> Result<(), String> {
     sums.retain(|l| !(l.path == mp && l.ver == f.ver));
     sums.push(modcache::SumLine {
         path: mp.to_string(),
@@ -1915,7 +1928,7 @@ fn pin_require(
         is_mod: true,
         h1: modcache::mod_h1(mp, &f.ver, &f.manifest),
     });
-    Ok(old)
+    Ok(())
 }
 
 /// filename-safe fragment for the tmp extraction dir
@@ -2373,7 +2386,8 @@ fn tidy_satisfy(
         if has_sums {
             modcache::verify_slot(&slot, mp, &mv, sums)?;
         } else {
-            pin_require(mtext, sums, mp, &f, &slot)?;
+            // sums only — the require line keeps its floor
+            pin_sums(sums, mp, &f, &slot)?;
         }
         report.push(format!("fetched {mp}@{mv}"));
         if rest.is_empty() || slot.join(rest).is_dir() {
