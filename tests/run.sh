@@ -534,7 +534,7 @@ grep -q 'already exists' "$tv/init2" || { echo "FAIL re-init text"; cat "$tv/ini
 ( cd "$tv/app" && printf 'module file://%s/app\noxl 0.3\n' "$tv" > oxl.mod
   OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy1" 2>&1 || { echo "FAIL tidy rc"; cat "$tv/tidy1"; exit 1; }
 grep -q "added file://$tv/dep@" "$tv/tidy1" || { echo "FAIL tidy fetch"; cat "$tv/tidy1"; exit 1; }
-grep -q "require file://$tv/leafpkg v1.0.0 // indirect" "$tv/app/oxl.mod" || { echo "FAIL tidy indirect"; cat "$tv/app/oxl.mod"; exit 1; }
+grep -q "file://$tv/leafpkg v1.0.0 // indirect" "$tv/app/oxl.mod" || { echo "FAIL tidy indirect"; cat "$tv/app/oxl.mod"; exit 1; }
 [ "$(grep -c ' h1:' "$tv/app/oxl.sum")" = 4 ] || { echo "FAIL tidy sums"; cat "$tv/app/oxl.sum"; exit 1; }
 ( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" build app -o "$tv/appbin" ) || { echo "FAIL tidy build"; exit 1; }
 [ "$("$tv/appbin")" = "answer=42" ] || { echo "FAIL tidy run"; "$tv/appbin"; exit 1; }
