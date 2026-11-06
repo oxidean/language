@@ -330,8 +330,10 @@ int64_t rt_sock_listen(int64_t fd, int64_t backlog);             /* listen() */
 int64_t rt_sock_accept(int64_t fd);                            /* accept() */
 int64_t rt_sock_read(int64_t fd, RtSlice b);  /* read | recv, portable, -errno */
 int64_t rt_sock_write(int64_t fd, RtSlice b); /* write | send, -errno */
+int64_t rt_sock_port(int64_t fd);              /* getsockname -> bound port */
 int64_t rt_sock_close(int64_t fd);                       /* close | closesocket */
 int64_t rt_set_rcvtimo(int64_t fd, int64_t secs);      /* SO_RCVTIMEO, portable */
+int64_t rt_set_rcvtimo_ms(int64_t fd, int64_t ms);
 int64_t rt_set_sndtimo(int64_t fd, int64_t secs);      /* SO_SNDTIMEO, portable */
 int64_t rt_set_reuseaddr(int64_t fd);                  /* SO_REUSEADDR, portable */
 int64_t rt_bind_any(int64_t fd, int64_t port);         /* bind INADDR_ANY, portable */

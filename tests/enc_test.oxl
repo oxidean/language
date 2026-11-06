@@ -84,6 +84,14 @@ fn test_binary() {
     testing.expect(b[0] != b[4], "le vs be byte order differs")
     binary.put_le_u64(b, 0, 81985529216486895)
     testing.expect(binary.le_u64(b, 0) == 81985529216486895, "le_u64 round-trip")
+    // negative values keep the two's-complement pattern — a signed
+    // % / / split at the 32-bit seam emits wrong halves otherwise
+    binary.put_le_u64(b, 0, -1)
+    testing.expect(b[0] == 255 && b[3] == 255 && b[4] == 255 && b[7] == 255, "le_u64 -1 layout")
+    testing.expect(binary.le_u64(b, 0) == -1, "le_u64 -1 round-trip")
+    binary.put_be_u64(b, 0, -2)
+    testing.expect(b[0] == 255 && b[3] == 255 && b[4] == 255 && b[7] == 254, "be_u64 -2 layout")
+    testing.expect(binary.be_u64(b, 0) == -2, "be_u64 -2 round-trip")
 }
 
 fn test_csv() {

@@ -67,8 +67,12 @@ fn put_le_u32(b: []byte, off: int, v: int) {
 
 /// put_le_u64 stores v little-endian at off.
 fn put_le_u64(b: []byte, off: int, v: int) {
-    put_le_u32(b, off, v % 4294967296)
-    put_le_u32(b, off + 4, v / 4294967296)
+    // & keeps the two's-complement pattern — % and / truncate toward
+    // zero, so negatives would emit wrong bytes split at the word seam
+    lo := v & 4294967295
+    hi := (v - lo) / 4294967296 & 4294967295
+    put_le_u32(b, off, lo)
+    put_le_u32(b, off + 4, hi)
 }
 
 /// put_be_u16 stores v big-endian at off.
@@ -89,6 +93,8 @@ fn put_be_u32(b: []byte, off: int, v: int) {
 
 /// put_be_u64 stores v big-endian at off.
 fn put_be_u64(b: []byte, off: int, v: int) {
-    put_be_u32(b, off, v / 4294967296)
-    put_be_u32(b, off + 4, v % 4294967296)
+    lo := v & 4294967295
+    hi := (v - lo) / 4294967296 & 4294967295
+    put_be_u32(b, off, hi)
+    put_be_u32(b, off + 4, lo)
 }

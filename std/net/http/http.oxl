@@ -13,6 +13,8 @@ package http
 // dial/read budget. HTTPS stays parked (no TLS — see impl-s4).
 import "std/net"
 
+import "std/io"
+
 import "std/errors"
 
 import "std/strconv"
@@ -272,6 +274,11 @@ fn read_request(c: net.Conn) -> ReqRead {
         if e != nil || n <= 0 {
             return ReqRead{status: 400, req: "", body: ""}
         }
+        if n > cl - have {
+            // a read can return pipelined bytes past the length — the
+            // copy must stop at cl or the index walks off bbuf's end
+            n = cl - have
+        }
         chunk := scratch[0:n] as str
         j := 0
         for j < n {
@@ -404,6 +411,76 @@ fn parse_url(url: str) -> [Url, err] {
     return Url{host: host, port: port, path: path}, nil
 }
 
+/// hdr_of extracts one header value from the response head —
+/// `lowered` is the case-folded copy of resp[0:he] used for matching;
+/// the value keeps the original casing off resp, trimmed of SP/TAB.
+fn hdr_of(resp: str, lowered: str, key: str) -> str {
+    at := find_from(lowered, "\r\n" + key + ":", 0)
+    if at < 0 {
+        // a first-line header would lack the leading CRLF — only the
+        // status line sits there, so treat absence as absent
+        return ""
+    }
+    val := substr(resp, at + 2 + len(key) + 1, len(resp))
+    e2 := find(val, "\r\n")
+    if e2 > 0 {
+        val = substr(val, 0, e2)
+    }
+    lo := 0
+    for lo < len(val) && (byteat(val, lo) == 32 || byteat(val, lo) == 9) {
+        lo = lo + 1
+    }
+    hi := len(val)
+    for hi > lo && (byteat(val, hi - 1) == 32 || byteat(val, hi - 1) == 9) {
+        hi = hi - 1
+    }
+    if hi <= lo {
+        return ""
+    }
+    return substr(val, lo, hi)
+}
+
+/// unchunk decodes a transfer-encoding: chunked body — size lines,
+/// data runs, and any trailers up to the 0\r\n\r\n terminator.
+fn unchunk(b: str) -> [str, err] {
+    out := mkslice(byte, 0)
+    pos := 0
+    for true {
+        nl := find_from(b, "\r\n", pos)
+        if nl < 0 {
+            return "", errors.new("http: truncated chunk size")
+        }
+        szs := substr(b, pos, nl)
+        semi := find(szs, ";")
+        if semi >= 0 {
+            szs = substr(szs, 0, semi)
+        }
+        [sz, se] = strconv.parseint(szs, 16)
+        if se != nil || sz < 0 {
+            return "", errors.new("http: bad chunk size " + szs)
+        }
+        if sz == 0 {
+            // trailer fields up to the blank line are legal but carry
+            // nothing we expose — the body is complete at this marker
+            return out as str, nil
+        }
+        data := nl + 2
+        if data + sz > len(b) {
+            return "", errors.new("http: truncated chunk data")
+        }
+        i := 0
+        for i < sz {
+            out = push(out, byteat(b, data + i))
+            i = i + 1
+        }
+        pos = data + sz
+        if pos + 1 >= len(b) || byteat(b, pos) != 13 || byteat(b, pos + 1) != 10 {
+            return "", errors.new("http: missing CRLF after chunk")
+        }
+        pos = pos + 2
+    }
+}
+
 /// default dial+read budget for the package-level get/post (ms)
 let CLIENT_MS = 30000
 
@@ -436,28 +513,45 @@ fn (cl ref Client) request(method: str, url: str, ctype: str, body: str) -> [Res
     }
     req = req + "\r\n" + body
     write_all(c, req)
-    // response: connection: close means read-until-EOF is well-defined
-    set_rcvtimo(c.rawfd(), 10)
+    // response: connection: close means read-until-EOF is well-defined.
+    // Each read carries only the *remaining* budget — a silent peer
+    // can't stretch the whole-request deadline by answering slowly.
     deadline := now_ms() + cl.tmo
     scratch := mkslice(byte, 8192)
-    resp := ""
+    out := mkslice(byte, 0)
     for true {
-        if now_ms() > deadline {
+        rem := deadline - now_ms()
+        if rem <= 0 {
             c.close()
             return bad, errors.new("http: read deadline exceeded")
         }
+        set_rcvtimo_ms(c.rawfd(), rem)
         [n, e] = c.read(scratch)
         if n > 0 {
-            resp = resp + scratch[0:n] as str
+            j := 0
+            for j < n {
+                // []byte growth is amortized; str concat would copy
+                // the accumulated prefix per read (quadratic)
+                out = push(out, scratch[j])
+                j = j + 1
+            }
+        }
+        if e == io.eof() {
+            break
         }
         if e != nil {
-            break
+            // a read error (timeout, reset) is not a clean close —
+            // the body may be truncated; fail, don't deliver it
+            c.close()
+            return bad, e
         }
         if n <= 0 {
-            break
+            c.close()
+            return bad, errors.new("http: connection closed mid-response")
         }
     }
     c.close()
+    resp := out as str
     he := find(resp, "\r\n\r\n")
     if he < 0 {
         return bad, errors.new("http: response never completed headers")
@@ -479,28 +573,37 @@ fn (cl ref Client) request(method: str, url: str, ctype: str, body: str) -> [Res
             code = v
         }
     }
-    // content-type out of the header block, case-insensitively
-    rctype := ""
     hdrs := lwr(substr(resp, 0, he))
-    ct := find_from(hdrs, "\r\ncontent-type:", 0)
-    if ct >= 0 {
-        val := substr(resp, ct + 16, len(resp))
-        e2 := find(val, "\r\n")
-        if e2 > 0 {
-            val = substr(val, 0, e2)
+    rctype := hdr_of(resp, hdrs, "content-type")
+    // framing: we sent HTTP/1.1 so a server may answer chunked, and a
+    // content-length shorter than what arrived means truncation got
+    // past the read loop — neither may slip through as a "body"
+    raw := substr(resp, he + 4, len(resp))
+    te := lwr(hdr_of(resp, hdrs, "transfer-encoding"))
+    rbody := ""
+    if find(te, "chunked") >= 0 {
+        [db, de] = unchunk(raw)
+        if de != nil {
+            return bad, de
         }
-        // trim surrounding spaces/tabs
-        lo := 0
-        for lo < len(val) && (byteat(val, lo) == 32 || byteat(val, lo) == 9) {
-            lo = lo + 1
+        rbody = db
+    } else {
+        clv := hdr_of(resp, hdrs, "content-length")
+        if len(clv) > 0 {
+            [cln, cle] = strconv.atoi(clv)
+            if cle != nil || cln < 0 {
+                return bad, errors.new("http: bad content-length " + clv)
+            }
+            if len(raw) < cln {
+                return bad, errors.new("http: truncated body — content-length " + clv + ", got " + itoa(len(raw)))
+            }
+            if len(raw) > cln {
+                raw = substr(raw, 0, cln)
+            }
         }
-        hi := len(val)
-        for hi > lo && (byteat(val, hi - 1) == 32 || byteat(val, hi - 1) == 9) {
-            hi = hi - 1
-        }
-        rctype = substr(val, lo, hi)
+        rbody = raw
     }
-    return Resp{status: code, body: substr(resp, he + 4, len(resp)), ctype: rctype}, nil
+    return Resp{status: code, body: rbody, ctype: rctype}, nil
 }
 
 fn (cl ref Client) get(url: str) -> [Resp, err] {

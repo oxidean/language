@@ -93,4 +93,20 @@ fn test_hmac() {
     testing.expect(hx(h4.sum(nil)) == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", "hmac-sha256 c2")
 }
 
+// retained hasher state must be heap-backed: a write inside a nested
+// scope pushes into the scope arena without it, and a later sum reads
+// freed storage (heap flag rides the header through views + growth)
+fn test_scope_escape() {
+    h := sha256.new()
+    scope {
+        [_w_s, _e_s] = h.write("abc" as []byte)
+    }
+    testing.expect(hx(h.sum(nil)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256 across scope")
+    m := hmac.new(sha256.new, "key" as []byte)
+    scope {
+        [_w_m, _e_m] = m.write("abc" as []byte)
+    }
+    testing.expect(hx(m.sum(nil)) == "9c196e32dc0175f86f4b1cb89289d6619de6bee699e4c378e68309ed97a1a6ab", "hmac across scope")
+}
+
 fn main() {}

@@ -2645,6 +2645,20 @@ int64_t rt_set_rcvtimo(int64_t fd, int64_t secs) {
 #endif
 }
 
+/* ms-granularity receive timeout — the seconds form can't express
+ * the subsecond budget a deadline-driven caller needs */
+int64_t rt_set_rcvtimo_ms(int64_t fd, int64_t ms) {
+#ifdef _WIN32
+    DWORD tv = (DWORD)ms;
+    return setsockopt((oxl_sock_t)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+#else
+    struct timeval tv;
+    tv.tv_sec = (time_t)(ms / 1000);
+    tv.tv_usec = (suseconds_t)(ms % 1000) * 1000;
+    return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#endif
+}
+
 /* portable send timeout — pairs with rcvtimo: a client that stops
  * reading must not pin a connection slot inside write() */
 int64_t rt_set_sndtimo(int64_t fd, int64_t secs) {
@@ -2682,8 +2696,21 @@ int64_t rt_strlen(const char *s) { return (int64_t)strlen(s); }
  * with the .oxl-emitted prototypes, and on POSIX they're only safe
  * while <sys/socket.h> stays out of scope. The runtime owns every
  * socket-name binding (same reason rt_sigpipe_ignore exists). */
+/* macOS/BSD lack MSG_NOSIGNAL — SO_NOSIGPIPE on the socket is the
+ * per-peer equivalent; a no-op where the option doesn't exist */
+static void rt_nosigpipe(int64_t fd) {
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    setsockopt((oxl_sock_t)fd, SOL_SOCKET, SO_NOSIGPIPE, (const char *)&one, sizeof one);
+#else
+    (void)fd;
+#endif
+}
+
 int64_t rt_sock_open(int64_t domain, int64_t ty, int64_t proto) {
-    return (int64_t)socket((int)domain, (int)ty, (int)proto);
+    int64_t fd = (int64_t)socket((int)domain, (int)ty, (int)proto);
+    if (fd >= 0) rt_nosigpipe(fd);
+    return fd;
 }
 
 int64_t rt_sock_listen(int64_t fd, int64_t backlog) {
@@ -2692,7 +2719,9 @@ int64_t rt_sock_listen(int64_t fd, int64_t backlog) {
 
 /* NULL addr/len: the caller never reads the peer address */
 int64_t rt_sock_accept(int64_t fd) {
-    return (int64_t)accept((oxl_sock_t)fd, NULL, NULL);
+    int64_t c = (int64_t)accept((oxl_sock_t)fd, NULL, NULL);
+    if (c >= 0) rt_nosigpipe(c);
+    return c;
 }
 
 /* POSIX read/write/close have no socket counterpart on Win32
@@ -2713,9 +2742,25 @@ int64_t rt_sock_write(int64_t fd, RtSlice b) {
     int n = send((SOCKET)fd, (const char *)b.ptr, (int)b.len, 0);
     return n < 0 ? -(int64_t)WSAGetLastError() : (int64_t)n;
 #else
-    ssize_t n = write((int)fd, b.ptr, (size_t)b.len);
+    /* send() not write(): MSG_NOSIGNAL suppresses SIGPIPE on a reset
+     * peer so the caller gets -EPIPE instead of a killed process;
+     * SO_NOSIGPIPE (rt_nosigpipe) covers platforms without the flag */
+#ifdef MSG_NOSIGNAL
+    ssize_t n = send((int)fd, b.ptr, (size_t)b.len, MSG_NOSIGNAL);
+#else
+    ssize_t n = send((int)fd, b.ptr, (size_t)b.len, 0);
+#endif
     return n < 0 ? -(int64_t)errno : (int64_t)n;
 #endif
+}
+
+/* bound port back out of a socket — ephemeral binds (port 0) need
+ * getsockname to learn what the kernel picked */
+int64_t rt_sock_port(int64_t fd) {
+    struct sockaddr_in a;
+    socklen_t al = sizeof a;
+    if (getsockname((oxl_sock_t)fd, (struct sockaddr *)&a, &al) != 0) return -1;
+    return (int64_t)ntohs(a.sin_port);
 }
 
 int64_t rt_sock_close(int64_t fd) {

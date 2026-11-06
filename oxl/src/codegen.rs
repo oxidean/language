@@ -2211,7 +2211,7 @@ impl<'a> Gen<'a> {
             "byteat" | "substr" | "find" | "bufstr" | "poke8" | "poke16" | "poke32"
             | "sqlite_exec" | "sqlite_query" => format!("rt_{name}({})", j(argvs)),
             "atoi" | "mkbuf" | "htons" | "htonl" | "cstr" | "str" | "sqlite_open" | "sqlite_close"
-            | "sqlite_exec_bind" | "set_rcvtimo" | "set_sndtimo"
+            | "sqlite_exec_bind" | "set_rcvtimo" | "set_rcvtimo_ms" | "set_sndtimo"
             | "readfile" | "writefile" | "exit" | "mkshared" | "sget" | "sset" | "scas"
             | "sadd" | "now" | "now_ms" | "usleep" | "atof" | "ftoa" => {
                 format!("rt_{name}({})", j(argvs))
@@ -2610,8 +2610,8 @@ impl<'a> Gen<'a> {
             }
             let cargs: Vec<String> = args.iter().enumerate()
                 .map(|(i, a)| match ps.get(i) {
-                    Some(p) => self.conv(a, p),
-                    None => self.expr(a),
+                    Some(p) => self.conv_v(a, argvs[i].clone(), p),
+                    None => argvs[i].clone(),
                 })
                 .collect();
             let argl = if cargs.is_empty() {
@@ -2629,7 +2629,7 @@ impl<'a> Gen<'a> {
                 let want = self.enum_fields.get(name).cloned().unwrap_or_default();
                 let cargs: Vec<String> = args.iter().enumerate().map(|(i2, a)| {
                     let wt = want.get(i2).map(|(_, t)| t.clone()).unwrap_or(Ty::Unknown);
-                    self.conv(a, &wt)
+                    self.conv_v(a, argvs[i2].clone(), &wt)
                 }).collect();
                 return format!(
                     "(struct o_en_{}){{ .tag = {}, .u.v{} = (struct o_s_{}){{ {} }} }}",
@@ -2678,8 +2678,8 @@ impl<'a> Gen<'a> {
                         // nil/own into slice params emitted wrong C
                         let cargs: Vec<String> = args.iter().enumerate()
                             .map(|(i, a)| match params.get(i) {
-                                Some(p) => self.conv(a, p),
-                                None => self.expr(a),
+                                Some(p) => self.conv_v(a, argvs[i].clone(), p),
+                                None => argvs[i].clone(),
                             })
                             .collect();
                         let argl = if cargs.is_empty() {
@@ -2844,7 +2844,7 @@ impl<'a> Gen<'a> {
                                 // conv is a no-op for plain wants but
                                 // carries the iface wrap, nil->slice
                                 // zero, and own->slice deref cases
-                                self.conv(a, &pt)
+                                self.conv_v(a, argvs[i - usize::from(recv_e.is_some())].clone(), &pt)
                             };
                             let raw_at = self.expr_ty(a);
                             if pt == Ty::CStr && self.dt(&raw_at) == Ty::Str {

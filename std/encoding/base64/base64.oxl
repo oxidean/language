@@ -10,29 +10,38 @@ let STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 let URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 fn enc_body(alpha: str, b: []byte, pad: bool) -> str {
-    out := ""
+    // byte-buffered accumulation — string concat copies the growing
+    // prefix per group (quadratic on large inputs); one str cast at end
+    out := mkslice(byte, 0)
     i := 0
     for i + 3 <= len(b) {
         n := b[i] * 65536 + b[i + 1] * 256 + b[i + 2]
-        out = out + substr(alpha, n / 262144, n / 262144 + 1) + substr(alpha, n / 4096 % 64, n / 4096 % 64 + 1) + substr(alpha, n / 64 % 64, n / 64 % 64 + 1) + substr(alpha, n % 64, n % 64 + 1)
+        out = push(out, byteat(alpha, n / 262144))
+        out = push(out, byteat(alpha, n / 4096 % 64))
+        out = push(out, byteat(alpha, n / 64 % 64))
+        out = push(out, byteat(alpha, n % 64))
         i = i + 3
     }
     rem := len(b) - i
     if rem == 1 {
         n := b[i] * 65536
-        out = out + substr(alpha, n / 262144, n / 262144 + 1) + substr(alpha, n / 4096 % 64, n / 4096 % 64 + 1)
+        out = push(out, byteat(alpha, n / 262144))
+        out = push(out, byteat(alpha, n / 4096 % 64))
         if pad {
-            out = out + "=="
+            out = push(out, 61)
+            out = push(out, 61)
         }
     }
     if rem == 2 {
         n := b[i] * 65536 + b[i + 1] * 256
-        out = out + substr(alpha, n / 262144, n / 262144 + 1) + substr(alpha, n / 4096 % 64, n / 4096 % 64 + 1) + substr(alpha, n / 64 % 64, n / 64 % 64 + 1)
+        out = push(out, byteat(alpha, n / 262144))
+        out = push(out, byteat(alpha, n / 4096 % 64))
+        out = push(out, byteat(alpha, n / 64 % 64))
         if pad {
-            out = out + "="
+            out = push(out, 61)
         }
     }
-    return out
+    return out as str
 }
 
 /// encode returns padded std-alphabet base64 of b.

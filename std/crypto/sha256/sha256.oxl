@@ -130,9 +130,14 @@ fn fill_st(st: []int) {
 }
 
 fn mksha() -> Sha {
-    st := mkslice(int, 8)
+    // heap-backed retained state — a write inside a nested scope must
+    // not leave st/buf pointing into a freed arena (the heap flag
+    // rides the header through views and push growth). clone, not
+    // new(): `new` is this package's constructor name.
+    let st: []int = slices.clone(mkslice(int, 8))
     fill_st(st)
-    return Sha{st: st, buf: mkslice(byte, 0), total: 0}
+    let buf: []byte = slices.clone(mkslice(byte, 0))
+    return Sha{st: st, buf: buf, total: 0}
 }
 
 fn compress(st: []int, blk: []byte, off: int) {

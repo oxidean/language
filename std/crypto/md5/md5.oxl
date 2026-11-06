@@ -123,9 +123,10 @@ fn fill_st(st: []int) {
 }
 
 fn mkmd5() -> Md5 {
-    st := mkslice(int, 4)
+    let st: []int = slices.clone(mkslice(int, 4))
     fill_st(st)
-    return Md5{st: st, buf: mkslice(byte, 0), total: 0}
+    let buf: []byte = slices.clone(mkslice(byte, 0))
+    return Md5{st: st, buf: buf, total: 0}
 }
 
 // one 64-byte block; M words are little-endian

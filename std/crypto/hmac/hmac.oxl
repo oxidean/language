@@ -5,6 +5,8 @@ package hmac
 // stream (key^0x36)|msg and (key^0x5c)|inner.
 import "std/hash"
 
+import "std/slices"
+
 /// Hmac is an incremental HMAC state — implements hash.Hash.
 struct Hmac {
     inner: hash.Hash,
@@ -42,8 +44,10 @@ fn new(hf: fn() -> hash.Hash, key: []byte) -> hash.Hash {
             i = i + 1
         }
     }
-    ipad := mkslice(byte, bs)
-    opad := mkslice(byte, bs)
+    // heap-backed pads — they outlive the creating scope (clone, not
+    // new(): `new` is this package's constructor name)
+    let ipad: []byte = slices.clone(mkslice(byte, bs))
+    let opad: []byte = slices.clone(mkslice(byte, bs))
     i = 0
     for i < bs {
         ipad[i] = kb[i] ^ 54

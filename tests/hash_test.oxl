@@ -44,6 +44,13 @@ fn test_incremental() {
     s2 := h.sum(nil)
     testing.expect(binary.be_u32(s2, 0) == 2166136261, "fnv reset")
 
+    // fnv64's state goes negative (offset basis > int63) — sum must
+    // emit the unsigned pattern: "a" -> af63dc4c8601ec8c big-endian
+    h64 := hash.new_fnv1a64()
+    [_x, _y] = h64.write("a" as []byte)
+    s64 := h64.sum(nil)
+    testing.expect(binary.be_u64(s64, 0) == 0 - 5808556873153909620, "fnv64 sum keeps unsigned pattern")
+
     c := hash.new_crc32()
     [_a, _b] = c.write("12345" as []byte)
     [_c, _d] = c.write("6789" as []byte)

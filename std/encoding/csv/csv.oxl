@@ -108,11 +108,11 @@ fn read_all(s: str) -> [own [][]str, err] {
 /// format_record renders one record — fields quoting only when they
 /// contain a comma, quote, \n or \r (Go's minimal-quoting rule).
 fn format_record(fields: []str) -> str {
-    out := ""
+    out := mkslice(byte, 0)
     i := 0
     for i < len(fields) {
         if i > 0 {
-            out = out + ","
+            out = push(out, 44)
         }
         f := fields[i]
         need := false
@@ -125,32 +125,43 @@ fn format_record(fields: []str) -> str {
             j = j + 1
         }
         if need {
-            out = out + "\""
+            out = push(out, 34)
             j = 0
             for j < len(f) {
                 if byteat(f, j) == 34 {
-                    out = out + "\"\""
+                    out = push(out, 34)
+                    out = push(out, 34)
                 } else {
-                    out = out + substr(f, j, j + 1)
+                    out = push(out, byteat(f, j))
                 }
                 j = j + 1
             }
-            out = out + "\""
+            out = push(out, 34)
         } else {
-            out = out + f
+            j = 0
+            for j < len(f) {
+                out = push(out, byteat(f, j))
+                j = j + 1
+            }
         }
         i = i + 1
     }
-    return out
+    return out as str
 }
 
 /// format renders all records, \n-terminated per record.
 fn format(rows: [][]str) -> str {
-    out := ""
+    out := mkslice(byte, 0)
     i := 0
     for i < len(rows) {
-        out = out + format_record(rows[i]) + "\n"
+        r := format_record(rows[i])
+        j := 0
+        for j < len(r) {
+            out = push(out, byteat(r, j))
+            j = j + 1
+        }
+        out = push(out, 10)
         i = i + 1
     }
-    return out
+    return out as str
 }

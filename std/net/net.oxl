@@ -25,16 +25,21 @@ extern fn rt_sock_close(fd: int) -> int
 
 extern fn rt_set_reuseaddr(fd: int) -> int
 
+extern fn rt_sock_port(fd: int) -> int
+
 extern fn rt_bind_any(fd: int, port: int) -> int
 
 extern fn rt_errstr(code: int) -> str
 
 /// Conn is one end of a TCP connection — read/write/close satisfy
 /// io.Reader, io.Writer and io.Closer.
-struct Conn { fd: int }
+// `st` is a shared close-latch — copies of a Conn (struct value,
+// iface box) all see the same cell, so close() CAS-wins exactly once
+// and a stale fd can never be closed twice over a reused descriptor
+struct Conn { fd: int, st: shared }
 
 /// Listener is a bound, listening TCP socket.
-struct Listener { fd: int }
+struct Listener { fd: int, st: shared }
 
 // parse_ipv4 reads "a.b.c.d" into a host-order u32 — rejects empty
 // octets, >255, non-digits, and wrong part counts. No getaddrinfo:
@@ -87,21 +92,21 @@ fn dial(host: str, port: int) -> [Conn, err] {
 fn dial_timeout(host: str, port: int, tmo_ms: int) -> [Conn, err] {
     [ip, pe] = parse_ipv4(host)
     if pe != nil {
-        return Conn{fd: -1}, pe
+        return Conn{fd: -1, st: mkshared(0)}, pe
     }
     if port <= 0 || port > 65535 {
-        return Conn{fd: -1}, errors.new("net: dial: bad port " + itoa(port))
+        return Conn{fd: -1, st: mkshared(0)}, errors.new("net: dial: bad port " + itoa(port))
     }
     fd := rt_sock_open(2, 1, 0) // AF_INET, SOCK_STREAM
     if fd < 0 {
-        return Conn{fd: -1}, errors.new("net: dial: socket failed")
+        return Conn{fd: -1, st: mkshared(0)}, errors.new("net: dial: socket failed")
     }
     rc := rt_sock_connect_ipv4(fd, ip, port, tmo_ms)
     if rc != 0 {
         rt_sock_close(fd)
-        return Conn{fd: -1}, errors.new("net: dial: connect " + host + ":" + itoa(port) + ": " + rt_errstr(0 - rc))
+        return Conn{fd: -1, st: mkshared(0)}, errors.new("net: dial: connect " + host + ":" + itoa(port) + ": " + rt_errstr(0 - rc))
     }
-    return Conn{fd: fd}, nil
+    return Conn{fd: fd, st: mkshared(0)}, nil
 }
 
 /// listen binds port on INADDR_ANY and starts listening. The bounded
@@ -124,7 +129,7 @@ fn listen(port: int) -> [Listener, err] {
             }
             tries = tries + 1
             if tries > 15 {
-                return Listener{fd: -1}, errors.new("net: listen: bind/listen failed on :" + itoa(port))
+                return Listener{fd: -1, st: mkshared(0)}, errors.new("net: listen: bind/listen failed on :" + itoa(port))
             }
             usleep(delay * 1000)
             if delay < 2000 {
@@ -132,21 +137,37 @@ fn listen(port: int) -> [Listener, err] {
             }
         }
     }
-    return Listener{fd: fd}, nil
+    return Listener{fd: fd, st: mkshared(0)}, nil
+}
+
+/// port reports the bound port — meaningful after listen(0) picks
+/// an ephemeral one the caller can't know otherwise.
+fn (l ref Listener) port() -> int {
+    return rt_sock_port(l.fd)
+}
+
+/// rawfd exposes the listener socket — escape hatch for fd-level
+/// builtins (a receive timeout doubles as an accept deadline).
+fn (l ref Listener) rawfd() -> int {
+    return l.fd
 }
 
 /// accept returns the next inbound connection.
 fn (l mut Listener) accept() -> [Conn, err] {
     fd := rt_sock_accept(l.fd)
     if fd < 0 {
-        return Conn{fd: -1}, errors.new("net: accept failed")
+        return Conn{fd: -1, st: mkshared(0)}, errors.new("net: accept failed")
     }
-    return Conn{fd: fd}, nil
+    return Conn{fd: fd, st: mkshared(0)}, nil
 }
 
-/// close releases the listener socket — safe to call twice.
+/// close releases the listener socket — safe to call twice (the
+/// shared latch decides once across every copy).
 fn (l mut Listener) close() -> err {
     if l.fd < 0 {
+        return nil
+    }
+    if scas(l.st, 0, 1) != 0 {
         return nil
     }
     rt_sock_close(l.fd)
@@ -177,9 +198,15 @@ fn (c mut Conn) write(b: []byte) -> [int, err] {
     return n, nil
 }
 
-/// close releases the connection — safe to call twice.
+/// close releases the connection — safe to call twice. `st` is
+/// shared across every copy of this Conn, so only the first close
+/// (through any handle) reaches the fd — an iface-boxed copy can no
+/// longer leave the original holding a stale, reusable descriptor.
 fn (c mut Conn) close() -> err {
     if c.fd < 0 {
+        return nil
+    }
+    if scas(c.st, 0, 1) != 0 {
         return nil
     }
     rt_sock_close(c.fd)
@@ -195,6 +222,12 @@ fn (c ref Conn) rawfd() -> int {
 
 /// asreader views the conn as io.Reader.
 fn (c mut Conn) asreader() -> io.Reader {
+    return c
+}
+
+/// ascloser views the conn as io.Closer — the boxed copy shares the
+/// close latch, so it and the original close the fd exactly once.
+fn (c mut Conn) ascloser() -> io.Closer {
     return c
 }
 

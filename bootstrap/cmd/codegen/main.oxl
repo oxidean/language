@@ -1119,6 +1119,13 @@ fn xty_field(g: mut G, obj: ref parser.Node, name: str) -> int {
                 return check.tm(g.ck, check.k_fn(), -1, sig.params, r1, "")
             }
         }
+        gq := check.resolve_named(g.ck, base + "." + name)
+        if collections.map_has(g.ck.globals, gq) {
+            [gt2, gerr2] = collections.map_get(g.ck.globals, gq)
+            if gerr2 == nil {
+                return gt2
+            }
+        }
     }
     ot := xty(g, obj)
     sn := ""
@@ -1990,7 +1997,7 @@ fn gbuiltin(name: str, argvs: ref GAv) -> str {
     if name == "byteat" || name == "substr" || name == "find" || name == "bufstr" || name == "poke8" || name == "poke16" || name == "poke32" || name == "sqlite_exec" || name == "sqlite_query" {
         return "rt_" + name + "(" + j + ")"
     }
-    if name == "atoi" || name == "mkbuf" || name == "htons" || name == "htonl" || name == "cstr" || name == "str" || name == "sqlite_open" || name == "sqlite_close" || name == "sqlite_exec_bind" || name == "set_rcvtimo" || name == "set_sndtimo" || name == "readfile" || name == "writefile" || name == "exit" || name == "mkshared" || name == "sget" || name == "sset" || name == "scas" || name == "sadd" || name == "now" || name == "now_ms" || name == "usleep" || name == "atof" || name == "ftoa" {
+    if name == "atoi" || name == "mkbuf" || name == "htons" || name == "htonl" || name == "cstr" || name == "str" || name == "sqlite_open" || name == "sqlite_close" || name == "sqlite_exec_bind" || name == "set_rcvtimo" || name == "set_rcvtimo_ms" || name == "set_sndtimo" || name == "readfile" || name == "writefile" || name == "exit" || name == "mkshared" || name == "sget" || name == "sset" || name == "scas" || name == "sadd" || name == "now" || name == "now_ms" || name == "usleep" || name == "atof" || name == "ftoa" {
         return "rt_" + name + "(" + j + ")"
     }
     if name == "ftoi" {
@@ -2121,6 +2128,9 @@ fn gxfield(g: mut G, obj: ref parser.Node, name: str) -> str {
                 }
                 return "(RtFnv){ 0, (void*)o_fnv_wrap_" + cname(qn) + " }"
             }
+        }
+        if collections.map_has(g.ck.globals, qn) {
+            return "o_g_" + cname(qn)
         }
     }
     o := gx(g, obj)

@@ -2338,7 +2338,7 @@ fn register(ck: mut Ck, its: []It) {
 
 // ---------- builtins ----------
 fn is_builtin(n: str) -> bool {
-    return n == "print" || n == "println" || n == "mkchan" || n == "send" || n == "recv" || n == "close" || n == "sleep" || n == "msleep" || n == "new" || n == "mkslice" || n == "push" || n == "assert" || n == "itoa" || n == "argc" || n == "argv" || n == "len" || n == "byteat" || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf" || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32" || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open" || n == "str" || n == "sqlite_exec" || n == "sqlite_exec_bind" || n == "set_rcvtimo" || n == "set_sndtimo" || n == "sqlite_query" || n == "sqlite_close" || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared" || n == "sget" || n == "sset" || n == "scas" || n == "sadd" || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi" || n == "itof" || n == "atof" || n == "ftoa"
+    return n == "print" || n == "println" || n == "mkchan" || n == "send" || n == "recv" || n == "close" || n == "sleep" || n == "msleep" || n == "new" || n == "mkslice" || n == "push" || n == "assert" || n == "itoa" || n == "argc" || n == "argv" || n == "len" || n == "byteat" || n == "substr" || n == "find" || n == "atoi" || n == "mkbuf" || n == "bufstr" || n == "poke8" || n == "poke16" || n == "poke32" || n == "htons" || n == "htonl" || n == "cstr" || n == "sqlite_open" || n == "str" || n == "sqlite_exec" || n == "sqlite_exec_bind" || n == "set_rcvtimo" || n == "set_rcvtimo_ms" || n == "set_sndtimo" || n == "sqlite_query" || n == "sqlite_close" || n == "readfile" || n == "writefile" || n == "exit" || n == "mkshared" || n == "sget" || n == "sset" || n == "scas" || n == "sadd" || n == "now" || n == "now_ms" || n == "usleep" || n == "ftoi" || n == "itof" || n == "atof" || n == "ftoa"
 }
 
 fn is_susp_builtin(n: str) -> bool {
@@ -3375,7 +3375,7 @@ fn call(ck: mut Ck, f: ref parser.Node, args: ref parser.NList, env: mut Env) ->
             }
             return t_str(ck)
         }
-        if qn == "sqlite_exec" || qn == "sqlite_exec_bind" || qn == "set_rcvtimo" || qn == "set_sndtimo" {
+        if qn == "sqlite_exec" || qn == "sqlite_exec_bind" || qn == "set_rcvtimo" || qn == "set_rcvtimo_ms" || qn == "set_sndtimo" {
             al := args
             for al != nil {
                 expr(ck, al.v, env)
