@@ -604,7 +604,7 @@ printf 'package main\nimport "file://%s/libx/leaf"\n\nfn main() { println("lv=" 
 ( cd "$tv/rapp" && printf 'module file://%s/rapp\noxl 0.3\n' "$tv" > oxl.mod
   OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/raiser@v1.0.0" >/dev/null
   OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/libx@v1.2.0" >/dev/null
-  sed -i 's|libx v1.2.0|libx v1.0.0|' oxl.mod
+  sed 's|libx v1.2.0|libx v1.0.0|' oxl.mod > oxl.mod.tmp && mv oxl.mod.tmp oxl.mod
   OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy7" 2>&1 || { echo "FAIL tidy7 rc"; cat "$tv/tidy7"; exit 1; }
 grep -q 'dropped file://' "$tv/tidy7" || { echo "FAIL tidy7 drop"; cat "$tv/tidy7"; exit 1; }
 ! grep -q 'raiser' "$tv/rapp/oxl.mod" || { echo "FAIL raiser kept"; cat "$tv/rapp/oxl.mod"; exit 1; }

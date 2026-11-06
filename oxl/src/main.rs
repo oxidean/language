@@ -2628,7 +2628,14 @@ fn mod_tidy(args: &[String], cwd: &Path) {
     let spath = root.join("oxl.sum");
     // the write comparisons go against on-disk state — tidy mutates
     // mtext/sums in memory, so they can't be the baseline
-    let orig_stext = std::fs::read_to_string(&spath).unwrap_or_default();
+    let orig_stext = match std::fs::read_to_string(&spath) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            eprintln!("error: {}: {e}", spath.display());
+            exit(1);
+        }
+    };
     let mut sums = match modcache::parse_sums(&orig_stext) {
         Ok(v) => v,
         Err(e) => {
@@ -2724,8 +2731,14 @@ fn mod_tidy(args: &[String], cwd: &Path) {
                     if semver::compare(&fv, &cv) == std::cmp::Ordering::Less
             );
             if lower {
+                let old = want.get(mp).map(|w| w.0.clone());
                 let ind = want.get(mp).map(|w| w.1).unwrap_or(false);
                 want.insert(mp.clone(), (checked.to_string(), ind));
+                if let Some(old) = old {
+                    if old != checked {
+                        report.push(format!("upgraded {mp}@{old} => {checked}"));
+                    }
+                }
                 bumped = true;
             }
         }
