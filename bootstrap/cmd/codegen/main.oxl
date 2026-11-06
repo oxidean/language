@@ -66,6 +66,24 @@ struct GEV { ok: bool, en: str, vn: str, i: int }
 // (continue, break) label pair per enclosing loop in a frame body
 struct GLab { c: str, b: str, d: int }
 
+// buffer-length snapshot before one decl's emission — every line an
+// emit appends to a buffer lands in that decl's unit (Rust drain())
+struct GSnp {
+    h: int, tp: int, fd: int, cp: int, vt: int, fb: int,
+    ob: int, cb: int, gi: int,
+}
+
+// one reachability unit — the emitted C owned by a single decl (or a
+// synthesized helper: instantiation, vtab pair, fn-value wrap) split
+// across the output bands, the C symbols it defines, and oxl_main
+// init lines for globals (Rust Unit). A token in live text spelling
+// one of defs is a use edge.
+struct GUnit {
+    hd: []str, tp: []str, fd: []str, cp: []str, vt: []str,
+    fb: []str, ob: []str, cb: []str, gi: []str,
+    defs: []str, root: int,
+}
+
 // forward-appending Node list builder for the hoist transform
 struct GBuf { items: own parser.NList, tail: own parser.NList }
 
@@ -155,6 +173,13 @@ struct G {
     vout: []str, // vtab thunks + arrays (emitted after out)
     cur: str, // current fn's qualified name
     inframe: int,
+    // G1 — reachability units + their def->claimant chains (Map
+    // values are int-only, so dchain holds [unit idx, next] pairs)
+    units: []GUnit,
+    dpos: own collections.Map,
+    dchain: []int,
+    uhits: []int,
+    live: []int,
 }
 
 fn wl(g: mut G, s: str) {
@@ -181,6 +206,130 @@ fn wpop(g: mut G) {
     g.wlast = g.w
     g.w = g.wst.w
     g.wst = g.wst.next
+}
+
+// ---------- G1 reachability (Rust Unit/drain/scan_refs) ----------
+
+fn gusnap(g: ref G) -> GSnp {
+    return GSnp{h: len(g.head), tp: len(g.tramp), fd: len(g.fhead),
+        cp: len(g.clpro), vt: len(g.vout), fb: len(g.fbody),
+        ob: len(g.w), cb: len(g.clbod), gi: len(g.ginit)}
+}
+
+// open a fresh unit — returns its index
+fn gubegin(g: mut G) -> int {
+    g.units = push(g.units, GUnit{hd: nil, tp: nil, fd: nil, cp: nil,
+        vt: nil, fb: nil, ob: nil, cb: nil, gi: nil, defs: nil, root: 0})
+    return len(g.units) - 1
+}
+
+// move every line appended since `s` into unit `u`'s band slices —
+// buffers stay as staging only; output joins live units per band
+fn gudrain(g: mut G, u: int, s: GSnp) {
+    i := s.h
+    for i < len(g.head) { g.units[u].hd = push(g.units[u].hd, g.head[i]); i = i + 1 }
+    i = s.tp
+    for i < len(g.tramp) { g.units[u].tp = push(g.units[u].tp, g.tramp[i]); i = i + 1 }
+    i = s.fd
+    for i < len(g.fhead) { g.units[u].fd = push(g.units[u].fd, g.fhead[i]); i = i + 1 }
+    i = s.cp
+    for i < len(g.clpro) { g.units[u].cp = push(g.units[u].cp, g.clpro[i]); i = i + 1 }
+    i = s.vt
+    for i < len(g.vout) { g.units[u].vt = push(g.units[u].vt, g.vout[i]); i = i + 1 }
+    i = s.fb
+    for i < len(g.fbody) { g.units[u].fb = push(g.units[u].fb, g.fbody[i]); i = i + 1 }
+    i = s.ob
+    for i < len(g.w) { g.units[u].ob = push(g.units[u].ob, g.w[i]); i = i + 1 }
+    i = s.cb
+    for i < len(g.clbod) { g.units[u].cb = push(g.units[u].cb, g.clbod[i]); i = i + 1 }
+    i = s.gi
+    for i < len(g.ginit) { g.units[u].gi = push(g.units[u].gi, g.ginit[i]); i = i + 1 }
+}
+
+// init-phase drain: eval stmts appended to g.w join the global's init
+// band ahead of the assign line — they compute the init value, so
+// they belong inside oxl_main's prologue (Rust u.init)
+fn gudrain_init(g: mut G, u: int, s: GSnp) {
+    i := s.ob
+    for i < len(g.w) { g.units[u].gi = push(g.units[u].gi, g.w[i]); i = i + 1 }
+    gudrain(g, u, s)
+}
+
+// register a C symbol `s` as defined by unit `u` — colliding
+// spellings chain every claimant through dchain
+fn gdef(g: mut G, u: int, sym: str) {
+    g.units[u].defs = push(g.units[u].defs, sym)
+    old := -1
+    if collections.map_has(g.dpos, sym) {
+        [v, err] = collections.map_get(g.dpos, sym)
+        if err == nil {
+            old = v
+        }
+    }
+    g.dchain = push(g.dchain, u)
+    g.dchain = push(g.dchain, old)
+    collections.map_set(g.dpos, sym, len(g.dchain) - 2)
+}
+
+// every identifier token in `text` that some unit defines is a use
+// edge — the emitted C names exactly the symbols it links against, so
+// scanning it yields the resolved call/type/vtab edges directly
+// (Rust scan_refs). Claimant unit indices append to g.uhits.
+fn gscan(g: mut G, text: str) {
+    n := len(text)
+    i := 0
+    for i < n {
+        c := byteat(text, i)
+        if c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
+            st := i
+            i = i + 1
+            for i < n {
+                c = byteat(text, i)
+                if c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) {
+                    i = i + 1
+                } else {
+                    break
+                }
+            }
+            h := -1
+            if collections.map_has(g.dpos, substr(text, st, i)) {
+                [v, err] = collections.map_get(g.dpos, substr(text, st, i))
+                if err == nil {
+                    h = v
+                }
+            }
+            for h >= 0 {
+                g.uhits = push(g.uhits, g.dchain[h])
+                h = g.dchain[h + 1]
+            }
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// does `s` contain a '.' — main-package globals carry bare names
+fn ghasdot(s: str) -> int {
+    i := 0
+    for i < len(s) {
+        if byteat(s, i) == 46 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// replace the first `mark` in `s` with `ins` (the @@GLOBALS@@ hole)
+fn gsplice(s: str, mark: str, ins: str) -> str {
+    i := 0
+    for i + len(mark) <= len(s) {
+        if substr(s, i, i + len(mark)) == mark {
+            return substr(s, 0, i) + ins + substr(s, i + len(mark), len(s))
+        }
+        i = i + 1
+    }
+    return s
 }
 
 // collect call args as evaluated C fragments (linked list — []str returns
@@ -1108,38 +1257,6 @@ fn ginst_queue(g: mut G, q: str, tpl: ref check.TPList, bind: own collections.Ma
         return m
     }
     collections.map_set(g.inst_done, m, 1)
-    fi := gfn(g, q)
-    if fi >= 0 {
-        sig := g.ck.fnsv[fi]
-        if sig.retk == 2 {
-            g.head = push(g.head, "struct o_ret_" + cname(m) + " { " + gcty(g, check.subst_ty(g.ck, sig.ret1, bind)) + " val; int64_t err; };\n")
-        }
-        if !check.sl_has(g.ck.susp, q) {
-            // susp insts emit only frames — no o_f_ proto
-            rc := "void"
-            if sig.retk == 1 {
-                rc = gcty(g, check.subst_ty(g.ck, sig.ret1, bind))
-            }
-            if sig.retk == 2 {
-                rc = "struct o_ret_" + cname(m)
-            }
-            ps := ""
-            first := true
-            il := sig.params
-            for il != nil {
-                if !first {
-                    ps = ps + ", "
-                }
-                first = false
-                ps = ps + gcty(g, check.subst_ty(g.ck, il.v, bind))
-                il = il.next
-            }
-            if first {
-                ps = "void"
-            }
-            g.head = push(g.head, rc + " o_f_" + cname(m) + "(" + ps + ");\n")
-        }
-    }
     in := new(GInst)
     in.q = q
     in.mangled = m
@@ -1147,6 +1264,46 @@ fn ginst_queue(g: mut G, q: str, tpl: ref check.TPList, bind: own collections.Ma
     in.next = g.insts
     g.insts = in
     return m
+}
+
+// an inst's pair-ret decl + proto — emitted inside the inst's own
+// unit at pop time: queueing can run inside another decl's emission,
+// and the decl must be attributed to the inst, not the emitter (the
+// text itself is unchanged from the pre-G1 queue-time emission)
+fn ginst_head(g: mut G, q: str, m: str, bind: ref collections.Map) {
+    fi := gfn(g, q)
+    if fi < 0 {
+        return
+    }
+    sig := g.ck.fnsv[fi]
+    if sig.retk == 2 {
+        g.head = push(g.head, "struct o_ret_" + cname(m) + " { " + gcty(g, check.subst_ty(g.ck, sig.ret1, bind)) + " val; int64_t err; };\n")
+    }
+    if !check.sl_has(g.ck.susp, q) {
+        // susp insts emit only frames — no o_f_ proto
+        rc := "void"
+        if sig.retk == 1 {
+            rc = gcty(g, check.subst_ty(g.ck, sig.ret1, bind))
+        }
+        if sig.retk == 2 {
+            rc = "struct o_ret_" + cname(m)
+        }
+        ps := ""
+        first := true
+        il := sig.params
+        for il != nil {
+            if !first {
+                ps = ps + ", "
+            }
+            first = false
+            ps = ps + gcty(g, check.subst_ty(g.ck, il.v, bind))
+            il = il.next
+        }
+        if first {
+            ps = "void"
+        }
+        g.head = push(g.head, rc + " o_f_" + cname(m) + "(" + ps + ");\n")
+    }
 }
 
 // bind declared sig params (incl. the receiver slot when `recv` is
@@ -4272,10 +4429,7 @@ fn gemit_proto(g: mut G, i: int) {
 }
 
 // `o_fnv_wrap_<qn>` — zero-env wrapper over a named fn (Rust fnv_wraps pass)
-fn gemit_fnv(g: mut G) {
-    fl := g.fnv
-    for fl != nil {
-        n := fl.v
+fn gemit_fnv_one(g: mut G, n: str) {
         [fi, err] = collections.map_get(g.ck.fns, n)
         if err == nil {
             sig := g.ck.fnsv[fi]
@@ -4306,8 +4460,6 @@ fn gemit_fnv(g: mut G) {
             }
             g.clpro = push(g.clpro, "static " + ret_c + " o_fnv_wrap_" + cname(n) + "(void* _e" + psig + ") { " + ret_kw + callee + "(" + argl + "); }\n")
         }
-        fl = fl.next
-    }
 }
 
 // bind a generic impl method's ty params from the iface-declared
@@ -4368,9 +4520,7 @@ fn gseed_vtab_insts(g: mut G) -> int {
 
 // concrete vtabs + receiver-normalizing thunks for every (iface, impl)
 // pair a conversion site produced (Rust emit_vtabs)
-fn gemvtab(g: mut G) {
-    vu := g.vtabs
-    for vu != nil {
+fn gemvtab_one(g: mut G, vu: ref GVU) {
         w := vu.w
         impl := vu.impl
         ii := check.iface_ent(g.ck, w)
@@ -4473,58 +4623,46 @@ fn gemvtab(g: mut G) {
             }
             g.vout = push(g.vout, "static void* o_vt_" + cname(w) + "_" + gvtkey(impl) + "[] = { " + slots + " };\n")
         }
-        vu = vu.next
-    }
 }
 
 fn genall(g: mut G) -> str {
-    g.head = push(g.head, "#include \"rt.h\"\n\n")
+    // G1 — every decl lands in a `GUnit` carrying the C symbols it
+    // defines; dead decls never reach the output. A unit's
+    // reachability is decided by the emitted text itself: any `o_*`
+    // (or extern) identifier token another unit spells is a use edge,
+    // so call edges are the resolved callee names, conv-site `o_vt_*`
+    // uses pin their vtab + its method thunks transitively, and types
+    // are pulled by whatever `o_s_*`/`o_en_*`/`o_ret_*`/`o_vret_*`
+    // name a live unit needs spelled — param/ret/field types survive
+    // transitively for free since they are spelled in the live text
+    // that needs them. (Rust generate_mode.)
+    g.units = mkslice(GUnit, 0)
+    g.dpos = collections.map_new()
+    g.dchain = mkslice(int, 0)
+    uof := collections.map_new() // item idx (itoa) -> unit idx, globals
+    // enum defs first: variant payload structs + the tagged union —
+    // a user struct or another variant may embed an enum by value
     i := 0
     for i < len(g.its) {
-        gemit_enum(g, i)
-        i = i + 1
-    }
-    i = 0
-    for i < len(g.its) {
-        gemit_struct(g, i)
-        i = i + 1
-    }
-    i = 0
-    for i < len(g.its) {
-        gemit_retstruct(g, i)
-        i = i + 1
-    }
-    // iface pair-ret decls — o_vret_<W>_<m> for `-> [T, err]` methods
-    i = 0
-    for i < len(g.ck.ifacesv) {
-        ml := g.ck.ifacesv[i].methods
-        for ml != nil {
-            if ml.v.retk == 2 {
-                g.head = push(g.head, "struct o_vret_" + cname(g.ck.ifacesv[i].n) + "_" + cname(ml.v.n) + " { " + gcty(g, ml.v.ret1) + " val; int64_t err; };\n")
-            }
-            ml = ml.next
-        }
-        i = i + 1
-    }
-    i = 0
-    for i < len(g.its) {
-        gemit_static(g, i)
-        i = i + 1
-    }
-    i = 0
-    for i < len(g.its) {
-        gemit_proto(g, i)
-        i = i + 1
-    }
-    // fn bodies — g.w is the `out` buffer throughout
-    g.w = mkslice(str, 0)
-    i = 0
-    for i < len(g.its) {
-        if check.nk(g.its[i].node) == 24 {
+        if check.nk(g.its[i].node) == 29 {
             match g.its[i].node {
-                parser.Node.Fn{ex} => {
-                    if !ex {
-                        gfunc(g, i)
+                parser.Node.Enum{name, vars} => {
+                    ui := gubegin(g)
+                    s := gusnap(g)
+                    gemit_enum(g, i)
+                    gudrain(g, ui, s)
+                    qn := check.qname(g.its[i].mod, name)
+                    gdef(g, ui, "o_en_" + cname(qn))
+                    vl := vars
+                    for vl != nil {
+                        match vl.v {
+                            parser.Node.Variant{name} => {
+                                gdef(g, ui, "o_s_" + cname(qn + "." + name))
+                            }
+                            _ => {
+                            }
+                        }
+                        vl = vl.next
                     }
                 }
                 _ => {
@@ -4533,9 +4671,122 @@ fn genall(g: mut G) -> str {
         }
         i = i + 1
     }
-    g.out = g.w
-    // global initializers run inside oxl_main's prologue — before the
-    // inst drain: they can still queue insts / record vtab uses
+    // struct defs
+    i = 0
+    for i < len(g.its) {
+        if check.nk(g.its[i].node) == 26 {
+            match g.its[i].node {
+                parser.Node.Struct{name} => {
+                    ui := gubegin(g)
+                    s := gusnap(g)
+                    gemit_struct(g, i)
+                    gudrain(g, ui, s)
+                    gdef(g, ui, "o_s_" + cname(check.qname(g.its[i].mod, name)))
+                }
+                _ => {
+                }
+            }
+        }
+        i = i + 1
+    }
+    // iface vtab call ret structs for `-> [T, err]` methods — one unit
+    // per (iface, method) so unused ifaces drop theirs entirely
+    i = 0
+    for i < len(g.ck.ifacesv) {
+        ml := g.ck.ifacesv[i].methods
+        for ml != nil {
+            if ml.v.retk == 2 {
+                ui := gubegin(g)
+                s := gusnap(g)
+                g.head = push(g.head, "struct o_vret_" + cname(g.ck.ifacesv[i].n) + "_" + cname(ml.v.n) + " { " + gcty(g, ml.v.ret1) + " val; int64_t err; };\n")
+                gudrain(g, ui, s)
+                gdef(g, ui, "o_vret_" + cname(g.ck.ifacesv[i].n) + "_" + cname(ml.v.n))
+            }
+            ml = ml.next
+        }
+        i = i + 1
+    }
+    // file-scope globals — decl now, init expression after the bodies
+    // (pre-G1 order: inits can queue insts + record vtab uses). Only
+    // main's own package globals are reachability roots — their names
+    // stay unqualified; imported ones need a spelled reference.
+    i = 0
+    for i < len(g.its) {
+        if check.nk(g.its[i].node) == 10 {
+            match g.its[i].node {
+                parser.Node.Let{name} => {
+                    ui := gubegin(g)
+                    collections.map_set(uof, itoa(i), ui)
+                    s := gusnap(g)
+                    gemit_static(g, i)
+                    gudrain(g, ui, s)
+                    gdef(g, ui, "o_g_" + cname(name))
+                    g.units[ui].root = 1 - ghasdot(name)
+                }
+                _ => {
+                }
+            }
+        }
+        i = i + 1
+    }
+    // extern protos — one unit each so uncalled externs drop; the def
+    // is the bare C name call sites spell
+    i = 0
+    for i < len(g.its) {
+        if check.nk(g.its[i].node) == 24 {
+            match g.its[i].node {
+                parser.Node.Fn{ex, name} => {
+                    if ex {
+                        ui := gubegin(g)
+                        s := gusnap(g)
+                        gemit_proto(g, i)
+                        gudrain(g, ui, s)
+                        gdef(g, ui, name)
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+        i = i + 1
+    }
+    // fn units: pair-ret decl + proto in the head band, the body (or
+    // suspend frame) spread over the later bands — generic decls
+    // never become units at all (only instantiations do)
+    g.w = mkslice(str, 0)
+    i = 0
+    for i < len(g.its) {
+        if check.nk(g.its[i].node) == 24 {
+            match g.its[i].node {
+                parser.Node.Fn{ex, name, recv, typarams, ret} => {
+                    if !ex && typarams == nil {
+                        ui := gubegin(g)
+                        s := gusnap(g)
+                        gemit_retstruct(g, i)
+                        gemit_proto(g, i)
+                        gfunc(g, i)
+                        gudrain(g, ui, s)
+                        qn := check.fn_qname(g.ck, g.its[i].mod, recv, name)
+                        gdef(g, ui, "o_f_" + cname(qn))
+                        if gretdk(g, ret) == 2 {
+                            gdef(g, ui, "o_ret_" + cname(qn))
+                        }
+                        if check.sl_has(g.ck.susp, qn) {
+                            gdef(g, ui, "o_frm_" + cname(qn))
+                            gdef(g, ui, "o_poll_" + cname(qn))
+                        }
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+        i = i + 1
+    }
+    // global initializers — the assign line + eval stmts join the
+    // global's unit, spliced into oxl_main after the mark; emission
+    // order keeps the pre-G1 bodies-then-inits position, ahead of the
+    // inst drain
     i = 0
     for i < len(g.its) {
         if check.nk(g.its[i].node) == 10 {
@@ -4549,9 +4800,14 @@ fn genall(g: mut G) -> str {
                     if ty == nil {
                         t = xty(g, init)
                     }
-                    v := gx(g, init)
-                    v = gconv_v(g, init, v, t)
-                    g.ginit = push(g.ginit, "    o_g_" + cname(name) + " = " + v + ";")
+                    [ui, uerr] = collections.map_get(uof, itoa(i))
+                    if uerr == nil {
+                        s := gusnap(g)
+                        v := gx(g, init)
+                        v = gconv_v(g, init, v, t)
+                        g.ginit = push(g.ginit, "    o_g_" + cname(name) + " = " + v + ";")
+                        gudrain_init(g, ui, s)
+                    }
                 }
                 _ => {
                 }
@@ -4562,7 +4818,6 @@ fn genall(g: mut G) -> str {
     // mono instantiations + vtab-seeded method insts — a co-fixpoint:
     // bodies create conv sites (vtab uses), vtab pairs pin generic
     // method insts, insts create more conv sites (Rust insts loop)
-    g.w = g.out
     progress := true
     for progress {
         progress = false
@@ -4570,21 +4825,52 @@ fn genall(g: mut G) -> str {
             in := g.insts
             g.insts = in.next
             progress = true
+            ui := gubegin(g)
+            s := gusnap(g)
+            ginst_head(g, in.q, in.mangled, in.bind)
             gfunc_inst(g, in.q, in.mangled, in.bind)
+            gudrain(g, ui, s)
+            gdef(g, ui, "o_f_" + cname(in.mangled))
+            gdef(g, ui, "o_ret_" + cname(in.mangled))
+            gdef(g, ui, "o_frm_" + cname(in.mangled))
+            gdef(g, ui, "o_poll_" + cname(in.mangled))
         }
         if gseed_vtab_insts(g) > 0 {
             progress = true
         }
     }
-    g.out = g.w
-    // fn-value wrappers — after every body (incl. insts) registered its uses
-    gemit_fnv(g)
-    // concrete vtabs + thunks — after every body so vtab_uses is final
-    gemvtab(g)
-    oxlmain := ""
+    // B4: zero-env wrappers giving named fns the (void* env, args...)
+    // calling convention every fn value shares — a fn named anywhere
+    // a value is expected is reachable through its wrapper
+    fl := g.fnv
+    for fl != nil {
+        ui := gubegin(g)
+        s := gusnap(g)
+        gemit_fnv_one(g, fl.v)
+        gudrain(g, ui, s)
+        gdef(g, ui, "o_fnv_wrap_" + cname(fl.v))
+        fl = fl.next
+    }
+    // concrete vtabs + receiver-normalizing thunks — one unit per
+    // (iface, impl) pair a conversion site produced
+    vu := g.vtabs
+    for vu != nil {
+        ui := gubegin(g)
+        s := gusnap(g)
+        gemvtab_one(g, vu)
+        gudrain(g, ui, s)
+        gdef(g, ui, "o_vt_" + cname(vu.w) + "_" + gvtkey(vu.impl))
+        vu = vu.next
+    }
+    // oxl_main — the root unit. Its text spells `o_f_main` / the test
+    // runner's `o_f_test_*` (+ `o_frm_*`/`o_poll_*` for susp entries)
+    // so entries mark through ordinary use edges; the @@GLOBALS@@
+    // hole is spliced with live global inits after the mark.
+    ru := gubegin(g)
+    g.units[ru].root = 1
     if g.testm == 1 {
-        // test mode: scope-wrap each top-level test_ fn (Rust test_mode)
-        tb := "void oxl_main(void) {\n" + wjoin(g.ginit)
+        // test mode: scope-wrap each top-level test_ fn
+        tb := "void oxl_main(void) {\n@@GLOBALS@@"
         i = 0
         id := 0
         for i < len(g.its) {
@@ -4611,15 +4897,88 @@ fn genall(g: mut G) -> str {
             }
             i = i + 1
         }
-        oxlmain = tb + "}\n"
+        g.units[ru].ob = push(g.units[ru].ob, tb + "}\n")
     }
     if g.testm == 0 && g.maink == 1 {
-        oxlmain = "void oxl_main(void) {\n" + wjoin(g.ginit) + "    struct o_frm_main *_rt = (struct o_frm_main *)rt_task_new(o_poll_main, (int64_t)sizeof(struct o_frm_main));\n    rt_run_root((RtFrame *)_rt); }\n"
+        g.units[ru].ob = push(g.units[ru].ob, "void oxl_main(void) {\n@@GLOBALS@@    struct o_frm_main *_rt = (struct o_frm_main *)rt_task_new(o_poll_main, (int64_t)sizeof(struct o_frm_main));\n    rt_run_root((RtFrame *)_rt); }\n")
     }
     if g.testm == 0 && g.maink == 2 {
-        oxlmain = "void oxl_main(void) {\n" + wjoin(g.ginit) + "    o_f_main(); }\n"
+        g.units[ru].ob = push(g.units[ru].ob, "void oxl_main(void) {\n@@GLOBALS@@    o_f_main(); }\n")
     }
-    return wjoin(g.head) + wjoin(g.tramp) + wjoin(g.fhead) + wjoin(g.clpro) + wjoin(g.vout) + wjoin(g.fbody) + wjoin(g.out) + oxlmain + wjoin(g.clbod)
+    // mark: from the root seeds over use edges until fixpoint
+    g.live = mkslice(int, len(g.units))
+    work := mkslice(int, 0)
+    i = 0
+    for i < len(g.units) {
+        if g.units[i].root != 0 {
+            g.live[i] = 1
+            work = push(work, i)
+        }
+        i = i + 1
+    }
+    for len(work) > 0 {
+        t := work[len(work) - 1]
+        work = work[0:len(work) - 1]
+        g.uhits = mkslice(int, 0)
+        j := 0
+        for j < len(g.units[t].hd) { gscan(g, g.units[t].hd[j]); j = j + 1 }
+        j = 0
+        for j < len(g.units[t].tp) { gscan(g, g.units[t].tp[j]); j = j + 1 }
+        j = 0
+        for j < len(g.units[t].fd) { gscan(g, g.units[t].fd[j]); j = j + 1 }
+        j = 0
+        for j < len(g.units[t].cp) { gscan(g, g.units[t].cp[j]); j = j + 1 }
+        j = 0
+        for j < len(g.units[t].vt) { gscan(g, g.units[t].vt[j]); j = j + 1 }
+        j = 0
+        for j < len(g.units[t].fb) { gscan(g, g.units[t].fb[j]); j = j + 1 }
+        j = 0
+        for j < len(g.units[t].ob) { gscan(g, g.units[t].ob[j]); j = j + 1 }
+        j = 0
+        for j < len(g.units[t].cb) { gscan(g, g.units[t].cb[j]); j = j + 1 }
+        j = 0
+        for j < len(g.units[t].gi) { gscan(g, g.units[t].gi[j]); j = j + 1 }
+        j = 0
+        for j < len(g.uhits) {
+            h := g.uhits[j]
+            if g.live[h] == 0 {
+                g.live[h] = 1
+                work = push(work, h)
+            }
+            j = j + 1
+        }
+    }
+    // init lines of surviving globals, in unit order — spliced into
+    // the oxl_main placeholder the root unit left
+    ginits := ""
+    i = 0
+    for i < len(g.units) {
+        if g.live[i] != 0 {
+            ginits = ginits + wjoin(g.units[i].gi)
+        }
+        i = i + 1
+    }
+    // heads (decls, protos, frame decls, trampolines, vtab rows,
+    // closure protos) precede every body; closure + defer-thunk
+    // bodies go last since they only reference protos
+    out := "#include \"rt.h\"\n\n"
+    i = 0
+    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].hd) } i = i + 1 }
+    i = 0
+    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].tp) } i = i + 1 }
+    i = 0
+    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].fd) } i = i + 1 }
+    i = 0
+    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].cp) } i = i + 1 }
+    i = 0
+    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].vt) } i = i + 1 }
+    i = 0
+    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].fb) } i = i + 1 }
+    i = 0
+    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].ob) } i = i + 1 }
+    i = 0
+    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].cb) } i = i + 1 }
+    return gsplice(out, "@@GLOBALS@@", ginits)
 }
 
 // ---------- driver ----------
@@ -4707,5 +5066,10 @@ fn main() {
     g.inframe = 0
     g.maink = 0
     g.testm = testm
+    g.units = mkslice(GUnit, 0)
+    g.dpos = collections.map_new()
+    g.dchain = mkslice(int, 0)
+    g.uhits = mkslice(int, 0)
+    g.live = mkslice(int, 0)
     print(genall(g))
 }
