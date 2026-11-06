@@ -12,7 +12,11 @@ Manifests shouldn't be hand-maintained. Go's ergonomics — `mod init`,
 - `oxl mod tidy` — the M3 companion:
   - walk every import in the main module's packages
   - `std` imports skipped; module-path imports skipped; missing →
-    `oxl get <path>@latest` (network) then require
+    `oxl get` — but on the *module*, not the package path: resolve
+    the import to its containing module first (longest match against
+    existing requires; otherwise strip trailing segments until a
+    module root probes true — `github.com/a/b/c` may live in module
+    `github.com/a/b`), then fetch `@latest` and require that
   - requires that no package in the build list imports → dropped
     (this is what *keeps unused deps out of the build* — pairs with
     M3's error at the manifest level)

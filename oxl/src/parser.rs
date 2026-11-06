@@ -13,9 +13,12 @@ pub struct Parser<'a> {
 pub fn parse(toks: &[Token], diags: &mut Diags) -> Crate {
     let mut p = Parser { toks, i: 0, diags, no_lit: false };
     let mut pkg = String::new();
+    let mut pkg_span = Span::new(0, 0);
     if p.eat_kw(Kw::Package) {
-        if let Some((n, _)) = p.ident() {
+        pkg_span = p.toks[p.i - 1].span;
+        if let Some((n, sp)) = p.ident() {
             pkg = n;
+            pkg_span = Span::join(pkg_span, sp);
         }
         p.eat_p(P::Semi);
     } else {
@@ -35,7 +38,7 @@ pub fn parse(toks: &[Token], diags: &mut Diags) -> Crate {
             }
         }
     }
-    Crate { pkg, items }
+    Crate { pkg, pkg_span, items }
 }
 
 impl<'a> Parser<'a> {

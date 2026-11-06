@@ -51,5 +51,8 @@ V1 (queries need semver; MVS runs over the fetched manifests).
 
 - `git` availability/behaviour varies (Windows!) — keep all git calls
   behind one small veneer; error messages quote the failing command.
-- Hash stability across platforms: normalize `\\`→`/` and line-end
-  nothing (hash raw bytes); document the canonicalization.
+- Hash stability across platforms: hash **canonical git content** —
+  `git archive <resolved-sha>` tar bytes (tree-object output, no
+  checkout filters) — so `core.autocrlf` / smudge filters can't fork
+  `oxl.sum` between machines. Normalize `\\`→`/` in recorded names;
+  document the canonicalization.

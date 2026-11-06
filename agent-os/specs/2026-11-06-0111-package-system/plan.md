@@ -4,7 +4,8 @@ Go-shaped packages, versions, fetching, dead-code elimination, and a
 Go-parity `std/`. Per-item design sketches live in `items/`; this file
 is the order of battle. Milestone-gated, not date-gated.
 
-**Status (2026-11-06): spec'd, not started.**
+**Status (2026-11-06): M1 implemented (PR #5); M2–S5 spec'd.**
+Review findings folded into the item files — see threads on the PR.
 
 Execution model: Track M is the critical path — every other track
 consumes the package model. M1 is the breaking change (bundle its
@@ -18,7 +19,7 @@ This folder: plan.md, shape.md, standards.md, references.md, items/.
 
 ## Track M — Module model (critical path, sequential)
 
-### Task M1: `package` clause + directory packages [not started]
+### Task M1: `package` clause + directory packages [done — PR #5]
 
 `items/m1-package-clause.md`. The breaking change: every `.oxl` gets
 `package <name>`; import paths resolve to directories; the bound name

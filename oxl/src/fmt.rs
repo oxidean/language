@@ -259,9 +259,20 @@ impl<'a> Fmt<'a> {
 
     fn krate(&mut self, k: &Crate) {
         if !k.pkg.is_empty() {
-            self.drain_trailing(0);
+            // header comments precede the clause; one sharing its line
+            // trails it. Emitting the clause first makes it the
+            // "previous construct", so first_line must drop here
+            self.drain(k.pkg_span.lo, 0);
+            self.nl(0);
             self.out.push_str("package ");
             self.out.push_str(&k.pkg);
+            let next = k
+                .items
+                .first()
+                .map(item_span)
+                .map(|s| s.lo)
+                .unwrap_or(u32::MAX);
+            self.drain_trailing(next);
             self.nl(0);
             self.blank();
         }

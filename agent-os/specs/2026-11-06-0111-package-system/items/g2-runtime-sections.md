@@ -14,8 +14,8 @@ itself — the other half of the bloat fix.
   compiler-detection veneer in `main.rs`.
 - Feature gates generalize: today `-DOXL_SQLITE` is set by scanning
   the source for `rt_sqlite_`. Extend to a scan over *used* externs:
-  `rt_sqlite_*` → `OXL_SQLITE`, `rt_gui_*` → `OXL_GUI`, `sock_*` →
-  `OXL_NET`. `rt.c` wraps each family in `#ifdef` so ungated programs
+  `rt_sqlite_*` → `OXL_SQLITE`, `rt_gui_*` → `OXL_GUI`, `rt_sock_*`
+  (+ `rt_bind_any`, `rt_set_reuseaddr`) → `OXL_NET`. `rt.c` wraps each family in `#ifdef` so ungated programs
   don't even compile the code — belt + suspenders under section GC.
 - Ordering rule learned the hard way (`48aae28`): `-l` flags always
   after all inputs on the link line — keep that invariant when gates

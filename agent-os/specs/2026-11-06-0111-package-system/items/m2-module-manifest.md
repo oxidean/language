@@ -30,12 +30,18 @@ replace github.com/oxidean/widget => ../widget
   `oxl.mod`. None found → module mode off: only `oxl run`/`fmt`/file
   args work, and only `std` imports resolve (Go-without-go.mod
   behavior).
+- This repo migrates with the item: root `oxl.mod` declares
+  `module oxl`, and M1's bare-path imports (`bootstrap/check`,
+  `tests/d5a`) rewrite to `oxl/bootstrap/check`, `oxl/tests/d5a` —
+  Go has no module-relative bare imports, so rule 2 below covers
+  every in-repo path once the prefix lands.
 - Resolution order for import path `P` in file `F`:
   1. `std/...` → toolchain std root (shipped tree found via exe
      ancestors — today's last-resort mechanism becomes the only one;
      no more ancestor-scanning for `stdlib/`)
   2. `P` == module path or `P` under it → dir under module root
-  3. `P` under the longest required-module path → the resolved copy:
+  3. `P` == a required module's path (its *root* package) or `P`
+     under it — longest match wins — → the resolved copy:
      `replace` dir, else `OXLMODCACHE` entry (exists only after V2;
      until then an unfetched require errors `missing module — oxl get
      it or replace it`)

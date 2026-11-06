@@ -10,7 +10,9 @@ requirement, not a nice-to-have.
 
 ## Design sketch
 
-- Roots: `main` (build/run), each `#[test]`-style entry (test mode),
+- Roots: `main` (build/run), each `test_*` fn when the `-test`
+  driver is emitted (the runner discovers tests by name prefix —
+  the roots must include them or the mark pass strips the suite),
   `extern fn` decls that are called, fns taken as **values** (a fn
   value makes its target reachable — the conservative call is to mark
   any fn whose name is referenced outside a call), `main`'s package

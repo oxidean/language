@@ -12,8 +12,11 @@ them. Resolution needs Go's deterministic build list, not a solver.
   (Go semver rules).
 - Major ≥ 2: the module path *ends* `/vN` and the tag is `vN.x.y` —
   semantic import versioning, included per "full Go model".
-- Pseudo-version for non-tag pins: `vX.Y.Z-0.yyyymmddhhmmss-<sha12>`
-  (base version = highest tag ≤ the commit, `Z+1` if none).
+- Pseudo-versions for non-tag pins (Go ref/mod forms): no base tag
+  → `v0.0.0-yyyymmddhhmmss-<sha12>`; base tag `vX.Y.Z` →
+  `vX.Y.(Z+1)-0.yyyymmddhhmmss-<sha12>` (so a commit after `v1.2.3`
+  is `v1.2.4-0.…` — sorts after `v1.2.3`, before `v1.2.4`); base
+  prerelease `vX.Y.Z-pre` → `vX.Y.Z-pre.0.yyyymmddhhmmss-<sha12>`.
 - Compare: semver order; pseudo-version sorts after its base release
   (Go's rule — a commit after v1.2.3 beats v1.2.3, loses to v1.2.4).
 - **MVS build list**: BFS from the main module's requires; for each

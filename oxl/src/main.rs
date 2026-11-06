@@ -6,6 +6,7 @@ mod fmt;
 mod lexer;
 mod parser;
 
+use crate::diag::Span;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Stdio};
@@ -65,18 +66,20 @@ fn resolve_pkg(from_file: &Path, imp: &str) -> Option<PathBuf> {
     None
 }
 
-/// `*.oxl` files of a package directory, sorted for deterministic loads
-fn pkg_dir_files(dir: &Path) -> Vec<PathBuf> {
-    let mut fs: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |x| x == "oxl"))
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+/// `*.oxl` files of a package directory, sorted for deterministic
+/// loads. Scan failures propagate — an unreadable dir must not degrade
+/// to "no .oxl source files" and a dropped entry must not degrade to
+/// "undefined name" for the decls it held
+fn pkg_dir_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut fs = Vec::new();
+    for e in std::fs::read_dir(dir)? {
+        let p = e?.path();
+        if p.extension().map_or(false, |x| x == "oxl") {
+            fs.push(p);
+        }
+    }
     fs.sort();
-    fs
+    Ok(fs)
 }
 
 /// a package's sources: a directory scan or an explicit file list
@@ -364,16 +367,13 @@ fn parse_pkg_file(
     Some((krate.pkg, krate.items))
 }
 
-/// last path component — Path::file_name so the dir-name/package-name
-/// check survives native separators (`tests\d5a` on Windows; trailing
-/// separators normalize away). Import paths are always `/`-joined, so
-/// this only ever sees filesystem paths.
+/// real last path component for the dir-name/package-name check —
+/// canonicalize first so `.` (the cwd package) and Windows-style args
+/// resolve to the actual directory name; matches the `seen` keying
 fn path_base(p: &str) -> String {
-    Path::new(p)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string()
+    let p = Path::new(p);
+    let p = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    p.file_name().unwrap_or_default().to_string_lossy().to_string()
 }
 
 fn fname(p: &Path) -> String {
@@ -401,9 +401,19 @@ fn load_pkg(
                 // already loaded (or mid-cycle): items dedup away but the
                 // importer still binds the cached clause name
                 let pkg = pkg_names.get(&key).cloned().unwrap_or_default();
-                return Some((ast::Crate { pkg, items: Vec::new() }, Vec::new()));
+                return Some((ast::Crate { pkg, pkg_span: Span::new(0, 0), items: Vec::new() }, Vec::new()));
             }
-            (d.to_string_lossy().to_string(), pkg_dir_files(d))
+            let files = match pkg_dir_files(d) {
+                Ok(fs) => fs,
+                Err(e) => {
+                    if loud {
+                        eprintln!("error [check] {}: {e}", d.display());
+                        return None;
+                    }
+                    return Some((ast::Crate { pkg: String::new(), pkg_span: Span::new(0, 0), items: Vec::new() }, Vec::new()));
+                }
+            };
+            (d.to_string_lossy().to_string(), files)
         }
         PkgSrc::Files(fs) => (
             fs[0]
@@ -420,7 +430,7 @@ fn load_pkg(
                 eprintln!("error [check] no .oxl source files in `{dir_disp}`");
                 return None;
             }
-            return Some((ast::Crate { pkg: String::new(), items: Vec::new() }, Vec::new()));
+            return Some((ast::Crate { pkg: String::new(), pkg_span: Span::new(0, 0), items: Vec::new() }, Vec::new()));
         }
     }
     // parse all files first — clause validation precedes decl collection
@@ -429,7 +439,7 @@ fn load_pkg(
         match parse_pkg_file(f, over, loud) {
             Some((clause, items)) => pfiles.push((f.clone(), clause, items)),
             None if loud => return None,
-            None => return Some((ast::Crate { pkg: String::new(), items: Vec::new() }, Vec::new())),
+            None => return Some((ast::Crate { pkg: String::new(), pkg_span: Span::new(0, 0), items: Vec::new() }, Vec::new())),
         }
     }
     let clause0 = pfiles[0].1.clone();
@@ -567,7 +577,7 @@ fn load_pkg(
         );
     }
     debug_assert_eq!(items.len(), item_files.len());
-    Some((ast::Crate { pkg: clause0, items }, item_files))
+    Some((ast::Crate { pkg: clause0, pkg_span: Span::new(0, 0), items }, item_files))
 }
 
 /// root package: the file/dir args name the sources; decls stay bare
@@ -721,7 +731,7 @@ fn pkg_src(fs: &[String]) -> PkgSrc {
 /// (spans in other files mis-map: the pre-existing per-crate limitation)
 fn entry_file(src: &PkgSrc) -> Option<PathBuf> {
     match src {
-        PkgSrc::Dir(d) => pkg_dir_files(d).into_iter().next(),
+        PkgSrc::Dir(d) => pkg_dir_files(d).unwrap_or_default().into_iter().next(),
         PkgSrc::Files(fs) => fs.first().cloned(),
     }
 }
@@ -1093,7 +1103,7 @@ fn analyze(path: &Path, src: &str) -> Analysis {
         false,
     );
     let (krate, item_files) = loaded.unwrap_or_else(|| {
-        (ast::Crate { pkg: String::new(), items: Vec::new() }, Vec::new())
+        (ast::Crate { pkg: String::new(), pkg_span: Span::new(0, 0), items: Vec::new() }, Vec::new())
     });
     let files: Vec<String> = item_files.iter().map(|p| p.to_string_lossy().to_string()).collect();
     let checked = check::check(&krate, &files, &mut diags);
