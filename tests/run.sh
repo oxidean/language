@@ -585,6 +585,32 @@ grep -q "file://$tv/esclib v1.0.0" "$tv/escapp/oxl.mod" || { echo "FAIL floor bu
 grep -q "file://$tv/esclib v1.2.0 h1:" "$tv/escapp/oxl.sum" || { echo "FAIL restore sums"; cat "$tv/escapp/oxl.sum"; exit 1; }
 ( cd "$tv/escapp" && OXLMODCACHE="$tv/cache" "$OXL" build escapp -o "$tv/escbin" ) || { echo "FAIL esc build"; exit 1; }
 [ "$("$tv/escbin")" = "esc=42/2" ] || { echo "FAIL esc run"; "$tv/escbin"; exit 1; }
+# a dropped require takes its MVS edges with it: raiser is never
+# imported but holds libx at v1.2.0 — the version the walk checked.
+# Once raiser drops, keeping the v1.0.0 floor would select an
+# unfetched version whose leaf package doesn't even exist, so tidy
+# bumps the kept floor to the checked selection
+mkdir -p "$tv/raiser/r" "$tv/libx" "$tv/rapp/rapp"
+( cd "$tv/libx" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/libx\noxl 0.3\n' "$tv" > oxl.mod
+  git add -A && git commit -qm v1 && git tag v1.0.0
+  mkdir -p leaf && printf 'package leaf\n\nfn leafval() -> int { return 5 }\n' > leaf/leaf.oxl
+  git add -A && git commit -qm v2 && git tag v1.2.0 )
+( cd "$tv/raiser" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/raiser\noxl 0.3\nrequire file://%s/libx v1.2.0\n' "$tv" "$tv" > oxl.mod
+  printf 'package r\n\nfn rval() -> int { return 0 }\n' > r/r.oxl
+  git add -A && git commit -qm raiser && git tag v1.0.0 )
+printf 'package main\nimport "file://%s/libx/leaf"\n\nfn main() { println("lv=" + itoa(leaf.leafval())) }\n' "$tv" > "$tv/rapp/rapp/main.oxl"
+( cd "$tv/rapp" && printf 'module file://%s/rapp\noxl 0.3\n' "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/raiser@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/libx@v1.2.0" >/dev/null
+  sed -i 's|libx v1.2.0|libx v1.0.0|' oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy7" 2>&1 || { echo "FAIL tidy7 rc"; cat "$tv/tidy7"; exit 1; }
+grep -q 'dropped file://' "$tv/tidy7" || { echo "FAIL tidy7 drop"; cat "$tv/tidy7"; exit 1; }
+! grep -q 'raiser' "$tv/rapp/oxl.mod" || { echo "FAIL raiser kept"; cat "$tv/rapp/oxl.mod"; exit 1; }
+grep -q "file://$tv/libx v1.2.0" "$tv/rapp/oxl.mod" || { echo "FAIL floor not raised"; cat "$tv/rapp/oxl.mod"; exit 1; }
+( cd "$tv/rapp" && OXLMODCACHE="$tv/cache" "$OXL" build rapp -o "$tv/rbin" ) || { echo "FAIL rapp build"; exit 1; }
+[ "$("$tv/rbin")" = "lv=5" ] || { echo "FAIL rapp run"; "$tv/rbin"; exit 1; }
 ;;
 esac
 

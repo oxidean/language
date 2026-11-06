@@ -2013,12 +2013,13 @@ fn mod_init(args: &[String], cwd: &Path) {
         exit(2);
     }
     let path = &args[0];
-    if path.is_empty()
+    let body = path.strip_prefix("file:///").unwrap_or(path);
+    if body.is_empty()
         || path.chars().any(char::is_whitespace)
         || path.contains('@')
-        || path.starts_with('/')
-        || path.ends_with('/')
-        || path.contains("//")
+        || body.starts_with('/')
+        || body.ends_with('/')
+        || body.contains("//")
     {
         eprintln!("error: malformed module path \"{path}\"");
         exit(1);
@@ -2311,7 +2312,16 @@ fn tidy_satisfy(
                         // below it
                         let f = fetch_mod(mp, mv)?;
                         let slot = install(&cache, mp, &f)?;
-                        pin_require(mtext, sums, mp, &f, &slot)?;
+                        // an earlier import this pass may already have
+                        // written the require at a deliberate floor —
+                        // keep it and pin only the sums; absent needs
+                        // the require line too or the next pass can't
+                        // resolve the provider
+                        if parse_manifest(mtext)?.2.iter().any(|(p, _)| p == mp) {
+                            pin_sums(sums, mp, &f, &slot)?;
+                        } else {
+                            pin_require(mtext, sums, mp, &f, &slot)?;
+                        }
                         report.push(format!("added {mp}@{} // indirect", f.ver));
                         return Ok(true);
                     }
@@ -2692,7 +2702,37 @@ fn mod_tidy(args: &[String], cwd: &Path) {
     for p in ctx.requires.iter().map(|(p, _)| p).filter(|p| !needed.contains_key(*p)) {
         report.push(format!("dropped {p}"));
     }
-    let new_text = rewrite_requires(&mtext, &want);
+    let mut new_text = rewrite_requires(&mtext, &want);
+    // dropping an unused require takes its MVS edges with it — a
+    // needed module whose selection a dropped raiser held up falls
+    // back to its floor, unchecked and possibly never fetched. Any
+    // module the rewrite lowers gets its floor moved to the version
+    // the walk actually checked (Go pins the raiser as // indirect;
+    // moving the kept module's floor selects the same version without
+    // retaining a dead module name)
+    if let Ok(fc) = mk_ctx(&root, &new_text, sums.clone()) {
+        let mut bumped = false;
+        for mp in needed.keys() {
+            let (Some(checked), Some(fin)) =
+                (selected_ver(&ctx, mp), selected_ver(&fc, mp))
+            else {
+                continue;
+            };
+            let lower = matches!(
+                (semver::parse(fin), semver::parse(checked)),
+                (Some(fv), Some(cv))
+                    if semver::compare(&fv, &cv) == std::cmp::Ordering::Less
+            );
+            if lower {
+                let ind = want.get(mp).map(|w| w.1).unwrap_or(false);
+                want.insert(mp.clone(), (checked.to_string(), ind));
+                bumped = true;
+            }
+        }
+        if bumped {
+            new_text = rewrite_requires(&mtext, &want);
+        }
+    }
     // the sums the new require set needs: every non-replaced require's
     // selected version gets its h1 pair — kept lines carry over,
     // missing ones hash from the cache slot
@@ -2746,6 +2786,26 @@ fn mod_tidy(args: &[String], cwd: &Path) {
                 h1: h,
             });
         }
+    }
+    // a concurrent `oxl get` or editor save between our read and this
+    // write would be silently lost — re-read both files and abort when
+    // either moved (a write between the check and the write itself
+    // can't be closed without locking)
+    let disk_m = std::fs::read_to_string(&mpath).unwrap_or_else(|e| {
+        eprintln!("error: {}: {e}", mpath.display());
+        exit(1);
+    });
+    let disk_s = match std::fs::read_to_string(&spath) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            eprintln!("error: {}: {e}", spath.display());
+            exit(1);
+        }
+    };
+    if disk_m != orig_mtext || disk_s != orig_stext {
+        eprintln!("error: oxl.mod/oxl.sum changed during tidy — re-run oxl mod tidy");
+        exit(1);
     }
     if new_text != orig_mtext {
         if let Err(e) = std::fs::write(&mpath, &new_text) {
