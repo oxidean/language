@@ -1,0 +1,182 @@
+package utf8
+
+// std/unicode/utf8 — rune decoding over oxl's byte-string `str`,
+// Go's unicode/utf8 semantics: runes are int code points, RuneError
+// is 0xFFFD, and every malformed/truncated sequence decodes as
+// (RuneError, 1) — never more.
+
+/// runeerror is the value decode yields for malformed input —
+/// Go's utf8.RuneError, U+FFFD.
+fn runeerror() -> int {
+    return 65533
+}
+
+// accept ranges per leading byte, Go's table: lo/hi bounds on the
+// SECOND byte are what reject overlongs, surrogates and >U+10FFFF.
+fn b2lo(b1: int) -> int {
+    if b1 == 224 {
+        return 160 // E0: b2 >= A0 (overlong bar)
+    }
+    if b1 == 237 {
+        return 128 // ED: b2 <= 9F (surrogate bar)
+    }
+    if b1 == 240 {
+        return 144 // F0: b2 >= 90 (overlong bar)
+    }
+    if b1 == 244 {
+        return 128 // F4: b2 <= 8F (U+10FFFF cap)
+    }
+    return 128
+}
+
+fn b2hi(b1: int) -> int {
+    if b1 == 224 {
+        return 191
+    }
+    if b1 == 237 {
+        return 159 // ED A0..BF are surrogates
+    }
+    if b1 == 240 {
+        return 191
+    }
+    if b1 == 244 {
+        return 143 // F4 90.. are > U+10FFFF
+    }
+    return 191
+}
+
+// seqlen returns the encoded length a leading byte claims, or 0 for
+// invalid leaders (continuation bytes, C0/C1, F5+).
+fn seqlen(b1: int) -> int {
+    if b1 < 128 {
+        return 1
+    }
+    if b1 >= 194 && b1 <= 223 {
+        return 2
+    }
+    if b1 >= 224 && b1 <= 239 {
+        return 3
+    }
+    if b1 >= 240 && b1 <= 244 {
+        return 4
+    }
+    return 0
+}
+
+/// Dec is decode's result — (rune, size) since pair returns are
+/// `[T, err]` only in this language.
+struct Dec { r: int, n: int }
+
+/// decode returns the (rune, size) pair for the sequence at s[i] —
+/// Go's DecodeRuneInString: (RuneError, 0) at end of input,
+/// (RuneError, 1) for every malformed or truncated sequence.
+fn decode(s: str, i: int) -> Dec {
+    if i >= len(s) {
+        return Dec{r: 65533, n: 0}
+    }
+    b1 := byteat(s, i)
+    if b1 < 128 {
+        return Dec{r: b1, n: 1}
+    }
+    n := seqlen(b1)
+    if n == 0 {
+        return Dec{r: 65533, n: 1}
+    }
+    if i + n > len(s) {
+        return Dec{r: 65533, n: 1} // truncated
+    }
+    b2 := byteat(s, i + 1)
+    if b2 < b2lo(b1) || b2 > b2hi(b1) {
+        return Dec{r: 65533, n: 1}
+    }
+    r := 0
+    if n == 2 {
+        r = b1 % 32 * 64 + b2 % 64
+    }
+    if n == 3 {
+        b3 := byteat(s, i + 2)
+        if b3 < 128 || b3 > 191 {
+            return Dec{r: 65533, n: 1}
+        }
+        r = b1 % 16 * 4096 + b2 % 64 * 64 + b3 % 64
+    }
+    if n == 4 {
+        b3 := byteat(s, i + 2)
+        b4 := byteat(s, i + 3)
+        if b3 < 128 || b3 > 191 || b4 < 128 || b4 > 191 {
+            return Dec{r: 65533, n: 1}
+        }
+        r = b1 % 8 * 262144 + b2 % 64 * 4096 + b3 % 64 * 64 + b4 % 64
+    }
+    return Dec{r: r, n: n}
+}
+
+/// runelen returns the rune count — Go's RuneCountInString: each
+/// decode step counts one rune, malformed bytes one each. (Named
+/// runelen, not len: a package `len` would shadow the builtin and
+/// the loop bound below would recurse.)
+fn runelen(s: str) -> int {
+    n := 0
+    i := 0
+    for i < len(s) {
+        d := decode(s, i)
+        if d.n == 0 {
+            d = Dec{r: 65533, n: 1}
+        }
+        i = i + d.n
+        n = n + 1
+    }
+    return n
+}
+
+/// valid reports whether s is well-formed UTF-8 — Go's ValidString.
+fn valid(s: str) -> bool {
+    i := 0
+    for i < len(s) {
+        d := decode(s, i)
+        if d.r == 65533 && d.n <= 1 {
+            return false
+        }
+        i = i + d.n
+    }
+    return true
+}
+
+/// fullrune reports whether s[i:] begins a complete sequence —
+/// Go's FullRuneInString (truncation is not malformation).
+fn fullrune(s: str) -> bool {
+    if len(s) == 0 {
+        return true
+    }
+    n := seqlen(byteat(s, 0))
+    return n > 0 && n <= len(s)
+}
+
+/// encode returns the UTF-8 bytes for rune r — Go's
+/// EncodeRune semantics: out-of-range encodes U+FFFD.
+fn encode(r: int) -> str {
+    if r < 0 || r > 1114111 || r >= 55296 && r <= 57343 {
+        r = 65533
+    }
+    if r < 128 {
+        return byte_str(r)
+    }
+    if r < 2048 {
+        return byte_str(192 + r / 64) + byte_str(128 + r % 64)
+    }
+    if r < 65536 {
+        return byte_str(224 + r / 4096) + byte_str(128 + r / 64 % 64) + byte_str(128 + r % 64)
+    }
+    return byte_str(240 + r / 262144) + byte_str(128 + r / 4096 % 64) + byte_str(128 + r / 64 % 64) + byte_str(128 + r % 64)
+}
+
+// byte_str builds a one-byte string via the buf builtins.
+fn byte_str(b: int) -> str {
+    buf := mkbuf(1)
+    poke8(buf, 0, b)
+    out := bufstr(buf, 1)
+    rt_free(buf)
+    return out
+}
+
+extern fn rt_free(p: own void)

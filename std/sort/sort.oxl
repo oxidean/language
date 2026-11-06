@@ -1,0 +1,117 @@
+package sort
+
+// std/sort — Go's sort package: ascending sort for ordered types
+// and a comparator-based sort for anything else. Heapsort under
+// both — O(n·log n) worst case, in place, iterative sift-down.
+import "std/cmp"
+
+// sift restores the heap order for the subtree rooted at r within
+// v[0:n], under the less-than predicate.
+fn sift[T any](v: []T, lt: fn(T, T) -> bool, r: int, n: int) {
+    i := r
+    for true {
+        c := 2 * i + 1
+        if c >= n {
+            break
+        }
+        if c + 1 < n && lt(v[c], v[c + 1]) {
+            c = c + 1
+        }
+        if !lt(v[i], v[c]) {
+            break
+        }
+        t := v[i]
+        v[i] = v[c]
+        v[c] = t
+        i = c
+    }
+}
+
+/// sortfn sorts v in place so lt(v[i], v[i+1]) holds pairwise —
+/// Go's sort.Slice with the comparator spelled `lt` like sort.SliceIsSorted's.
+fn sortfn[T any](v: []T, lt: fn(T, T) -> bool) {
+    n := len(v)
+    // heapify: last parent down
+    i := n / 2 - 1
+    for i >= 0 {
+        sift(v, lt, i, n)
+        i = i - 1
+    }
+    // extract max to the tail, shrinking the heap
+    e := n - 1
+    for e > 0 {
+        t := v[0]
+        v[0] = v[e]
+        v[e] = t
+        sift(v, lt, 0, e)
+        e = e - 1
+    }
+}
+
+// sifto is sift with the ordered `<` inline — generic fns can't be
+// passed as fn values (the language instantiates only at call
+// sites), so `sort` can't share sortfn's comparator path.
+fn sifto[T cmp.Ordered](v: []T, r: int, n: int) {
+    i := r
+    for true {
+        c := 2 * i + 1
+        if c >= n {
+            break
+        }
+        if c + 1 < n && v[c] < v[c + 1] {
+            c = c + 1
+        }
+        if !(v[i] < v[c]) {
+            break
+        }
+        t := v[i]
+        v[i] = v[c]
+        v[c] = t
+        i = c
+    }
+}
+
+/// sort sorts v ascending — Go's sort.Ints/Strings generically.
+fn sort[T cmp.Ordered](v: []T) {
+    n := len(v)
+    i := n / 2 - 1
+    for i >= 0 {
+        sifto(v, i, n)
+        i = i - 1
+    }
+    e := n - 1
+    for e > 0 {
+        t := v[0]
+        v[0] = v[e]
+        v[e] = t
+        sifto(v, 0, e)
+        e = e - 1
+    }
+}
+
+/// is_sorted reports whether v is non-decreasing — Go's
+/// sort.IsSorted / IntsAreSorted.
+fn is_sorted[T cmp.Ordered](v: []T) -> bool {
+    i := 1
+    for i < len(v) {
+        if v[i] < v[i - 1] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// reverse reverses v in place — handy with sort for descending
+/// order and generally useful.
+fn reverse[T any](v: []T) {
+    i := 0
+    j := len(v) - 1
+    for i < j {
+        t := v[i]
+        v[i] = v[j]
+        v[j] = t
+        i = i + 1
+        j = j - 1
+    }
+}

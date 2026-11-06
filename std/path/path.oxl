@@ -1,0 +1,234 @@
+package path
+
+// std/path — slash-separated path manipulation, Go's path package.
+// Lexical only: no filesystem access, no symlink resolution.
+// `\` is never a separator here (that's std/path/filepath's job).
+import "std/strings"
+
+// seg list for clean — most-significant first
+struct Seg { v: str, next: own Seg }
+
+fn spush(h: own Seg, v: str) -> own Seg {
+    return new(Seg{v: v, next: h})
+}
+
+// clean returns the shortest equivalent path, Go's path.Clean:
+// collapse `//`, resolve `.`, resolve `..` against prior segments
+// (kept for a relative path's leading `..`, dropped at root).
+fn clean(p: str) -> str {
+    if len(p) == 0 {
+        return "."
+    }
+    rooted := byteat(p, 0) == 47
+    parts := strings.split(p, "/")
+    let stack: own Seg = nil
+    depth := 0
+    for parts != nil {
+        s := parts.v
+        parts = parts.next
+        if len(s) == 0 || s == "." {
+            continue
+        }
+        if s == ".." {
+            if depth > 0 {
+                stack = stack.next
+                depth = depth - 1
+            } else if !rooted {
+                stack = spush(stack, s)
+                depth = depth + 1
+            }
+            continue
+        }
+        stack = spush(stack, s)
+        depth = depth + 1
+    }
+    // rebuild forward-ordered list
+    let fwd: own Seg = nil
+    for stack != nil {
+        fwd = spush(fwd, stack.v)
+        stack = stack.next
+    }
+    out := ""
+    if rooted {
+        out = "/"
+    }
+    first := true
+    for fwd != nil {
+        if !first {
+            out = out + "/"
+        }
+        first = false
+        out = out + fwd.v
+        fwd = fwd.next
+    }
+    if len(out) == 0 {
+        return "."
+    }
+    return out
+}
+
+// dir returns all but the last element — Go's path.Dir.
+fn dir(p: str) -> str {
+    d := clean(p)
+    i := len(d) - 1
+    for i >= 0 && byteat(d, i) != 47 {
+        i = i - 1
+    }
+    if i < 0 {
+        return "."
+    }
+    if i == 0 {
+        return "/"
+    }
+    return clean(substr(d, 0, i))
+}
+
+// base returns the last element — Go's path.Base: ""->".",
+// "/"->"/", trailing slashes strip first.
+fn base(p: str) -> str {
+    if len(p) == 0 {
+        return "."
+    }
+    e := len(p)
+    for e > 0 && byteat(p, e - 1) == 47 {
+        e = e - 1
+    }
+    if e == 0 {
+        return "/"
+    }
+    i := e - 1
+    for i >= 0 && byteat(p, i) != 47 {
+        i = i - 1
+    }
+    return substr(p, i + 1, e)
+}
+
+// ext returns the suffix from the last `.` in the final element —
+// Go's path.Ext: no dot -> "".
+fn ext(p: str) -> str {
+    b := base(p)
+    i := len(b) - 1
+    for i >= 0 {
+        if byteat(b, i) == 47 {
+            break
+        }
+        if byteat(b, i) == 46 {
+            return substr(b, i, len(b))
+        }
+        i = i - 1
+    }
+    return ""
+}
+
+// isabs reports whether p starts with `/` — Go's path.IsAbs.
+fn isabs(p: str) -> bool {
+    return len(p) > 0 && byteat(p, 0) == 47
+}
+
+// join concatenates elems with `/` and cleans — Go's path.Join.
+// `join(a)` callers pass a StrList; scalar convenience is join2.
+fn join(parts: own strings.StrList) -> str {
+    out := ""
+    for parts != nil {
+        if len(out) > 0 && len(parts.v) > 0 {
+            out = out + "/"
+        }
+        out = out + parts.v
+        parts = parts.next
+    }
+    return clean(out)
+}
+
+/// join2 joins two segments — the common case, no list building.
+fn join2(a: str, b: str) -> str {
+    if len(a) == 0 {
+        return clean(b)
+    }
+    if len(b) == 0 {
+        return clean(a)
+    }
+    return clean(a + "/" + b)
+}
+
+// matches reports whether name matches the glob pattern — Go's
+// path.Match subset: `*` (any seq), `?` (one char), `[a-z]`/`[^a-z]`
+// classes. Neither `*` nor `?` crosses `/`. (`match` is a keyword here.)
+fn matches(pat: str, name: str) -> bool {
+    return m_at(pat, 0, name, 0)
+}
+
+fn m_at(p: str, pi: int, s: str, si: int) -> bool {
+    for pi < len(p) {
+        c := byteat(p, pi)
+        if c == 42 {
+            // * — collapse consecutive stars, try every suffix
+            for pi < len(p) && byteat(p, pi) == 42 {
+                pi = pi + 1
+            }
+            k := si
+            for k <= len(s) {
+                if m_at(p, pi, s, k) {
+                    return true
+                }
+                if k >= len(s) || byteat(s, k) == 47 {
+                    return false
+                }
+                k = k + 1
+            }
+            return false
+        }
+        if c == 63 {
+            if si >= len(s) || byteat(s, si) == 47 {
+                return false
+            }
+            pi = pi + 1
+            si = si + 1
+            continue
+        }
+        if c == 91 {
+            // [class] — optional ^/! negation, ranges a-z, no '/' match
+            if si >= len(s) {
+                return false
+            }
+            sc := byteat(s, si)
+            if sc == 47 {
+                return false
+            }
+            pi = pi + 1
+            neg := false
+            if pi < len(p) && (byteat(p, pi) == 94 || byteat(p, pi) == 33) {
+                neg = true
+                pi = pi + 1
+            }
+            hit := false
+            for pi < len(p) && byteat(p, pi) != 93 {
+                if pi + 2 < len(p) && byteat(p, pi + 1) == 45 && byteat(p, pi + 2) != 93 {
+                    if sc >= byteat(p, pi) && sc <= byteat(p, pi + 2) {
+                        hit = true
+                    }
+                    pi = pi + 3
+                } else {
+                    if sc == byteat(p, pi) {
+                        hit = true
+                    }
+                    pi = pi + 1
+                }
+            }
+            if pi >= len(p) {
+                return false // unclosed class
+            }
+            pi = pi + 1
+            if hit == neg {
+                return false
+            }
+            si = si + 1
+            continue
+        }
+        if si >= len(s) || byteat(s, si) != c {
+            return false
+        }
+        pi = pi + 1
+        si = si + 1
+    }
+    return si == len(s)
+}

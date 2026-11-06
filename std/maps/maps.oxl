@@ -1,0 +1,100 @@
+package maps
+
+// std/maps — Go's maps package over the collections map. The
+// language's map is concrete (str keys, int values — the bootstrap
+// checker's shape), so these helpers are concrete too; the generic
+// signatures land when the map type does.
+import "std/collections"
+
+/// keys returns every key in m — Go's maps.Keys collected. Order is
+/// bucket order, not sorted (Go makes no order promise either).
+fn keys(m: ref collections.Map) -> own []str {
+    out := new(mkslice(str, collections.map_len(m)))
+    n := 0
+    i := 0
+    for i < len(m.bs) {
+        node := m.bs[i].head
+        for node != nil {
+            out[n] = node.key
+            n = n + 1
+            node = node.next
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// values returns every value in m — Go's maps.Values collected.
+fn values(m: ref collections.Map) -> own []int {
+    out := new(mkslice(int, collections.map_len(m)))
+    n := 0
+    i := 0
+    for i < len(m.bs) {
+        node := m.bs[i].head
+        for node != nil {
+            out[n] = node.val
+            n = n + 1
+            node = node.next
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// copy inserts every entry of src into dst — Go's maps.Copy.
+fn copy(dst: mut collections.Map, src: ref collections.Map) {
+    i := 0
+    for i < len(src.bs) {
+        node := src.bs[i].head
+        for node != nil {
+            collections.map_set(dst, node.key, node.val)
+            node = node.next
+        }
+        i = i + 1
+    }
+}
+
+/// equal reports whether a and b have the same keys with equal
+/// values — Go's maps.Equal.
+fn equal(a: ref collections.Map, b: ref collections.Map) -> bool {
+    if collections.map_len(a) != collections.map_len(b) {
+        return false
+    }
+    i := 0
+    for i < len(a.bs) {
+        node := a.bs[i].head
+        for node != nil {
+            [v, err] = collections.map_get(b, node.key)
+            if err != nil || v != node.val {
+                return false
+            }
+            node = node.next
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// skeys returns every element of s — the set-facing half of keys.
+fn skeys(s: ref collections.Set) -> own []str {
+    return keys(s.m)
+}
+
+/// sequal reports whether two sets hold the same elements.
+fn sequal(a: ref collections.Set, b: ref collections.Set) -> bool {
+    if collections.map_len(a.m) != collections.map_len(b.m) {
+        return false
+    }
+    i := 0
+    for i < len(a.m.bs) {
+        node := a.m.bs[i].head
+        for node != nil {
+            if !collections.map_has(b.m, node.key) {
+                return false
+            }
+            node = node.next
+        }
+        i = i + 1
+    }
+    return true
+}

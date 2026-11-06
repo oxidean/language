@@ -1014,6 +1014,13 @@ impl<'a> Checker<'a> {
             // own argument into ref/mut param still binds the inner var
             (Ty::Ref(w) | Ty::Mut(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) => self.bind_vars(w, g, bind),
             (Ty::Slice(w), Ty::Slice(g)) => self.bind_vars(w, g, bind),
+            // own []T into []T param — binds the element through the
+            // borrow view (assignable admits the same coercion)
+            (Ty::Slice(w), Ty::Own(g)) => {
+                if let Ty::Slice(gg) = &**g {
+                    self.bind_vars(w, gg, bind)
+                }
+            }
             (Ty::Fn(wps, wr), Ty::Fn(gps, gr)) => {
                 for (w, g) in wps.iter().zip(gps.iter()) {
                     self.bind_vars(w, g, bind);
@@ -1029,9 +1036,10 @@ impl<'a> Checker<'a> {
     /// cover it; ops keep their fixed vocabulary.
     fn satisfies(&self, t: &Ty, c: &str) -> bool {
         let op_ok = |op: &str, t: &Ty| match op {
-            "eq" => matches!(t, Ty::Int | Ty::Bool | Ty::Str | Ty::Chan | Ty::Var(_)),
-            "ordered" => matches!(t, Ty::Int | Ty::Var(_)),
-            "add" => matches!(t, Ty::Int | Ty::Str | Ty::Var(_)),
+            "eq" => matches!(t, Ty::Int | Ty::Bool | Ty::Str | Ty::Chan | Ty::Var(_)
+                | Ty::Float | Ty::Byte | Ty::Err),
+            "ordered" => matches!(t, Ty::Int | Ty::Float | Ty::Byte | Ty::Str | Ty::Var(_)),
+            "add" => matches!(t, Ty::Int | Ty::Str | Ty::Float | Ty::Byte | Ty::Var(_)),
             _ => false,
         };
         // a Var satisfies through its declared constraint only
@@ -1227,6 +1235,10 @@ impl<'a> Checker<'a> {
             // and the empty slice
             || (*got == Ty::Err && matches!(want, Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Slice(_) | Ty::Shared))
             || matches!((want, got), (Ty::Ref(w), Ty::Own(g) | Ty::Mut(g) | Ty::Ref(g)) | (Ty::Mut(w), Ty::Own(g) | Ty::Mut(g)) if **w == **g)
+            // own []T reads as a []T borrow — the view is scope-bounded
+            // like every slice; the owner's heap backing outlives it
+            || matches!((want, got), (Ty::Slice(w), Ty::Own(g))
+                if matches!(g.as_ref(), Ty::Slice(gg) if w.as_ref() == gg.as_ref()))
             // an untyped owned cell (mkbuf, own ?) borrows into any ref/mut
             || (*got == Ty::Own(Box::new(Ty::Unknown)) && matches!(want, Ty::Ref(_) | Ty::Mut(_)))
             // interface-typed want: structural method-set satisfaction,
@@ -1574,6 +1586,9 @@ impl<'a> Checker<'a> {
                         } else if lt == Ty::Float || rt == Ty::Float {
                             self.assignable(&Ty::Float, &lt, l.span);
                             self.assignable(&Ty::Float, &rt, r.span);
+                        } else if lt == Ty::Str && rt == Ty::Str {
+                            // Go parity: str < str is byte-lex — codegen
+                            // emits rt_str_cmp; == keeps the eq path
                         } else {
                             self.assignable(&Ty::Int, &lt, l.span);
                             self.assignable(&Ty::Int, &rt, r.span);
@@ -2256,7 +2271,7 @@ impl<'a> Checker<'a> {
             if sig.is_extern {
                 for a in args {
                     let t = self.expr(a, env);
-                    if !matches!(t, Ty::Int | Ty::Byte | Ty::Err | Ty::Bool | Ty::CStr | Ty::Str | Ty::Slice(_) | Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Shared | Ty::Fn(..) | Ty::Unknown) {
+                    if !matches!(t, Ty::Int | Ty::Float | Ty::Byte | Ty::Err | Ty::Bool | Ty::CStr | Ty::Str | Ty::Slice(_) | Ty::Own(_) | Ty::Ref(_) | Ty::Mut(_) | Ty::Chan | Ty::Shared | Ty::Fn(..) | Ty::Unknown) {
                         self.diags.push(Diag::err(a.span, "ffi",
                             format!("`{}` cannot cross the FFI boundary", t.name())));
                     }

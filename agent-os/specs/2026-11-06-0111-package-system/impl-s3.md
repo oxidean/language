@@ -27,6 +27,18 @@ set of new `rt_*` externs.
   stays byte-identical. (A new positive corpus row proves the widening;
   existing constraint negatives still fail.)
 
+- **`own []T` completes in the type grammar — the escape hatch the
+  checker's own diag recommends.** `new(slice)` already produces
+  `own []T` (`rt_slice_own` heap-copies), but `starts_ty`/`p_ty`
+  rejected `[` after `own`/`ref`/`mut`, so the type couldn't be
+  *declared* anywhere — `slices.clone`-style producers had no
+  returning shape. Adding `[` to the type-start set is one token
+  each side. Follow-on: `own []T` → `[]T` read-coercion in
+  `assignable`+`bind_vars` (`sort(clone(s))` composes; the view is
+  scope-bounded like every slice) and the `(*v)` emit at call args
+  — builtins like `len(os)`/`os[i]` already accepted own slices,
+  this just lets user fns do the same.
+
 - **`maps` is concrete, not generic.** `collections.Map` is `str→int`
   — a generic `maps[K,V]` can't exist until the container does. The
   package ships `keys`/`values`/`merge`/`equal`/`has`/`keys_sorted`

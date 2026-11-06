@@ -730,6 +730,13 @@ fn bind_generic(want: &Ty, got: &Ty, bind: &mut HashMap<String, Ty>) {
             bind_generic(w, g, bind)
         }
         (Ty::Slice(w), Ty::Slice(g)) => bind_generic(w, g, bind),
+        // own []T into a []T param binds the element — mirrors the
+        // assignable coercion the checker admits (check.rs bind_vars)
+        (Ty::Slice(w), Ty::Own(g)) => {
+            if let Ty::Slice(gg) = &**g {
+                bind_generic(w, gg, bind)
+            }
+        }
         (Ty::Fn(wps, wr), Ty::Fn(gps, gr)) => {
             for (w, g) in wps.iter().zip(gps.iter()) {
                 bind_generic(w, g, bind);
@@ -1795,6 +1802,10 @@ impl<'a> Gen<'a> {
                 } else if matches!(op, BinOp::Eq | BinOp::Ne) && self.dt(&lt) == Ty::Str {
                     let neg = if *op == BinOp::Ne { "!" } else { "" };
                     format!("({neg}rt_streq({lv}, {rv}))")
+                } else if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                    && self.dt(&lt) == Ty::Str
+                {
+                    format!("(rt_str_cmp({lv}, {rv}) {cop} 0)")
                 } else if matches!(op, BinOp::Eq | BinOp::Ne)
                     && (matches!(self.dt(&lt), Ty::Iface(_))
                         || matches!(self.dt(&self.expr_ty(r)), Ty::Iface(_)))
@@ -2804,6 +2815,14 @@ impl<'a> Gen<'a> {
                                 self.expr(a)
                             };
                             let raw_at = self.expr_ty(a);
+                            // own []T into a []T param — own slices are
+                            // RtSlice* where the param wants RtSlice;
+                            // the checker admits the view, emit the deref
+                            if matches!(pt, Ty::Slice(_))
+                                && matches!(self.dt(&raw_at), Ty::Own(b) if matches!(b.as_ref(), Ty::Slice(_)))
+                            {
+                                v = format!("(*{v})");
+                            }
                             if pt == Ty::CStr && self.dt(&raw_at) == Ty::Str {
                                 // a literal already is a C string — an
                                 // rt_cstr copy would only sit in the

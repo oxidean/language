@@ -1,57 +1,39 @@
 package main
 
-// simple CLI pilot: greets by name, counts args — exercises argv,
-// string ops, [v, err], and the toolchain end to end.
+// simple CLI pilot: greets by name, counts to n — exercises argv,
+// the std/flag package end to end, and [v, err] error handling.
 //
-//   oxl run examples/cli/main.oxl -- Jesse 3
+//   oxl run examples/cli/main.oxl -- -n=3 Jesse
 //   → "hello, Jesse" / 0 / 1 / 2
+import "std/flag"
+
 fn greet(name: str) -> str {
     return "hello, " + name
 }
 
-fn parse_count(s: str) -> [int, err] {
-    if len(s) == 0 {
-        return 0, 1
-    }
-    // digits only — atoi stops at the first non-digit, so "2oops"
-    // would silently pass as 2 without this check
-    i := 0
-    for i < len(s) {
-        c := byteat(s, i)
-        if c < 48 || c > 57 {
-            return 0, 2
-        }
-        i = i + 1
-    }
-    // beyond int32 digit-count an atoi overflow silently clamps
-    if len(s) > 9 {
-        return 0, 2
-    }
-    n := atoi(s)
-    if n <= 0 {
-        return 0, 2
-    }
-    return n, nil
-}
-
 fn main() {
-    n := argc()
-    if n < 2 {
-        println("usage: cli <name> [count]")
+    fs := flag.newset("cli")
+    flag.int_(fs, "n", 0, "count lines to print")
+    flag.boolean(fs, "v", 0, "verbose greeting")
+    [_, err] = flag.parse(fs)
+    if err != nil {
+        // parse already wrote the message and usage to stderr
         exit(2)
     }
-    println(greet(argv(1)))
-
-    if n >= 3 {
-        [c, err] = parse_count(argv(2))
-        if err != nil {
-            println("bad count arg")
-            exit(2)
-        }
-        i := 0
-        for i < c {
-            println(itoa(i))
-            i = i + 1
-        }
+    pos := flag.args(fs)
+    if len(pos) < 1 {
+        f2 := flag.usage(fs)
+        println(f2)
+        exit(2)
+    }
+    println(greet(pos[0]))
+    if flag.getb(fs, "v") {
+        println("verbose mode on")
+    }
+    c := flag.geti(fs, "n")
+    i := 0
+    for i < c {
+        println(itoa(i))
+        i = i + 1
     }
 }
