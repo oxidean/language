@@ -51,7 +51,7 @@ fn ver_tuple(v: &str) -> Option<(u64, u64, u64)> {
     let v = v.strip_prefix('v').unwrap_or(v);
     let mut it = v.split('.');
     let maj = it.next()?.parse().ok()?;
-    let min = it.next().map_or(Ok(0), |s| s.parse()).ok()?;
+    let min = it.next()?.parse().ok()?;
     let patch = it.next().map_or(Ok(0), |s| s.parse()).ok()?;
     if it.next().is_some() {
         return None;
@@ -89,7 +89,12 @@ struct ModCtx {
 /// nearest ancestor of `dir` holding `oxl.mod`, if any — nearest wins,
 /// so a nested module is its own root
 fn find_root(dir: &Path) -> Option<PathBuf> {
-    let mut d = Some(dir.to_path_buf());
+    // canonicalize the start: a lexical walk stalls at `.`/`""` (a bare
+    // filename's parent) and never reaches the cwd's real ancestors
+    let mut d = match std::fs::canonicalize(dir) {
+        Ok(p) => Some(p),
+        Err(_) => std::env::current_dir().ok(),
+    };
     while let Some(x) = d {
         if x.join("oxl.mod").is_file() {
             return Some(x);
@@ -878,7 +883,10 @@ fn load_pkg_inner(
             if let ast::Item::Import(i) = it {
                 match resolve_pkg(ctx, entry, &i.path) {
                     Resolve::Dir(d) => {
-                        let idir = fpath.parent().unwrap_or(Path::new("."));
+                        let idir = fpath
+                            .parent()
+                            .filter(|p| !p.as_os_str().is_empty())
+                            .unwrap_or(Path::new("."));
                         if !internal_ok(&d, idir) {
                             if loud {
                                 eprintln!(
@@ -1474,7 +1482,7 @@ fn cmd_doc(args: &[String]) {
 /// analyze one in-memory buffer (imports resolved from disk); returns
 /// (line, col, message) diagnostics for the buffer itself
 struct Analysis {
-    diags: Vec<(usize, usize, String)>,
+    diags: Vec<(String, usize, usize, String)>,
     index: check::Index,
 }
 
@@ -1487,20 +1495,28 @@ fn analyze(path: &Path, src: &str) -> Analysis {
     let mut seen = std::collections::HashSet::new();
     let mut pkg_names = std::collections::HashMap::new();
     let mut loading = Vec::new();
-    let ctx = mod_ctx(path.parent().unwrap_or(Path::new(".")), false)
-        .ok()
-        .flatten();
-    let fs = vec![path.to_path_buf()];
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let ctx = mod_ctx(dir, false).ok().flatten();
+    // the whole package loads so decls in sibling files resolve; `over`
+    // keeps the open buffer's unsaved text authoritative for `path`
+    let src_pkg = if dir.is_dir() {
+        PkgSrc::Dir(dir.to_path_buf())
+    } else {
+        PkgSrc::Files(vec![path.to_path_buf()])
+    };
     let loaded = load_pkg(
-        &PkgSrc::Files(fs),
-        &path.to_string_lossy(),
+        &src_pkg,
+        &dir.to_string_lossy(),
         false,
         true,
         &mut seen,
         &mut pkg_names,
         &mut loading,
         ctx.as_ref(),
-        path.parent().unwrap_or(Path::new(".")),
+        dir,
         Some((path, src)),
         false,
     );
@@ -1514,14 +1530,24 @@ fn analyze(path: &Path, src: &str) -> Analysis {
             eprintln!("USE {} {:?} -> {} {:?} `{}`", u.file, u.span, u.def_file, u.def_span, u.sig);
         }
     }
+    // every diag maps against ITS file's text: the open buffer for
+    // `path`, disk contents for siblings
+    let open = path.to_string_lossy().to_string();
+    let mut srcs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    srcs.insert(open.clone(), src.to_string());
     Analysis {
         diags: diags
             .list
             .iter()
             .map(|d| {
                 // LSP columns are UTF-16 units; publish_diags wants 1-based
-                let (l, c) = lsp_line_col(src, d.span.lo);
-                (l + 1, c + 1, format!("[{}] {}", d.code, d.msg))
+                let f = if d.file.is_empty() { open.clone() } else { d.file.clone() };
+                let text = srcs
+                    .entry(f.clone())
+                    .or_insert_with(|| std::fs::read_to_string(&f).unwrap_or_default());
+                let (l, c) = lsp_line_col(text, d.span.lo);
+                (f, l + 1, c + 1, format!("[{}] {}", d.code, d.msg))
             })
             .collect(),
         index: checked.index,
@@ -1772,7 +1798,26 @@ fn cmd_lsp() {
             if let (Some(uri), Some(text)) = (json_str(&body, "uri"), json_str(&body, "text")) {
                 let p = uri_to_path(&uri);
                 let a = analyze(Path::new(&p), &text);
-                publish_diags(&mut stdout, &uri, &a.diags);
+                let mut order: Vec<String> = Vec::new();
+                let mut by_file: std::collections::HashMap<String, Vec<(usize, usize, String)>> =
+                    Default::default();
+                for (f, l, c, m) in &a.diags {
+                    if !by_file.contains_key(f) {
+                        order.push(f.clone());
+                    }
+                    by_file.entry(f.clone()).or_default().push((*l, *c, m.clone()));
+                }
+                // the open doc always publishes first — even an empty
+                // list is meaningful (it clears stale diagnostics), and
+                // a client reading one response per didOpen must get it
+                let mut ordered = vec![p.clone()];
+                ordered.extend(order.iter().filter(|f| **f != p).cloned());
+                for f in ordered {
+                    // the open doc reuses the client's URI verbatim; a
+                    // sibling publishes under its own
+                    let u = if f == p { uri.clone() } else { path_to_uri(&f) };
+                    publish_diags(&mut stdout, &u, by_file.get(&f).map(Vec::as_slice).unwrap_or(&[]));
+                }
                 docs.insert(uri, (text, a));
             }
             continue;
