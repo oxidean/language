@@ -59,5 +59,8 @@ V1 (queries need semver; MVS runs over the fetched manifests).
 - Hash stability across platforms: the hash input is canonical git
   tree content — the `git archive` extraction path means checkout
   filters never touch it, so `core.autocrlf` / smudge filters can't
-  fork `oxl.sum` between machines. Normalize `\\`→`/` in recorded
-  names; document the canonicalization.
+  fork `oxl.sum` between machines. Recorded names join path
+  *components* with `/` (never a string replace — a POSIX filename
+  may legally contain `\`), and a component with a literal
+  backslash is rejected outright: it can't survive a Windows
+  extraction anyway.
