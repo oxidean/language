@@ -505,6 +505,62 @@ rm "$getwork/app/oxl.sum"
 ( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$scratch/selfcheck$EXE" app ) > "$getwork/nosum.self" 2>&1 && { echo "FAIL missing-sum accepted (self)"; exit 1; }
 grep -q 'missing oxl.sum entry for module' "$getwork/nosum.rust" || { echo "FAIL missing-sum text"; cat "$getwork/nosum.rust"; exit 1; }
 diff "$getwork/nosum.rust" "$getwork/nosum.self" >/dev/null || { echo "FAIL missing-sum parity"; cat "$getwork/nosum.rust" "$getwork/nosum.self"; exit 1; }
+
+echo "== v3 oxl mod commands =="
+# tidy syncs the manifest with what the source imports — an
+# un-required import is fetched through the same veneer (its dep's
+# own requires land as // indirect), a require nothing imports is
+# dropped, and oxl.sum is rewritten to the final require set.
+# Same file:// POSIX-only constraint as the get fixture.
+tv="$scratch/tidywork"
+mkdir -p "$tv/dep/util" "$tv/leafpkg/leaf" "$tv/app/app" "$tv/cache" "$tv/locdep/thing"
+( cd "$tv/dep" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/dep\noxl 0.3\nrequire file://%s/leafpkg v1.0.0\n' "$tv" "$tv" > oxl.mod
+  printf 'package util\nimport "file://%s/leafpkg/leaf"\n\nfn answer() -> int { return leaf.leafval() + 41 }\n' "$tv" > util/util.oxl
+  git add -A && git commit -qm dep && git tag v1.0.0 )
+( cd "$tv/leafpkg" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/leafpkg\noxl 0.3\n' "$tv" > oxl.mod
+  printf 'package leaf\n\nfn leafval() -> int { return 1 }\n' > leaf/leaf.oxl
+  git add -A && git commit -qm leaf && git tag v1.0.0 )
+printf 'package thing\n\nfn val() -> int { return 7 }\n' > "$tv/locdep/thing/thing.oxl"
+printf 'module file://%s/locdep\noxl 0.3\n' "$tv" > "$tv/locdep/oxl.mod"
+printf 'package main\nimport "file://%s/dep/util"\n\nfn main() { println("answer=" + itoa(util.answer())) }\n' "$tv" > "$tv/app/app/main.oxl"
+# init: skeleton is a valid manifest, second init refuses
+mkdir "$tv/fresh" && ( cd "$tv/fresh" && "$OXL" mod init example.com/fresh ) > "$tv/init1" 2>&1 || { echo "FAIL init rc"; cat "$tv/init1"; exit 1; }
+grep -q '^module example.com/fresh$' "$tv/fresh/oxl.mod" || { echo "FAIL init manifest"; cat "$tv/fresh/oxl.mod"; exit 1; }
+( cd "$tv/fresh" && "$OXL" mod init example.com/other ) > "$tv/init2" 2>&1 && { echo "FAIL re-init accepted"; cat "$tv/init2"; exit 1; }
+grep -q 'already exists' "$tv/init2" || { echo "FAIL re-init text"; cat "$tv/init2"; exit 1; }
+# tidy with no requires: fetches dep@latest, leafpkg lands // indirect
+( cd "$tv/app" && printf 'module file://%s/app\noxl 0.3\n' "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy1" 2>&1 || { echo "FAIL tidy rc"; cat "$tv/tidy1"; exit 1; }
+grep -q "added file://$tv/dep@" "$tv/tidy1" || { echo "FAIL tidy fetch"; cat "$tv/tidy1"; exit 1; }
+grep -q "require file://$tv/leafpkg v1.0.0 // indirect" "$tv/app/oxl.mod" || { echo "FAIL tidy indirect"; cat "$tv/app/oxl.mod"; exit 1; }
+[ "$(grep -c ' h1:' "$tv/app/oxl.sum")" = 4 ] || { echo "FAIL tidy sums"; cat "$tv/app/oxl.sum"; exit 1; }
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" build app -o "$tv/appbin" ) || { echo "FAIL tidy build"; exit 1; }
+[ "$("$tv/appbin")" = "answer=42" ] || { echo "FAIL tidy run"; "$tv/appbin"; exit 1; }
+# tidy drops an unused require; second tidy is a no-op (idempotent)
+printf 'module file://%s/app\noxl 0.3\n\nrequire (\n\tfile://%s/unused v1.9.9 // stale\n\tfile://%s/dep v1.0.0\n\tfile://%s/leafpkg v1.0.0 // indirect\n)\n' "$tv" "$tv" "$tv" "$tv" > "$tv/app/oxl.mod"
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy2" 2>&1 || { echo "FAIL tidy2 rc"; cat "$tv/tidy2"; exit 1; }
+grep -q 'dropped file://' "$tv/tidy2" || { echo "FAIL tidy drop"; cat "$tv/tidy2"; exit 1; }
+! grep -q unused "$tv/app/oxl.mod" || { echo "FAIL unused kept"; cat "$tv/app/oxl.mod"; exit 1; }
+cp "$tv/app/oxl.mod" "$tv/m.save" && cp "$tv/app/oxl.sum" "$tv/s.save"
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) >/dev/null 2>&1 || { echo "FAIL tidy3 rc"; exit 1; }
+diff "$tv/m.save" "$tv/app/oxl.mod" >/dev/null || { echo "FAIL tidy idempotent"; diff "$tv/m.save" "$tv/app/oxl.mod"; exit 1; }
+# replace-only coverage: require is added at Go's placeholder version
+printf 'module file://%s/app\noxl 0.3\n\nreplace file://%s/locdep => ../locdep\n' "$tv" "$tv" > "$tv/app/oxl.mod"
+rm -f "$tv/app/oxl.sum"
+printf 'package main\nimport "file://%s/locdep/thing"\n\nfn main() { println("thing=" + itoa(thing.val())) }\n' "$tv" > "$tv/app/app/main.oxl"
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy4" 2>&1 || { echo "FAIL tidy4 rc"; cat "$tv/tidy4"; exit 1; }
+grep -q 'v0.0.0-00010101000000-000000000000' "$tv/app/oxl.mod" || { echo "FAIL replace placeholder"; cat "$tv/app/oxl.mod"; exit 1; }
+# verify + list + unresolvable error
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod verify ) > "$tv/vfy" 2>&1 || { echo "FAIL verify rc"; cat "$tv/vfy"; exit 1; }
+grep -q 'all modules verified' "$tv/vfy" || { echo "FAIL verify text"; cat "$tv/vfy"; exit 1; }
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod list ) > "$tv/mlist" 2>&1 || { echo "FAIL mod list rc"; cat "$tv/mlist"; exit 1; }
+grep -q "file://$tv/locdep" "$tv/mlist" || { echo "FAIL list locdep"; cat "$tv/mlist"; exit 1; }
+printf 'package main\nimport "file://%s/nosuch/pkg"\n\nfn main() {}\n' "$tv" > "$tv/app/app/main.oxl"
+printf 'module file://%s/app\noxl 0.3\n' "$tv" > "$tv/app/oxl.mod" && rm -f "$tv/app/oxl.sum"
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy5" 2>&1 && { echo "FAIL tidy5 accepted"; cat "$tv/tidy5"; exit 1; }
+grep -q 'no required module provides package' "$tv/tidy5" || { echo "FAIL tidy5 text"; cat "$tv/tidy5"; exit 1; }
 ;;
 esac
 
