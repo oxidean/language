@@ -15,5 +15,6 @@ fn main() {
     assert(d5b.f() == 2)
     assert(s.trim("  x  ") == "x")
     assert(trim("  y  ") == "y")
+    assert(strings.startswith("ab", "a"))
     println("d5 qual ok")
 }

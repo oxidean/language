@@ -1,0 +1,7 @@
+package main
+
+import "std/strings".{split}
+
+fn main() {
+    println(strings.join(split("a,b", ","), "|"))
+}

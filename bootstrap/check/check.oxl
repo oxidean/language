@@ -324,10 +324,17 @@ struct ArmSt { mv: own LL, ft: int, next: own ArmSt }
 // per-file import aliases (qualifier -> stem) and selective names
 struct ModEnt { alias: str, stem: str, next: own ModEnt }
 
+// M3: one import's checkable bindings — `qual` = local qualifier the
+// file must reference ("" when this bind is a selective name), `tgt` =
+// resolved `bound.name` a selective import expects ("" for qualifiers).
+// `used` marks at name resolution so the unused pass reads intent.
+struct ImpBind { path: str, qual: str, tgt: str, used: int, next: own ImpBind }
+
 struct FileAlias {
     file: str,
     aliases: own ModEnt,
     names: own ModEnt,
+    binds: own ImpBind,
     next: own FileAlias,
 }
 
@@ -1658,6 +1665,17 @@ fn file_alias_idx(ck: ref Ck, file: str) -> int {
     return -1
 }
 
+// does a ModEnt list already bind local name `a`
+fn modent_has(l: ref ModEnt, a: str) -> int {
+    for l != nil {
+        if l.alias == a {
+            return 1
+        }
+        l = l.next
+    }
+    return 0
+}
+
 // qualifier -> stem for the current file's aliases ("" when unaliased)
 fn alias_stem(ck: ref Ck, q: str) -> str {
     fi := file_alias_idx(ck, ck.cur_file)
@@ -1667,6 +1685,15 @@ fn alias_stem(ck: ref Ck, q: str) -> str {
     l := ck.file_aliases[fi].aliases
     for l != nil {
         if l.alias == q {
+            // M3: every matching bind marks — same-qualified imports of
+            // one package share the mark like Rust's used.quals set
+            b := ck.file_aliases[fi].binds
+            for b != nil {
+                if b.qual == q {
+                    b.used = 1
+                }
+                b = b.next
+            }
             return l.stem
         }
         l = l.next
@@ -1683,6 +1710,13 @@ fn selective_name(ck: ref Ck, n: str) -> str {
     l := ck.file_aliases[fi].names
     for l != nil {
         if l.alias == n {
+            b := ck.file_aliases[fi].binds
+            for b != nil {
+                if b.tgt == l.stem {
+                    b.used = 1
+                }
+                b = b.next
+            }
             return l.stem
         }
         l = l.next
@@ -5420,6 +5454,7 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
             }
             let al: own ModEnt = nil
             let nm: own ModEnt = nil
+            let binds: own ImpBind = nil
             l = items
             for l != nil {
                 match l.v {
@@ -5443,22 +5478,38 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
                             ck.load_fail = 1
                         } else {
                             bound := load_pkg(ck, ld, rr.dir, path, 1, 0)
-                            if len(bound) > 0 {
+                            // `as _` — explicit side-effect import: the
+                            // package loads, nothing binds, exempt (M3)
+                            if len(bound) > 0 && alias != "_" {
+                                qual := bound
                                 if len(alias) > 0 {
-                                    al = new(ModEnt{alias: alias, stem: bound, next: al})
-                                } else {
-                                    al = new(ModEnt{alias: bound, stem: bound, next: al})
+                                    qual = alias
                                 }
-                                nl := names
-                                for nl != nil {
-                                    match nl.v {
-                                        parser.Node.Name(n) => {
-                                            nm = new(ModEnt{alias: n, stem: bound + "." + n, next: nm})
+                                // a second binding of the same local name is
+                                // an error (Go: redeclared in this block)
+                                if modent_has(al, qual) == 1 || modent_has(nm, qual) == 1 {
+                                    diag(ck, "check", "`" + qual + "` redeclared as imported package name")
+                                    ck.load_fail = 1
+                                } else {
+                                    al = new(ModEnt{alias: qual, stem: bound, next: al})
+                                    binds = new(ImpBind{path: path, qual: qual, tgt: "", used: 0, next: binds})
+                                    nl := names
+                                    for nl != nil {
+                                        match nl.v {
+                                            parser.Node.Name(n) => {
+                                                if modent_has(al, n) == 1 || modent_has(nm, n) == 1 {
+                                                    diag(ck, "check", "`" + n + "` redeclared as imported name")
+                                                    ck.load_fail = 1
+                                                    break
+                                                }
+                                                nm = new(ModEnt{alias: n, stem: bound + "." + n, next: nm})
+                                                binds = new(ImpBind{path: path, qual: "", tgt: bound + "." + n, used: 0, next: binds})
+                                            }
+                                            _ => {
+                                            }
                                         }
-                                        _ => {
-                                        }
+                                        nl = nl.next
                                     }
-                                    nl = nl.next
                                 }
                             }
                         }
@@ -5468,7 +5519,17 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
                 }
                 l = l.next
             }
-            ck.file_aliases = push(ck.file_aliases, FileAlias{file: fpath, aliases: al, names: nm, next: nil})
+            // binds built by prepend — flip so unused diags emit in
+            // the file's import order like the Rust report
+            let rb: own ImpBind = nil
+            for binds != nil {
+                bn := binds.next
+                binds.next = rb
+                rb = binds
+                binds = bn
+            }
+            binds = rb
+            ck.file_aliases = push(ck.file_aliases, FileAlias{file: fpath, aliases: al, names: nm, binds: binds, next: nil})
         }
         _ => {
         }
@@ -5667,6 +5728,26 @@ fn check_file(path: str, need_main: int) -> own CkRes {
     check_closures(ck)
     check_fnvals(ck)
     check_suspend_rules(ck, ld.items)
+    // M3: each file's imports judged against its decls — one diag per
+    // dead binding in import order (Rust emits these mid-load)
+    if ck.load_fail == 0 {
+        fi2 := 0
+        for fi2 < len(ck.file_aliases) {
+            b := ck.file_aliases[fi2].binds
+            for b != nil {
+                if b.used == 0 {
+                    if len(b.qual) > 0 {
+                        diag(ck, "check", "imported and not used: \"" + b.path + "\"")
+                    } else {
+                        sn := substr(b.tgt, find(b.tgt, ".") + 1, len(b.tgt))
+                        diag(ck, "check", "imported and not used: \"" + b.path + "\".{" + sn + "}")
+                    }
+                }
+                b = b.next
+            }
+            fi2 = fi2 + 1
+        }
+    }
     r := new(CkRes)
     r.ck = ck
     r.items = ld.items

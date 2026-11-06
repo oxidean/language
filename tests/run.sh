@@ -301,7 +301,7 @@ out=$("$OXL" run tests/d5_qual.oxl)
 cat > "$scratch/d5unqual.oxl" <<'EOF'
 package main
 import "std/strings"
-fn main() { println(trim(" x ")) }
+fn main() { println(strings.startswith("ab","a")); println(trim(" x ")) }
 EOF
 if "$OXL" build "$scratch/d5unqual.oxl" -o "$scratch/d5unqual" 2>/dev/null; then
     echo "FAIL: unqualified import call compiled"; exit 1
