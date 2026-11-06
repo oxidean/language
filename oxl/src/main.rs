@@ -1533,7 +1533,12 @@ fn analyze(
     let (krate, item_files) = loaded.unwrap_or_else(|| {
         (ast::Crate { pkg: String::new(), pkg_span: Span::new(0, 0), items: Vec::new() }, Vec::new())
     });
-    let files: Vec<String> = item_files.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    // Path joins emit `\` on Windows while uri_to_path keeps `/` —
+    // every downstream identity is the string form, so normalize here
+    let files: Vec<String> = item_files
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
     let checked = check::check(&krate, &files, &mut diags);
     if std::env::var("OXL_IDX_DEBUG").is_ok() {
         for u in &checked.index.uses {
@@ -1550,7 +1555,7 @@ fn analyze(
             .iter()
             .map(|d| {
                 // LSP columns are UTF-16 units; publish_diags wants 1-based
-                let f = if d.file.is_empty() { doc.clone() } else { d.file.clone() };
+                let f = if d.file.is_empty() { doc.clone() } else { d.file.replace('\\', "/") };
                 let text = srcs
                     .entry(f.clone())
                     .or_insert_with(|| std::fs::read_to_string(&f).unwrap_or_default());
