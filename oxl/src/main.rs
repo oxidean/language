@@ -1846,20 +1846,28 @@ fn cmd_lsp() {
                 ordered.extend(order.iter().filter(|f| **f != p).cloned());
                 let mut current: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
+                let mut sent: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for f in ordered {
                     // the open doc reuses the client's URI verbatim; a
                     // sibling publishes under its own
                     let u = if f == p { uri.clone() } else { path_to_uri(&f) };
                     let list = by_file.get(&f).map(Vec::as_slice).unwrap_or(&[]);
                     publish_diags(&mut stdout, &u, list);
+                    sent.insert(u.clone());
                     if !list.is_empty() {
                         current.insert(u);
                     }
                 }
                 // a file whose last diagnostic cleared still needs an
                 // explicit empty publish — the client keeps the old one
-                // otherwise
-                for u in published.difference(&current).cloned().collect::<Vec<_>>() {
+                // otherwise; skip URIs already published in this round
+                for u in published
+                    .difference(&current)
+                    .filter(|u| !sent.contains(*u))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
                     publish_diags(&mut stdout, &u, &[]);
                 }
                 published = current;
