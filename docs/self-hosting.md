@@ -47,7 +47,7 @@ rot.
 ## What the language already has (sufficient for frontend)
 
 - `readfile`/`writefile`/`exit` builtins (file io + process)
-- `import "std/net/http"` — binds the module under a namespace qualifier (`http.serve(...)`); `as` renames it and `.{name, ...}` imports select names unqualified. `std/...` resolves against the toolchain `std/` tree
+- `import "std/net/http"` — binds the module under a namespace qualifier (`http.serve(...)`); `as` renames it and `.{name, ...}` imports select names unqualified. `std/...` resolves against the toolchain `std/` tree; module mode (`oxl.mod` requires/replaces, `internal/`, MVS selection, and `oxl.sum` `h1:` verification — sha256 dirhash ported to pure oxl) is fully mirrored with byte-identical diagnostics
 - `own` linked structures + `nil` — token lists and AST trees
 - `mut`/`ref` borrows — parser cursors mutate through borrow regions
 - Generics: `fn f[T constraint]` monomorphized per instantiation

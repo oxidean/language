@@ -2,7 +2,9 @@ mod ast;
 mod check;
 mod codegen;
 mod diag;
+mod fetch;
 mod fmt;
+mod modcache;
 mod lexer;
 mod parser;
 mod semver;
@@ -19,7 +21,7 @@ fn main() {
         return;
     }
     if args.len() < 2 {
-        eprintln!("oxl — one toolchain binary\n\n  oxl build [<pkg dir>|<file.oxl>...] [-o out]\n  oxl run [<pkg dir>|<file.oxl>...]\n  oxl test [<pkg dir>|<file.oxl>...]\n  oxl fmt <file.oxl>...\n  oxl doc <file.oxl>\n  oxl list -m all\n  oxl lsp");
+        eprintln!("oxl — one toolchain binary\n\n  oxl build [<pkg dir>|<file.oxl>...] [-o out]\n  oxl run [<pkg dir>|<file.oxl>...]\n  oxl test [<pkg dir>|<file.oxl>...]\n  oxl fmt <file.oxl>...\n  oxl doc <file.oxl>\n  oxl get <path>@<query>\n  oxl list -m all\n  oxl lsp");
         exit(2);
     }
     match args[1].as_str() {
@@ -28,6 +30,7 @@ fn main() {
         "test" => cmd_test(&args),
         "fmt" => cmd_fmt(&args),
         "doc" => cmd_doc(&args),
+        "get" => cmd_get(&args),
         "list" => cmd_list(&args),
         "lsp" => cmd_lsp(),
         other => {
@@ -61,15 +64,6 @@ fn ver_tuple(v: &str) -> Option<(u64, u64, u64)> {
     Some((maj, min, patch))
 }
 
-/// `vX.Y.Z` or a pseudo-version (`vX.Y.Z-<anything>`) — the require/
-/// replace version shape; full semver grammar lands with V1
-fn mod_ver_ok(v: &str) -> bool {
-    let core = v.split('-').next().unwrap_or(v);
-    let mut it = core.strip_prefix('v').unwrap_or("").split('.');
-    let dig = |s: Option<&str>| matches!(s, Some(x) if !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()));
-    dig(it.next()) && dig(it.next()) && dig(it.next()) && it.next().is_none()
-}
-
 /// first path segment carrying a `.` reads as a remote module path —
 /// drives the `oxl get` hint on `cannot find package`
 fn remoteish(imp: &str) -> bool {
@@ -86,6 +80,11 @@ struct ModCtx {
     /// replace LHS (path, optional version) -> local dir
     replaces: Vec<(String, Option<String>, PathBuf)>,
     modcache: PathBuf,
+    /// oxl.sum beside oxl.mod — every cache-resolved module verifies
+    /// against it on load (replaces bypass by design). Empty when the
+    /// file is absent; a missing line then fails like Go's
+    /// "missing go.sum entry".
+    sums: Vec<modcache::SumLine>,
     /// MVS build list: each required module path at its selected
     /// (max) version — resolution reads dirs at THESE versions, not
     /// the raw require lines
@@ -110,26 +109,31 @@ fn find_root(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// module cache root: OXLMODCACHE wins, else ~/.oxl/mod
+/// module cache root: OXLMODCACHE wins, else the platform default —
+/// %LOCALAPPDATA%\oxl\mod on Windows, ~/.oxl/mod elsewhere.
 fn modcache_dir() -> PathBuf {
-    if let Ok(v) = std::env::var("OXLMODCACHE") {
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
-    }
-    for k in ["HOME", "USERPROFILE"] {
-        if let Ok(h) = std::env::var(k) {
-            if !h.is_empty() {
-                return PathBuf::from(h).join(".oxl").join("mod");
-            }
-        }
-    }
-    PathBuf::from(".oxl").join("mod")
+    modcache::cache_dir()
 }
 
 /// parse oxl.mod text -> (module path, `oxl` floor as written,
 /// requires, replaces). Errors come back ready to print:
 /// `oxl.mod:<line>: <msg>` — display stays hermetic (the manifest is
+/// manifest comment rule: `//` opens a comment only at line start or
+/// after whitespace — a `//` glued inside a token (`file://`, `https://`)
+/// is part of the path, same constraint Go's modfile lexer applies
+/// implicitly. Returns the line up to the first real comment.
+fn strip_comment(raw: &str) -> &str {
+    let b = raw.as_bytes();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if b[i] == b'/' && b[i + 1] == b'/' && (i == 0 || b[i - 1].is_ascii_whitespace()) {
+            return &raw[..i];
+        }
+        i += 1;
+    }
+    raw
+}
+
 /// always AT the module root, so the bare name locates it).
 fn parse_manifest(
     src: &str,
@@ -141,7 +145,7 @@ fn parse_manifest(
     let mut lines = src.lines().enumerate().peekable();
     while let Some((ln, raw)) = lines.next() {
         let line_no = ln + 1;
-        let text = raw.split("//").next().unwrap_or("").trim();
+        let text = strip_comment(raw).trim();
         if text.is_empty() {
             continue;
         }
@@ -173,7 +177,7 @@ fn parse_manifest(
                 if toks.len() == 2 && toks[1] == "(" {
                     let mut closed = false;
                     for (ln2, raw2) in lines.by_ref() {
-                        let t2 = raw2.split("//").next().unwrap_or("").trim();
+                        let t2 = strip_comment(raw2).trim();
                         if t2.is_empty() {
                             continue;
                         }
@@ -275,12 +279,28 @@ fn mod_ctx(start: &Path, loud: bool) -> Result<Option<ModCtx>, ()> {
             (p, v, d)
         })
         .collect();
+    // oxl.sum sits beside oxl.mod — absent = no cached module can be
+    // trusted (every lookup reports its missing entry); malformed is
+    // a hard manifest error, never silently degraded
+    let sums = match std::fs::read_to_string(root.join("oxl.sum")) {
+        Ok(t) => match modcache::parse_sums(&t) {
+            Ok(s) => s,
+            Err(e) => {
+                if loud {
+                    eprintln!("error [check] {e}");
+                }
+                return Err(());
+            }
+        },
+        Err(_) => Vec::new(),
+    };
     let mut ctx = ModCtx {
         path,
         root,
         requires,
         replaces,
         modcache: modcache_dir(),
+        sums,
         selected: Vec::new(),
     };
     ctx.selected = build_list(&ctx);
@@ -292,29 +312,38 @@ enum Resolve {
     /// declared require with neither replace nor a cache copy —
     /// carries the `path@ver` the diagnostic names
     Missing(String),
+    /// cache copy failed oxl.sum verification — carries the
+    /// Go-worded mismatch text for the diagnostic
+    Tampered(String),
     NotFound,
 }
 
 /// the directory a required module version occupies: the matching
 /// replace RHS (version-specific replaces beat blanket ones) or the
-/// module-cache `path@ver` slot. None = not fetched.
-fn module_dir(ctx: &ModCtx, mp: &str, ver: &str) -> Option<PathBuf> {
+/// module-cache `path@ver` slot. None = not fetched. A cache hit is
+/// verified against oxl.sum before use — Err carries the Go-worded
+/// mismatch text for the caller's diagnostic.
+fn module_dir(ctx: &ModCtx, mp: &str, ver: &str) -> Result<Option<PathBuf>, String> {
     let mut blanket: Option<&PathBuf> = None;
     for (rp, rv, rd) in &ctx.replaces {
         if rp != mp {
             continue;
         }
         match rv {
-            Some(v) if v == ver => return Some(rd.clone()),
+            Some(v) if v == ver => return Ok(Some(rd.clone())),
             None => blanket = Some(rd),
             _ => {}
         }
     }
     if let Some(rd) = blanket {
-        return Some(rd.clone());
+        return Ok(Some(rd.clone()));
     }
-    let d = ctx.modcache.join(format!("{mp}@{ver}"));
-    d.is_dir().then_some(d)
+    let d = modcache::slot(&ctx.modcache, mp, ver);
+    if !d.is_dir() {
+        return Ok(None);
+    }
+    modcache::verify_slot(&d, mp, ver, &ctx.sums)?;
+    Ok(Some(d))
 }
 
 /// minimal version selection: BFS the requirement graph from the main
@@ -327,7 +356,7 @@ fn build_list(ctx: &ModCtx) -> Vec<(String, String)> {
     let mut sel: BTreeMap<String, semver::Ver> = BTreeMap::new();
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     let mut queue: VecDeque<(String, String)> = VecDeque::new();
-    let mut offer = |sel: &mut BTreeMap<String, semver::Ver>,
+    let offer = |sel: &mut BTreeMap<String, semver::Ver>,
                      queue: &mut VecDeque<(String, String)>,
                      mp: &str,
                      mv: &str| {
@@ -346,7 +375,7 @@ fn build_list(ctx: &ModCtx) -> Vec<(String, String)> {
         if !seen.insert((mp.clone(), mv.clone())) {
             continue;
         }
-        let Some(dir) = module_dir(ctx, &mp, &mv) else {
+        let Ok(Some(dir)) = module_dir(ctx, &mp, &mv) else {
             continue;
         };
         let Ok(text) = std::fs::read_to_string(dir.join("oxl.mod")) else {
@@ -438,15 +467,18 @@ fn resolve_pkg(ctx: Option<&ModCtx>, entry: &Path, imp: &str) -> Resolve {
     if let Some(mp) = best {
         let rest = imp[mp.len()..].trim_start_matches('/');
         let v = selected_ver(ctx, mp).unwrap_or("");
-        if let Some(base) = module_dir(ctx, mp, v) {
-            let d = base.join(rest);
-            return if d.is_dir() {
-                Resolve::Dir(d)
-            } else {
-                Resolve::NotFound
-            };
+        match module_dir(ctx, mp, v) {
+            Ok(Some(base)) => {
+                let d = base.join(rest);
+                return if d.is_dir() {
+                    Resolve::Dir(d)
+                } else {
+                    Resolve::NotFound
+                };
+            }
+            Ok(None) => return Resolve::Missing(format!("{mp}@{v}")),
+            Err(e) => return Resolve::Tampered(e),
         }
-        return Resolve::Missing(format!("{mp}@{v}"));
     }
     Resolve::NotFound
 }
@@ -1076,6 +1108,12 @@ fn load_pkg_inner(
                             return None;
                         }
                     }
+                    Resolve::Tampered(e) => {
+                        if loud {
+                            eprintln!("error [check] {e}");
+                            return None;
+                        }
+                    }
                     Resolve::NotFound => {
                         if loud {
                             let hint = if remoteish(&i.path) {
@@ -1668,6 +1706,227 @@ fn cmd_fmt(args: &[String]) {
     if bad {
         exit(1);
     }
+}
+
+
+/// `oxl get <path>@<query>` — fetch a module into the cache and pin it:
+/// the require line is upserted in oxl.mod, both h1 lines in oxl.sum.
+/// `git` does the transport (bare clone -> `git archive` of the resolved
+/// rev); extraction is canonical tar bytes, never a checkout. A present
+/// slot is reused — re-get only re-pins the sums, matching Go's
+/// idempotent `go get` on a cached module.
+fn cmd_get(args: &[String]) {
+    if args.len() != 3 {
+        eprintln!("usage: oxl get <path>@<query>");
+        exit(2);
+    }
+    let spec = &args[2];
+    if spec.starts_with('-') {
+        eprintln!("usage: oxl get <path>@<query>");
+        exit(2);
+    }
+    let (mpath, query) = match spec.rsplit_once('@') {
+        Some((p, q)) if !p.is_empty() => (p.to_string(), if q.is_empty() { "latest" } else { q }),
+        _ => (spec.clone(), "latest"),
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        exit(1);
+    });
+    let Some(root) = find_root(&cwd) else {
+        eprintln!("error: no oxl.mod in current directory or any parent");
+        exit(1);
+    };
+    let url = fetch::repo_url(&mpath);
+    let f = match fetch::fetch(&url, &mpath, query) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: {e}");
+            exit(1);
+        }
+    };
+    // the fetched manifest must declare the path it was fetched as —
+    // Go refuses a module whose self-declared path differs from the
+    // required one (mis-pinned forks have to be replaced explicitly)
+    let declared = match std::str::from_utf8(&f.manifest)
+        .map_err(|e| e.to_string())
+        .and_then(|t| parse_manifest(t).map(|(p, _, _, _)| p))
+    {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {mpath}@{}: parsing oxl.mod: {e}", f.ver);
+            exit(1);
+        }
+    };
+    if declared != mpath {
+        eprintln!(
+            "error: {mpath}@{}: parsing oxl.mod: module declares its path as: {declared}, but was required as: {mpath}",
+            f.ver
+        );
+        exit(1);
+    }
+    let cache = modcache_dir();
+    let slot = modcache::slot(&cache, &mpath, &f.ver);
+    if slot.is_dir() {
+        // reuse path: the cached tree must still equal the fetched
+        // archive — verify by extracting fresh and comparing dirhash,
+        // or a hand-edited slot would be re-pinned as trustworthy
+        let tmp = cache.join(format!(".verify-{}-{}", std::process::id(), sanitize_tag(&f.ver)));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let ok = std::fs::create_dir_all(&tmp)
+            .and_then(|_| modcache::untar(&f.tar, &tmp).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+            .map_err(|e| e.to_string())
+            .and_then(|_| modcache::dir_h1(&tmp))
+            .and_then(|fresh| modcache::dir_h1(&slot).map(|cached| fresh == cached));
+        modcache::remove_tree(&tmp);
+        match ok {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("error: cached {mpath}@{} does not match the fetched archive — remove the slot and get again", f.ver);
+                exit(1);
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                exit(1);
+            }
+        }
+    }
+    if !slot.is_dir() {
+        let tmp = cache.join(format!(".tmp-{}-{}", std::process::id(), sanitize_tag(&f.ver)));
+        let _ = std::fs::remove_dir_all(&tmp);
+        if let Err(e) = std::fs::create_dir_all(&tmp)
+            .and_then(|_| modcache::untar(&f.tar, &tmp).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)).map(|_| ()))
+        {
+            modcache::remove_tree(&tmp);
+            eprintln!("error: {e}");
+            exit(1);
+        }
+        if let Some(par) = slot.parent() {
+            if let Err(e) = std::fs::create_dir_all(par) {
+                modcache::remove_tree(&tmp);
+                eprintln!("error: {e}");
+                exit(1);
+            }
+        }
+        // rename while the tree is still writable (a dir's `..` is
+        // rewritten on move, so a read-only dir can't be renamed at
+        // all), then seal in place. Consumers can't see the module
+        // before its oxl.sum line exists anyway — the sum, not the
+        // permission bit, is the integrity mechanism.
+        if let Err(e) = std::fs::rename(&tmp, &slot) {
+            // a concurrent get may have won the race — the slot is
+            // content-addressed so theirs is identical; reuse it
+            if !slot.is_dir() {
+                modcache::remove_tree(&tmp);
+                eprintln!("error: {}: {e}", slot.display());
+                exit(1);
+            }
+            modcache::remove_tree(&tmp);
+        }
+        if let Err(e) = modcache::seal(&slot) {
+            eprintln!("error: {e}");
+            exit(1);
+        }
+    }
+    // oxl.mod: replace the existing require's version or append one
+    let mpath_file = root.join("oxl.mod");
+    let mut mtext = std::fs::read_to_string(&mpath_file).unwrap_or_else(|e| {
+        eprintln!("error: {}: {e}", mpath_file.display());
+        exit(1);
+    });
+    let old_ver = upsert_require(&mut mtext, &mpath, &f.ver).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        exit(1);
+    });
+    if let Err(e) = std::fs::write(&mpath_file, &mtext) {
+        eprintln!("error: {}: {e}", mpath_file.display());
+        exit(1);
+    }
+    // oxl.sum: drop stale lines for the module, add the fresh pair
+    let spath = root.join("oxl.sum");
+    let stext = std::fs::read_to_string(&spath).unwrap_or_default();
+    let mut sums = match modcache::parse_sums(&stext) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            exit(1);
+        }
+    };
+    sums.retain(|l| !(l.path == mpath && l.ver == f.ver));
+    let tree_h = match modcache::dir_h1(&slot) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: {e}");
+            exit(1);
+        }
+    };
+    let mod_h = modcache::mod_h1(&mpath, &f.ver, &f.manifest);
+    sums.push(modcache::SumLine { path: mpath.clone(), ver: f.ver.clone(), is_mod: false, h1: tree_h });
+    sums.push(modcache::SumLine { path: mpath.clone(), ver: f.ver.clone(), is_mod: true, h1: mod_h });
+    if let Err(e) = std::fs::write(&spath, modcache::sums_text(&sums)) {
+        eprintln!("error: {}: {e}", spath.display());
+        exit(1);
+    }
+    match old_ver {
+        Some(o) if o == f.ver => println!("unchanged {mpath}@{}", f.ver),
+        Some(o) => println!("upgraded {mpath}@{o} => {}", f.ver),
+        None => println!("added {mpath}@{}", f.ver),
+    }
+}
+
+/// filename-safe fragment for the tmp extraction dir
+fn sanitize_tag(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect()
+}
+
+/// upsert `require <path> <ver>` in manifest text: an existing require
+/// (single-line or inside a `require (` block) has its version swapped
+/// in place; absent gets an appended single-line form. Returns the
+/// previous version when one was already pinned.
+fn upsert_require(mtext: &mut String, path: &str, ver: &str) -> Result<Option<String>, String> {
+    let mut out = String::with_capacity(mtext.len() + 64);
+    let mut in_block = false;
+    let mut found: Option<String> = None;
+    for line in mtext.lines() {
+        let t = line.trim();
+        if in_block {
+            if t.starts_with(')') {
+                in_block = false;
+            } else if found.is_none() {
+                let mut it = t.split_whitespace();
+                if it.next() == Some(path) {
+                    if let Some(old) = it.next() {
+                        found = Some(old.to_string());
+                        out.push_str(&line.replacen(old, ver, 1));
+                        out.push('\n');
+                        continue;
+                    }
+                }
+            }
+        } else if t.starts_with("require") {
+            let rest = t["require".len()..].trim();
+            if rest.starts_with('(') {
+                in_block = true;
+            } else {
+                let mut it = rest.split_whitespace();
+                if it.next() == Some(path) {
+                    if let Some(old) = it.next() {
+                        found = Some(old.to_string());
+                        out.push_str(&line.replacen(old, ver, 1));
+                        out.push('\n');
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if found.is_none() {
+        out.push_str(&format!("require {path} {ver}\n"));
+    }
+    *mtext = out;
+    Ok(found)
 }
 
 // --- doc: /// comments attached to fn/struct/extern decls -> markdown ---

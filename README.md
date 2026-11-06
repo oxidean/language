@@ -56,6 +56,8 @@ oxl run file.oxl [args...]    # compile + run
 oxl test file.oxl             # run all fn test_*() in a scope each
 oxl fmt [-w|--check] file.oxl # canonical AST pretty-print (comments kept)
 oxl doc file.oxl              # /// comments → markdown
+oxl get <path>@<query>        # fetch + pin a dependency (needs git)
+oxl list -m all               # the MVS-selected module build list
 oxl lsp                        # stdio LSP: diagnostics, hover, goto-definition
 ```
 
@@ -132,6 +134,22 @@ Import resolution order:
 Packages under `internal/` may only be imported by code beneath the
 `internal` directory's parent. Import cycles are a compile error and
 print the cycle chain.
+
+### Fetching dependencies
+
+`oxl get <path>@<query>` fetches a module through `git` (a bare clone
+plus `git archive` of the resolved commit — canonical tree bytes, never
+a checkout) into the module cache, upserts the `require` line in
+`oxl.mod`, and pins both `h1:` hashes in `oxl.sum`. Queries: `@latest`
+(highest semver tag), `@vX.Y.Z` (a tag), or a branch/SHA (recorded as a
+Go-style pseudo-version). The cache is content-addressed
+(`<cache>/<escaped-path>@<version>/`, uppercase `!`-escaped like Go) and
+sealed read-only; every build verifies a cached module against
+`oxl.sum` — a tampered or missing entry fails with Go's
+`checksum mismatch` / `missing oxl.sum entry` diagnostics. `replace`
+directories bypass cache and sums by design. Private repos work through
+git's own auth (ssh agent, credential helpers); `git` is a toolchain
+dependency for `get` only.
 
 ## Examples
 

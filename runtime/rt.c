@@ -2201,6 +2201,41 @@ int64_t rt_isdir(OxlStr path) {
 #endif
 }
 
+/* regular-file probe — lstat-style: a symlink is NOT a regular file,
+ * so module-cache hashing skips links exactly like Rust's
+ * DirEntry::file_type().is_file() */
+int64_t rt_isfile(OxlStr path) {
+    char *cp = rt_alloc(path.n + 1);
+    memcpy(cp, path.p, (size_t)path.n);
+    cp[path.n] = 0;
+#ifdef _WIN32
+    DWORD a = GetFileAttributesA(cp);
+    return (a != INVALID_FILE_ATTRIBUTES
+            && !(a & FILE_ATTRIBUTE_DIRECTORY)
+            && !(a & FILE_ATTRIBUTE_REPARSE_POINT)) ? 1 : 0;
+#else
+    struct stat st;
+    return (lstat(cp, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 0;
+#endif
+}
+
+/* symlink probe — lstat-style: module-cache hashing must skip links
+ * wholesale, matching DirEntry::file_type() which reports the link
+ * itself as neither dir nor file */
+int64_t rt_islnk(OxlStr path) {
+    char *cp = rt_alloc(path.n + 1);
+    memcpy(cp, path.p, (size_t)path.n);
+    cp[path.n] = 0;
+#ifdef _WIN32
+    DWORD a = GetFileAttributesA(cp);
+    return (a != INVALID_FILE_ATTRIBUTES
+            && (a & FILE_ATTRIBUTE_REPARSE_POINT)) ? 1 : 0;
+#else
+    struct stat st;
+    return (lstat(cp, &st) == 0 && S_ISLNK(st.st_mode)) ? 1 : 0;
+#endif
+}
+
 static int name_cmp(const void *a, const void *b) {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }

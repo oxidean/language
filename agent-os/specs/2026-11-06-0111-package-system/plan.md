@@ -44,13 +44,13 @@ migration commit also fixes any newly-illegal imports.
 
 ## Track V — Versions & fetching (sequential after M2)
 
-### Task V1: semver + pseudo-versions + MVS [not started]
+### Task V1: semver + pseudo-versions + MVS [done — PR #11]
 
 `items/v1-semver-mvs.md`. Version grammar incl. `/vN` suffix rule,
 pseudo-version encode/parse/compare, MVS build-list walk. Pure
 library code — the resolver's foundation.
 
-### Task V2: module cache + `oxl get` + `oxl.sum` [not started]
+### Task V2: module cache + `oxl get` + `oxl.sum` [in progress — this PR]
 
 `items/v2-module-cache.md`. `OXLMODCACHE` layout, git-based fetch
 (shells out to `git`, like early Go), `h1:`-style tree hashes,
@@ -64,14 +64,14 @@ adds missing ones.
 
 ## Track G — Dead-code elimination (parallel-safe after M1)
 
-### Task G1: reachability in codegen [not started]
+### Task G1: reachability in codegen [done — PR #9]
 
 `items/g1-reachability.md`. Mark live decls from `main`/`test` roots
 over the merged AST; drop dead fns/types/globals/vtabs from emission.
 Both `codegen.rs` and `codegen.oxl` — identical output stays the
 parity bar.
 
-### Task G2: `rt.c` section GC + feature gates [not started]
+### Task G2: `rt.c` section GC + feature gates [done — PR #10]
 
 `items/g2-runtime-sections.md`. `-ffunction-sections`/`--gc-sections`
 (+ macOS/Windows spellings via the E3 veneer), and generalized
@@ -80,7 +80,7 @@ the program actually uses. Independent of G1.
 
 ## Track S — Stdlib (S1 after M1; S2-S5 parallel-safe)
 
-### Task S1: `stdlib/` → `std/` package tree [not started]
+### Task S1: `stdlib/` → `std/` package tree [done — PR #12]
 
 `items/s1-std-restructure.md`. Directory-package relayout of the 8
 existing modules onto Go paths where they map (`json`→`encoding/json`,

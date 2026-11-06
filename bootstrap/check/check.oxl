@@ -23,6 +23,10 @@ extern fn rt_lsdir(path: str) -> str
 
 extern fn rt_isdir(path: str) -> int
 
+extern fn rt_isfile(path: str) -> int
+
+extern fn rt_islnk(path: str) -> int
+
 // module resolution needs env (OXLMODCACHE) + file-exists (oxl.mod)
 extern fn rt_getenv(name: str) -> str
 
@@ -324,6 +328,14 @@ struct ArmSt { mv: own LL, ft: int, next: own ArmSt }
 // per-file import aliases (qualifier -> stem) and selective names
 struct ModEnt { alias: str, stem: str, ver: str, next: own ModEnt }
 
+struct SumEnt { path: str, ver: str, is_mod: int, h1: str, next: own SumEnt }
+
+struct DirRes { dir: str, err: str }
+
+struct SAcc { items: []str }
+
+struct IB { v: []int }
+
 // M3: one import's checkable bindings — `qual` = local qualifier the
 // file must reference ("" when this bind is a selective name), `tgt` =
 // resolved `bound.name` a selective import expects ("" for qualifiers).
@@ -392,6 +404,7 @@ struct Ck {
     mod_reps: own ModEnt, // replace path(+ver) -> resolved local dir
     mod_sel: own ModEnt, // MVS build list: module path -> selected version
     modcache: str, // module cache root
+    mod_sums: own SumEnt, // oxl.sum lines — cache lookups verify against them
     entry_dir: str, // root package dir — anchors the source-tree std walk
     fnvals: own SList, // named fns used as values
     cur_fn: str,
@@ -4874,7 +4887,7 @@ fn tool_ver() -> str {
 
 // resolve result: dir non-empty = found; missing non-empty = declared
 // require with neither replace nor a cache copy; both = cannot find
-struct RRes { dir: str, missing: str }
+struct RRes { dir: str, missing: str, tampered: str }
 
 fn all_digits(s: str) -> bool {
     i := 0
@@ -5427,12 +5440,8 @@ fn parse_manifest(ck: mut Ck, text: str) -> int {
     block_line := 0
     for lines != nil {
         lineno = lineno + 1
-        t := lines.v
+        t := strip_comment(lines.v)
         lines = lines.next
-        ci := find(t, "//")
-        if ci >= 0 {
-            t = substr(t, 0, ci)
-        }
         t = strings.trim(t)
         if len(t) == 0 {
             continue
@@ -5616,14 +5625,14 @@ fn dep_manifest_reqs(text: str) -> own ModEnt {
 // the dir a required module version occupies: version-specific
 // replace beats a blanket one, else the `path@ver` cache slot —
 // "" = not fetched (mirrors Rust module_dir)
-fn module_dir(ck: ref Ck, mp: str, ver: str) -> str {
+fn module_dir(ck: ref Ck, mp: str, ver: str) -> DirRes {
     blanket := ""
     rl := ck.mod_reps
     for rl != nil {
         if rl.alias == mp {
             if len(rl.ver) > 0 {
                 if rl.ver == ver {
-                    return rl.stem
+                    return DirRes{dir: rl.stem, err: ""}
                 }
             } else {
                 blanket = rl.stem
@@ -5632,13 +5641,17 @@ fn module_dir(ck: ref Ck, mp: str, ver: str) -> str {
         rl = rl.next
     }
     if len(blanket) > 0 {
-        return blanket
+        return DirRes{dir: blanket, err: ""}
     }
-    d := ck.modcache + "/" + mp + "@" + ver
-    if rt_isdir(d) == 1 {
-        return d
+    d := ck.modcache + "/" + escape_path(mp) + "@" + escape_path(ver)
+    if rt_isdir(d) == 0 {
+        return DirRes{dir: "", err: ""}
     }
-    return ""
+    e := verify_slot(ck, d, mp, ver)
+    if len(e) > 0 {
+        return DirRes{dir: "", err: e}
+    }
+    return DirRes{dir: d, err: ""}
 }
 
 // minimal version selection: BFS the requirement graph from the main
@@ -5684,11 +5697,11 @@ fn mod_build_list(ck: mut Ck) {
             continue
         }
         collections.map_set(seen, ent, 1)
-        d := module_dir(ck, mp, mv)
-        if len(d) == 0 {
+        dr := module_dir(ck, mp, mv)
+        if len(dr.dir) == 0 {
             continue
         }
-        mf := d + "/oxl.mod"
+        mf := dr.dir + "/oxl.mod"
         if rt_fexists(mf) == 0 {
             continue
         }
@@ -5738,6 +5751,11 @@ fn mod_ctx_load(ck: mut Ck, start: str) -> int {
     if parse_manifest(ck, text) == 0 {
         return 0
     }
+    if rt_fexists(root + "/oxl.sum") == 1 {
+        if parse_sums(ck, readfile(root + "/oxl.sum")) == 0 {
+            return 0
+        }
+    }
     mod_build_list(ck)
     ck.mod_on = 1
     return 1
@@ -5763,8 +5781,372 @@ fn std_at(base: str, rest: str) -> str {
 // mirrors resolve_pkg under the module rules: `std/` beside the
 // toolchain exe, then the main module's own path, then the longest
 // require-prefix through replace or the cache
+// ---------- module cache verification (V2) --------------------------
+// Mirrors modcache.rs: `!`-escaped slot names, oxl.sum parsing, and the
+// h1 dirhash — sha256 + base64 over sorted "<hex>  <name>\n" lines —
+// verified on every load with identical diagnostics. `oxl get` itself
+// stays driver-side (Go's compiler doesn't fetch either).
+//
+// ints are wrapping i64, so all u32 math masks with & 4294967295; the
+// language has no shift ops — x >> n is x / 2^n and x << n is x * 2^n,
+// which stays exact because every operand is masked to < 2^32 first.
+
+// `//` opens a manifest comment at line start or after whitespace —
+// glued inside a token (file://) it is part of the path
+fn strip_comment(t: str) -> str {
+    i := 0
+    for i + 1 < len(t) {
+        if byteat(t, i) == 47 && byteat(t, i + 1) == 47 {
+            if i == 0 {
+                return substr(t, 0, i)
+            }
+            b := byteat(t, i - 1)
+            if b == 32 || b == 9 || b == 10 || b == 12 || b == 13 {
+                return substr(t, 0, i)
+            }
+        }
+        i = i + 1
+    }
+    return t
+}
+
+// Go's module.EscapePath — every uppercase letter becomes `!`+lower so
+// case-insensitive filesystems can't collide slots
+fn escape_path(s: str) -> str {
+    lc := "abcdefghijklmnopqrstuvwxyz"
+    out := ""
+    i := 0
+    for i < len(s) {
+        b := byteat(s, i)
+        if b >= 65 && b <= 90 {
+            out = out + "!" + substr(lc, b - 65, b - 64)
+        } else {
+            out = out + substr(s, i, i + 1)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn p2(n: int) -> int {
+    r := 1
+    i := 0
+    for i < n {
+        r = r * 2
+        i = i + 1
+    }
+    return r
+}
+
+fn rotr(x: int, n: int) -> int {
+    p := p2(n)
+    return x / p | x % p * p2(32 - n)
+}
+
+fn sha2_k(out: mut IB) {
+    out.v = mkslice(int, 64)
+    ks := "1116352408,1899447441,3049323471,3921009573,961987163,1508970993,2453635748,2870763221,3624381080,310598401,607225278,1426881987,1925078388,2162078206,2614888103,3248222580,3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,1955562222,2024104815,2227730452,2361852424,2428436474,2756734187,3204031479,3329325298"
+    i := 0
+    for i < 64 {
+        j := find(ks, ",")
+        tk := ks
+        if j >= 0 {
+            tk = substr(ks, 0, j)
+            ks = substr(ks, j + 1, len(ks))
+        }
+        out.v[i] = atoi(tk)
+        i = i + 1
+    }
+}
+
+// padded-message byte at index i: s, 0x80, zeros, 8-byte BE bitlen —
+// the pad is virtual, the message is never materialized
+fn mbyte(s: str, l: int, total: int, i: int) -> int {
+    if i < l {
+        return byteat(s, i)
+    }
+    if i == l {
+        return 128
+    }
+    if i >= total - 8 {
+        b := l * 8
+        return b / p2((total - 1 - i) * 8) % 256
+    }
+    return 0
+}
+
+// FIPS 180-4 over the string's bytes; returns the 32-byte digest as an
+// int slice (all values < 2^32 throughout, so i64 math never wraps)
+fn sha256(s: str) -> own IB {
+    h := mkslice(int, 8)
+    h[0] = 1779033703
+    h[1] = 3144134277
+    h[2] = 1013904242
+    h[3] = 2773480762
+    h[4] = 1359893119
+    h[5] = 2600822924
+    h[6] = 528734635
+    h[7] = 1541459225
+    kb := new(IB)
+    sha2_k(kb)
+    k := kb.v
+    l := len(s)
+    total := (l + 9 + 63) / 64 * 64
+    w := mkslice(int, 64)
+    b0 := 0
+    for b0 < total {
+        i := 0
+        for i < 16 {
+            j := b0 + i * 4
+            w[i] = mbyte(s, l, total, j) * 16777216 + mbyte(s, l, total, j + 1) * 65536 + mbyte(s, l, total, j + 2) * 256 + mbyte(s, l, total, j + 3)
+            i = i + 1
+        }
+        i = 16
+        for i < 64 {
+            x := w[i - 15]
+            s0 := rotr(x, 7) ^ rotr(x, 18) ^ x / 8
+            y := w[i - 2]
+            s1 := rotr(y, 17) ^ rotr(y, 19) ^ y / 1024
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1 & 4294967295
+            i = i + 1
+        }
+        a := h[0]
+        b := h[1]
+        c := h[2]
+        d := h[3]
+        e := h[4]
+        f := h[5]
+        g := h[6]
+        hh := h[7]
+        i = 0
+        for i < 64 {
+            s1 := rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+            ch := e & f ^ (e ^ 4294967295) & g
+            t1 := hh + s1 + ch + k[i] + w[i] & 4294967295
+            s0 := rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+            maj := a & b ^ a & c ^ b & c
+            t2 := s0 + maj & 4294967295
+            hh = g
+            g = f
+            f = e
+            e = d + t1 & 4294967295
+            d = c
+            c = b
+            b = a
+            a = t1 + t2 & 4294967295
+            i = i + 1
+        }
+        h[0] = h[0] + a & 4294967295
+        h[1] = h[1] + b & 4294967295
+        h[2] = h[2] + c & 4294967295
+        h[3] = h[3] + d & 4294967295
+        h[4] = h[4] + e & 4294967295
+        h[5] = h[5] + f & 4294967295
+        h[6] = h[6] + g & 4294967295
+        h[7] = h[7] + hh & 4294967295
+        b0 = b0 + 64
+    }
+    d := new(IB)
+    d.v = mkslice(int, 32)
+    i := 0
+    for i < 8 {
+        x := h[i]
+        d.v[i * 4] = x / 16777216 % 256
+        d.v[i * 4 + 1] = x / 65536 % 256
+        d.v[i * 4 + 2] = x / 256 % 256
+        d.v[i * 4 + 3] = x % 256
+        i = i + 1
+    }
+    return d
+}
+
+fn hex_of(b: []int) -> str {
+    t := "0123456789abcdef"
+    out := ""
+    i := 0
+    for i < len(b) {
+        v := b[i] & 255
+        out = out + substr(t, v / 16, v / 16 + 1) + substr(t, v % 16, v % 16 + 1)
+        i = i + 1
+    }
+    return out
+}
+
+fn b64_of(b: []int) -> str {
+    t := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    out := ""
+    i := 0
+    for i < len(b) {
+        c0 := b[i]
+        c1 := 0
+        c2 := 0
+        cl := 1
+        if i + 1 < len(b) {
+            c1 = b[i + 1]
+            cl = 2
+        }
+        if i + 2 < len(b) {
+            c2 = b[i + 2]
+            cl = 3
+        }
+        // pack only the cl real bytes, THEN shift — the window is
+        // big-endian-packed over cl bytes, not always three
+        n := c0
+        if cl > 1 {
+            n = n * 256 + c1
+        }
+        if cl > 2 {
+            n = n * 256 + c2
+        }
+        n = n * p2(8 * (3 - cl))
+        j := 0
+        for j < 4 {
+            if j <= cl {
+                v := n / p2(18 - j * 6) % 64
+                out = out + substr(t, v, v + 1)
+            } else {
+                out = out + "="
+            }
+            j = j + 1
+        }
+        i = i + 3
+    }
+    return out
+}
+
+// "rel|hex" entries for every regular file under dir — `|` can't be a
+// filename char here (fetch's component check bans it)
+fn dir_walk(base: str, dir: str, acc: mut SAcc) {
+    raw := rt_lsdir(dir)
+    for len(raw) > 0 {
+        i := find(raw, "\n")
+        nm := raw
+        if i >= 0 {
+            nm = substr(raw, 0, i)
+            raw = substr(raw, i + 1, len(raw))
+        } else {
+            raw = ""
+        }
+        p := dir + "/" + nm
+        if rt_islnk(p) == 1 {
+            continue
+        }
+        if rt_isdir(p) == 1 {
+            dir_walk(base, p, acc)
+        } else if rt_isfile(p) == 1 {
+            rel := substr(p, len(base) + 1, len(p))
+            acc.items = push(acc.items, rel + "|" + hex_of(sha256(readfile(p)).v))
+        }
+    }
+}
+
+// h1 dirhash: sort rel paths, hash "<hex>  <name>\n" lines, base64 it
+fn dir_h1(dir: str) -> str {
+    acc := new(SAcc)
+    acc.items = mkslice(str, 0)
+    dir_walk(dir, dir, acc)
+    ent := acc.items
+    i := 0
+    for i < len(ent) {
+        j := i + 1
+        for j < len(ent) {
+            // compare the name portion only — sorting the joined
+            // "name|hex" reverses prefix pairs (README vs README.md,
+            // `|` > `.`) and diverges from Rust's tuple sort
+            nj := substr(ent[j], 0, find(ent[j], "|"))
+            ni := substr(ent[i], 0, find(ent[i], "|"))
+            if str_cmp(nj, ni) < 0 {
+                t := ent[i]
+                ent[i] = ent[j]
+                ent[j] = t
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    text := ""
+    i = 0
+    for i < len(ent) {
+        e := ent[i]
+        b := find(e, "|")
+        text = text + substr(e, b + 1, len(e)) + "  " + substr(e, 0, b) + "\n"
+        i = i + 1
+    }
+    return "h1:" + b64_of(sha256(text).v)
+}
+
+// manifest hash — single synthetic "<esc-path>@<esc-ver>.mod" entry
+fn mod_h1(path: str, ver: str, bytes: str) -> str {
+    nm := escape_path(path) + "@" + escape_path(ver) + ".mod"
+    return "h1:" + b64_of(sha256(hex_of(sha256(bytes).v) + "  " + nm + "\n").v)
+}
+
+// parse oxl.sum into ck.mod_sums — malformed lines are a hard error,
+// never silently skipped (mirrors parse_sums; 0 = error, diags emitted)
+fn parse_sums(ck: mut Ck, text: str) -> int {
+    lines := strings.split(text, "\n")
+    i := 0
+    for lines != nil {
+        i = i + 1
+        t := strings.trim(lines.v)
+        lines = lines.next
+        if len(t) == 0 {
+            continue
+        }
+        toks := split_ws(t)
+        if sl_len(toks) != 3 || strings.startswith(sl_at(toks, 2), "h1:") == false {
+            diag(ck, "check", "oxl.sum:" + itoa(i) + ": malformed line")
+            return 0
+        }
+        ver := sl_at(toks, 1)
+        ism := 0
+        if strings.endswith(ver, "/mod") {
+            ver = substr(ver, 0, len(ver) - 4)
+            ism = 1
+        }
+        ck.mod_sums = new(SumEnt{path: sl_at(toks, 0), ver: ver, is_mod: ism, h1: sl_at(toks, 2), next: ck.mod_sums})
+    }
+    return 1
+}
+
+fn sum_for(ck: ref Ck, path: str, ver: str, is_mod: int) -> str {
+    l := ck.mod_sums
+    for l != nil {
+        if l.path == path && l.ver == ver && l.is_mod == is_mod {
+            return l.h1
+        }
+        l = l.next
+    }
+    return ""
+}
+
+// verify a cached slot against the sums: both lines must exist and
+// match — Go's two-entry rule. "" = verified
+fn verify_slot(ck: ref Ck, dir: str, path: str, ver: str) -> str {
+    t := sum_for(ck, path, ver, 0)
+    if len(t) == 0 {
+        return "missing oxl.sum entry for module " + path
+    }
+    m := sum_for(ck, path, ver, 1)
+    if len(m) == 0 {
+        return "missing oxl.sum entry for oxl.mod file for module " + path
+    }
+    if dir_h1(dir) != t {
+        return "verifying " + path + "@" + ver + ": checksum mismatch"
+    }
+    mp := dir + "/oxl.mod"
+    if rt_fexists(mp) == 0 {
+        return mp + ": No such file or directory (os error 2)"
+    }
+    if mod_h1(path, ver, readfile(mp)) != m {
+        return "verifying " + path + "@" + ver + ": checksum mismatch"
+    }
+    return ""
+}
+
+// ---------- import resolution ----------------------------------------
 fn resolve_imp(ck: mut Ck, imp: str) -> RRes {
-    r := RRes{dir: "", missing: ""}
+    r := RRes{dir: "", missing: "", tampered: ""}
     if strings.startswith(imp, "std/") {
         rest := substr(imp, 4, len(imp))
         // exe ancestors first (shipped-tree std beside the binary),
@@ -5809,28 +6191,21 @@ fn resolve_imp(ck: mut Ck, imp: str) -> RRes {
             rest = substr(imp, len(best_alias) + 1, len(imp))
         }
         best_ver := selected_ver(ck, best_alias)
-        d := module_dir(ck, best_alias, best_ver)
-        if len(d) > 0 {
-            p := d
-            if len(rest) > 0 {
-                p = p + "/" + rest
-            }
-            if rt_isdir(p) == 1 {
-                r.dir = p
-            }
+        dr := module_dir(ck, best_alias, best_ver)
+        if len(dr.err) > 0 {
+            r.tampered = dr.err
             return r
         }
-        base := ck.modcache + "/" + best_alias + "@" + best_ver
-        p := base
+        if len(dr.dir) == 0 {
+            r.missing = best_alias + "@" + best_ver
+            return r
+        }
+        p := dr.dir
         if len(rest) > 0 {
             p = p + "/" + rest
         }
-        if rt_isdir(base) == 1 {
-            if rt_isdir(p) == 1 {
-                r.dir = p
-            }
-        } else {
-            r.missing = best_alias + "@" + best_ver
+        if rt_isdir(p) == 1 {
+            r.dir = p
         }
         return r
     }
@@ -5952,6 +6327,9 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
                         rr := resolve_imp(ck, path)
                         if len(rr.missing) > 0 {
                             diag(ck, "check", "missing module `" + rr.missing + "` — oxl get it or replace it")
+                            ck.load_fail = 1
+                        } else if len(rr.tampered) > 0 {
+                            diag(ck, "check", rr.tampered)
                             ck.load_fail = 1
                         } else if len(rr.dir) == 0 {
                             if remoteish(path) {
