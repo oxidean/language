@@ -1136,6 +1136,48 @@ int64_t rt_sadd(RtShared *s, int64_t delta) {
     return __sync_fetch_and_add(&s->val, delta);
 }
 
+/* ---------------- Conn/Listener latch cells ----------------
+ * One RtShared per socket would xmalloc a cell per connection with no
+ * free path — a long-running server leaks a cell per accept/dial.
+ * Closed latches return to a bounded free list for reuse. The cell
+ * value doubles as a generation word — even while open, odd once
+ * closed — and the owning handle CASes its own generation on close, so
+ * a stale copy holding an older generation can never consume a
+ * recycled latch. Pooled cells are kept, never freed: a stale copy may
+ * CAS the cell at any time, so a real free() would UAF; peak live
+ * usage bounds the pool.
+ */
+#define LATCH_POOL_CAP 4096
+static RtShared *latch_pool[LATCH_POOL_CAP];
+static int latch_pool_n;
+static oxl_mutex_t latch_pool_mu = OXL_MUTEX_INIT;
+
+RtShared *rt_latch_alloc(void) {
+    oxl_mu_lock(&latch_pool_mu);
+    if (latch_pool_n > 0) {
+        RtShared *s = latch_pool[--latch_pool_n];
+        oxl_mu_unlock(&latch_pool_mu);
+        return s;
+    }
+    oxl_mu_unlock(&latch_pool_mu);
+    return rt_mkshared(0);
+}
+
+/* the winning close calls this with the cell already flipped to
+   `gen|1`; pushing bumps it to the next even generation so every
+   outstanding copy's CAS fails from here on */
+void rt_latch_free(RtShared *s) {
+    oxl_mu_lock(&latch_pool_mu);
+    s->val = (s->val + 1) & ~1LL;
+    if (latch_pool_n < LATCH_POOL_CAP) {
+        latch_pool[latch_pool_n++] = s;
+    }
+    /* overflow: keep the cell out of the pool rather than free() —
+       stale copies may still CAS it; the leak stays bounded by the
+       burst above the cap */
+    oxl_mu_unlock(&latch_pool_mu);
+}
+
 /* ---------------- time ---------------- */
 int64_t rt_now(void) { return (int64_t)time(NULL); }
 int64_t rt_now_ms(void) {

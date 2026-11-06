@@ -216,6 +216,8 @@ int64_t rt_sget(RtShared *s);
 void rt_sset(RtShared *s, int64_t v);
 int64_t rt_scas(RtShared *s, int64_t expected, int64_t v); /* CAS → old */
 int64_t rt_sadd(RtShared *s, int64_t delta);               /* fetch+add → old */
+RtShared *rt_latch_alloc(void);                                /* pooled close-latch cell */
+void rt_latch_free(RtShared *s);                               /* return a closed latch to the pool */
 int64_t rt_now(void);          /* unix seconds */
 int64_t rt_now_ms(void);       /* unix ms */
 void rt_usleep(int64_t usecs);

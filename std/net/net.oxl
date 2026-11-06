@@ -31,15 +31,37 @@ extern fn rt_bind_any(fd: int, port: int) -> int
 
 extern fn rt_errstr(code: int) -> str
 
+extern fn rt_latch_alloc() -> shared
+
+extern fn rt_latch_free(s: shared)
+
 /// Conn is one end of a TCP connection — read/write/close satisfy
 /// io.Reader, io.Writer and io.Closer.
 // `st` is a shared close-latch — copies of a Conn (struct value,
 // iface box) all see the same cell, so close() CAS-wins exactly once
-// and a stale fd can never be closed twice over a reused descriptor
-struct Conn { fd: int, st: shared }
+// and a stale fd can never be closed twice over a reused descriptor.
+// `g` is the latch generation this handle carries: cells recycle
+// through rt's free list, and each reuse advances the word, so a
+// stale copy's CAS can never match again
+struct Conn { fd: int, st: shared, g: int }
 
 /// Listener is a bound, listening TCP socket.
-struct Listener { fd: int, st: shared }
+struct Listener { fd: int, st: shared, g: int }
+
+// dead latch shared by every error-path struct — fd<0 short-circuits
+// close() before the cell is consulted, so failed dials, accepts and
+// listens alias one cell instead of allocating one apiece
+let dead_st = mkshared(0)
+
+fn mkconn(fd: int) -> Conn {
+    st := rt_latch_alloc()
+    return Conn{fd: fd, st: st, g: sget(st)}
+}
+
+fn mklisten(fd: int) -> Listener {
+    st := rt_latch_alloc()
+    return Listener{fd: fd, st: st, g: sget(st)}
+}
 
 // parse_ipv4 reads "a.b.c.d" into a host-order u32 — rejects empty
 // octets, >255, non-digits, and wrong part counts. No getaddrinfo:
@@ -92,21 +114,21 @@ fn dial(host: str, port: int) -> [Conn, err] {
 fn dial_timeout(host: str, port: int, tmo_ms: int) -> [Conn, err] {
     [ip, pe] = parse_ipv4(host)
     if pe != nil {
-        return Conn{fd: -1, st: mkshared(0)}, pe
+        return Conn{fd: -1, st: dead_st, g: 0}, pe
     }
     if port <= 0 || port > 65535 {
-        return Conn{fd: -1, st: mkshared(0)}, errors.new("net: dial: bad port " + itoa(port))
+        return Conn{fd: -1, st: dead_st, g: 0}, errors.new("net: dial: bad port " + itoa(port))
     }
     fd := rt_sock_open(2, 1, 0) // AF_INET, SOCK_STREAM
     if fd < 0 {
-        return Conn{fd: -1, st: mkshared(0)}, errors.new("net: dial: socket failed")
+        return Conn{fd: -1, st: dead_st, g: 0}, errors.new("net: dial: socket failed")
     }
     rc := rt_sock_connect_ipv4(fd, ip, port, tmo_ms)
     if rc != 0 {
         rt_sock_close(fd)
-        return Conn{fd: -1, st: mkshared(0)}, errors.new("net: dial: connect " + host + ":" + itoa(port) + ": " + rt_errstr(0 - rc))
+        return Conn{fd: -1, st: dead_st, g: 0}, errors.new("net: dial: connect " + host + ":" + itoa(port) + ": " + rt_errstr(0 - rc))
     }
-    return Conn{fd: fd, st: mkshared(0)}, nil
+    return mkconn(fd), nil
 }
 
 /// listen binds port on INADDR_ANY and starts listening. The bounded
@@ -129,7 +151,7 @@ fn listen(port: int) -> [Listener, err] {
             }
             tries = tries + 1
             if tries > 15 {
-                return Listener{fd: -1, st: mkshared(0)}, errors.new("net: listen: bind/listen failed on :" + itoa(port))
+                return Listener{fd: -1, st: dead_st, g: 0}, errors.new("net: listen: bind/listen failed on :" + itoa(port))
             }
             usleep(delay * 1000)
             if delay < 2000 {
@@ -137,7 +159,7 @@ fn listen(port: int) -> [Listener, err] {
             }
         }
     }
-    return Listener{fd: fd, st: mkshared(0)}, nil
+    return mklisten(fd), nil
 }
 
 /// port reports the bound port — meaningful after listen(0) picks
@@ -156,9 +178,9 @@ fn (l ref Listener) rawfd() -> int {
 fn (l mut Listener) accept() -> [Conn, err] {
     fd := rt_sock_accept(l.fd)
     if fd < 0 {
-        return Conn{fd: -1, st: mkshared(0)}, errors.new("net: accept failed")
+        return Conn{fd: -1, st: dead_st, g: 0}, errors.new("net: accept failed")
     }
-    return Conn{fd: fd, st: mkshared(0)}, nil
+    return mkconn(fd), nil
 }
 
 /// close releases the listener socket — safe to call twice (the
@@ -167,11 +189,12 @@ fn (l mut Listener) close() -> err {
     if l.fd < 0 {
         return nil
     }
-    if scas(l.st, 0, 1) != 0 {
+    if scas(l.st, l.g, l.g + 1) != l.g {
         return nil
     }
     rt_sock_close(l.fd)
     l.fd = -1
+    rt_latch_free(l.st)
     return nil
 }
 
@@ -206,11 +229,12 @@ fn (c mut Conn) close() -> err {
     if c.fd < 0 {
         return nil
     }
-    if scas(c.st, 0, 1) != 0 {
+    if scas(c.st, c.g, c.g + 1) != c.g {
         return nil
     }
     rt_sock_close(c.fd)
     c.fd = -1
+    rt_latch_free(c.st)
     return nil
 }
 

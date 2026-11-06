@@ -118,15 +118,19 @@ fn conn_cleanup(c: net.Conn, inflight: shared) {
 /// Conn.write() may return short — loop until the whole response is on
 /// the wire or the conn dies (n <= 0 covers EPIPE + resets). Dropping the
 /// raw count would silently truncate bodies on a partial write.
-fn write_all(c: net.Conn, s: str) {
+fn write_all(c: net.Conn, s: str) -> err {
     off := 0
     for off < len(s) {
         [n, e] = c.write(substr(s, off, len(s)) as []byte)
-        if e != nil || n <= 0 {
-            return
+        if e != nil {
+            return e
+        }
+        if n <= 0 {
+            return errors.new("http: write: connection closed")
         }
         off = off + n
     }
+    return nil
 }
 
 /// runs one request through the handler and writes the response.
@@ -423,7 +427,9 @@ fn hdr_of(resp: str, lowered: str, key: str) -> str {
     }
     val := substr(resp, at + 2 + len(key) + 1, len(resp))
     e2 := find(val, "\r\n")
-    if e2 > 0 {
+    if e2 >= 0 {
+        // e2 == 0 is an empty value — the header ends at the CRLF
+        // right after the colon, not at the end of the response
         val = substr(val, 0, e2)
     }
     lo := 0
@@ -455,6 +461,11 @@ fn unchunk(b: str) -> [str, err] {
         if semi >= 0 {
             szs = substr(szs, 0, semi)
         }
+        if len(szs) > 16 {
+            // parseint wraps silently — 17+ hex digits can land on a
+            // small positive or zero, faking a chunk terminator
+            return "", errors.new("http: chunk size too large " + szs)
+        }
         [sz, se] = strconv.parseint(szs, 16)
         if se != nil || sz < 0 {
             return "", errors.new("http: bad chunk size " + szs)
@@ -465,7 +476,9 @@ fn unchunk(b: str) -> [str, err] {
             return out as str, nil
         }
         data := nl + 2
-        if data + sz > len(b) {
+        if sz > len(b) - data {
+            // compare without `data + sz` — a huge sz would wrap the
+            // sum negative and skip the bound
             return "", errors.new("http: truncated chunk data")
         }
         i := 0
@@ -512,7 +525,18 @@ fn (cl ref Client) request(method: str, url: str, ctype: str, body: str) -> [Res
         req = req + "content-length: " + itoa(len(body)) + "\r\n"
     }
     req = req + "\r\n" + body
-    write_all(c, req)
+    // bound the send with the request budget — a peer that accepts
+    // but never reads could otherwise hold the write open forever,
+    // and a write failure must surface instead of falling through to
+    // a misleading read error
+    if cl.tmo > 0 {
+        set_sndtimo(c.rawfd(), (cl.tmo + 999) / 1000)
+    }
+    we := write_all(c, req)
+    if we != nil {
+        c.close()
+        return bad, we
+    }
     // response: connection: close means read-until-EOF is well-defined.
     // Each read carries only the *remaining* budget — a silent peer
     // can't stretch the whole-request deadline by answering slowly.

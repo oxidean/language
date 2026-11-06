@@ -75,6 +75,16 @@ fn main() {
     testing.expect(cr.body == "hello world", "chunked decode got " + cr.body)
     [tr, te] = get_retry("http://127.0.0.1:18343/t")
     testing.expect(te != nil, "short content-length errors")
+
+    // empty transfer-encoding value must not swallow the body into
+    // the header — the literal text comes back verbatim
+    [er, ee] = get_retry("http://127.0.0.1:18343/e")
+    ck(ee, "empty-te connects")
+    testing.expect(er.body == "plain body mentioning chunked framing", "empty-te body got " + er.body)
+
+    // an overflowing chunk size must error, not unwrap as a terminator
+    [or, oe] = get_retry("http://127.0.0.1:18343/o")
+    testing.expect(oe != nil, "overflow chunk size errors")
     println("httpclient done")
     exit(0)
 }
@@ -100,6 +110,16 @@ fn raw_chunked() {
         req := scratch[0:rn] as str
         if find(req, " /t ") >= 0 {
             write_out(c, "HTTP/1.1 200 OK\r\ncontent-length: 40\r\nconnection: close\r\n\r\nshort")
+        } else if find(req, " /e ") >= 0 {
+            // empty transfer-encoding value (last header, CRLF right
+            // after the colon) — hdr_of must return "" so the body's
+            // literal "chunked" text is delivered verbatim, not fed
+            // to unchunk
+            write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding:\r\n\r\nplain body mentioning chunked framing")
+        } else if find(req, " /o ") >= 0 {
+            // 17-hex-digit chunk size wraps parseint onto a small
+            // value — must error, never return a truncated body
+            write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n10000000000000000\r\nhi\r\n0\r\n\r\n")
         } else {
             write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
         }
