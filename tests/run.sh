@@ -74,6 +74,9 @@ scratch=$(mktemp -d)
 srv_pid=""
 cleanup() {
     if [ -n "$srv_pid" ]; then kill "$srv_pid" 2>/dev/null || true; fi
+    # v2's sealed module-cache slots are read-only — restore write
+    # permission or rm leaves them behind
+    chmod -R u+w "$scratch" 2>/dev/null
     rm -rf "$scratch"
 }
 trap cleanup EXIT
@@ -441,6 +444,62 @@ export OXLMODCACHE="$scratch/modcache-empty"
 grep -qx 'mvstest' "$scratch/mvlist" || { echo "FAIL list main"; cat "$scratch/mvlist"; exit 1; }
 grep -q 'depb v1\.2\.0 => ' "$scratch/mvlist" || { echo "FAIL list depb"; cat "$scratch/mvlist"; exit 1; }
 grep -q 'depc v1\.0\.0 => ' "$scratch/mvlist" || { echo "FAIL list depc"; cat "$scratch/mvlist"; exit 1; }
+
+echo "== v2 module cache + oxl get =="
+# `oxl get` fetches through git into a sealed, content-addressed slot
+# and pins both h1 lines in oxl.sum; every build then verifies the
+# cache against those sums. file:// module paths hold ':' which can't
+# form a Windows-legal slot name, so the fetch fixture is POSIX-only —
+# the verify path itself is platform-clean and covered above.
+case "$(uname -s)" in
+MINGW*|MSYS*|CYGWIN*) ;;
+*)
+getwork="$scratch/getwork"
+mkdir -p "$getwork/dep/util" "$getwork/app/app" "$getwork/cache"
+# upstream module repo: v1.0.0 now, v1.1.0 tagged mid-test
+( cd "$getwork/dep" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/dep\noxl 0.3\n' "$getwork" > oxl.mod
+  printf 'package util\nfn answer() -> int { return 42 }\n' > util/u.oxl
+  git add -A && git commit -qm init && git tag v1.0.0 )
+printf 'module local/app\noxl 0.3\n' > "$getwork/app/oxl.mod"
+printf 'package main\nimport "file://%s/dep/util"\n\nfn main() { println("answer=" + itoa(util.answer())) }\n' "$getwork" > "$getwork/app/app/main.oxl"
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" get "file://$getwork/dep@v1.0.0" ) > "$getwork/get1" 2>&1 || { echo "FAIL get rc"; cat "$getwork/get1"; exit 1; }
+grep -q 'added file://' "$getwork/get1" || { echo "FAIL get report"; cat "$getwork/get1"; exit 1; }
+grep -q "require file://$getwork/dep v1.0.0" "$getwork/app/oxl.mod" || { echo "FAIL get require"; cat "$getwork/app/oxl.mod"; exit 1; }
+[ "$(grep -c ' h1:' "$getwork/app/oxl.sum")" = 2 ] || { echo "FAIL get sum"; cat "$getwork/app/oxl.sum"; exit 1; }
+# slot sealed read-only — find the escaped slot (scratch paths may hold
+# case-folding chars, which `!`-escape in the slot name)
+slot=$(find "$getwork/cache" -name '*@v1.0.0' -type d)
+[ -n "$slot" ] || { echo "FAIL cache slot missing"; exit 1; }
+touch "$slot/probe" 2>/dev/null && { echo "FAIL cache not read-only"; exit 1; }
+# resolve + run purely from cache — dep repo moved away (network "off")
+mv "$getwork/dep" "$getwork/dep-gone"
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" build app -o "$getwork/appbin" ) || { echo "FAIL offline build"; exit 1; }
+[ "$("$getwork/appbin")" = "answer=42" ] || { echo "FAIL offline run"; "$getwork/appbin"; exit 1; }
+mv "$getwork/dep-gone" "$getwork/dep"
+# tamper a sealed file -> checksum mismatch on BOTH checkers
+depf=$(find "$getwork/cache" -name u.oxl -path '*/util/*')
+[ -n "$depf" ] || { echo "FAIL cached source missing"; exit 1; }
+chmod u+w "$depf" && printf '// tampered\n' >> "$depf" && chmod a-w "$depf"
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" build app -o /dev/null ) > "$getwork/tamp.rust" 2>&1 && { echo "FAIL tamper accepted (rust)"; exit 1; }
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$scratch/selfcheck$EXE" app ) > "$getwork/tamp.self" 2>&1 && { echo "FAIL tamper accepted (self)"; exit 1; }
+grep -q 'checksum mismatch' "$getwork/tamp.rust" || { echo "FAIL tamper text"; cat "$getwork/tamp.rust"; exit 1; }
+diff "$getwork/tamp.rust" "$getwork/tamp.self" >/dev/null || { echo "FAIL tamper parity"; cat "$getwork/tamp.rust" "$getwork/tamp.self"; exit 1; }
+# restore: re-get into a fresh cache, then @latest upgrade bumps require+sum
+chmod -R u+w "$getwork/cache" 2>/dev/null; rm -rf "$getwork/cache" && mkdir -p "$getwork/cache"
+( cd "$getwork/dep" && printf 'package util\nfn answer() -> int { return 43 }\n' > util/u.oxl && git add -A && git commit -qm bump && git tag v1.1.0 )
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" get "file://$getwork/dep@v1.0.0" >/dev/null && OXLMODCACHE="$getwork/cache" "$OXL" get "file://$getwork/dep@latest" ) > "$getwork/get2" 2>&1 || { echo "FAIL latest rc"; cat "$getwork/get2"; exit 1; }
+grep -q 'upgraded file://' "$getwork/get2" || { echo "FAIL upgrade report"; cat "$getwork/get2"; exit 1; }
+grep -q "require file://$getwork/dep v1.1.0" "$getwork/app/oxl.mod" || { echo "FAIL upgrade require"; cat "$getwork/app/oxl.mod"; exit 1; }
+[ "$(grep -c ' h1:' "$getwork/app/oxl.sum")" = 2 ] || { echo "FAIL upgrade sum"; cat "$getwork/app/oxl.sum"; exit 1; }
+# missing oxl.sum -> missing-entry error (Go wording), byte-identical
+rm "$getwork/app/oxl.sum"
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" build app -o /dev/null ) > "$getwork/nosum.rust" 2>&1 && { echo "FAIL missing-sum accepted (rust)"; exit 1; }
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$scratch/selfcheck$EXE" app ) > "$getwork/nosum.self" 2>&1 && { echo "FAIL missing-sum accepted (self)"; exit 1; }
+grep -q 'missing oxl.sum entry for module' "$getwork/nosum.rust" || { echo "FAIL missing-sum text"; cat "$getwork/nosum.rust"; exit 1; }
+diff "$getwork/nosum.rust" "$getwork/nosum.self" >/dev/null || { echo "FAIL missing-sum parity"; cat "$getwork/nosum.rust" "$getwork/nosum.self"; exit 1; }
+;;
+esac
 
 echo "== bootstrap codegen =="
 # the self-hosted C emitter must produce working binaries — every
