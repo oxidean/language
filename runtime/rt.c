@@ -1168,7 +1168,9 @@ RtShared *rt_latch_alloc(void) {
    outstanding copy's CAS fails from here on */
 void rt_latch_free(RtShared *s) {
     oxl_mu_lock(&latch_pool_mu);
-    s->val = (s->val + 1) & ~1LL;
+    /* atomic: a stale copy's CAS doesn't take this mutex — a plain
+       store would race it; val goes g|1 → g+2, next even generation */
+    rt_sadd(s, 1);
     if (latch_pool_n < LATCH_POOL_CAP) {
         latch_pool[latch_pool_n++] = s;
     }

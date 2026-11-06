@@ -471,9 +471,21 @@ fn unchunk(b: str) -> [str, err] {
             return "", errors.new("http: bad chunk size " + szs)
         }
         if sz == 0 {
-            // trailer fields up to the blank line are legal but carry
-            // nothing we expose — the body is complete at this marker
-            return out as str, nil
+            // the trailer section must end with a blank line — a
+            // bare `0\r\n` at stream end is a truncated response.
+            // Each trailer line must be CRLF-terminated; we don't
+            // expose the fields, only their framing
+            pos = nl + 2
+            for true {
+                nl = find_from(b, "\r\n", pos)
+                if nl < 0 {
+                    return "", errors.new("http: truncated trailer")
+                }
+                if nl == pos {
+                    return out as str, nil
+                }
+                pos = nl + 2
+            }
         }
         data := nl + 2
         if sz > len(b) - data {
@@ -613,6 +625,11 @@ fn (cl ref Client) request(method: str, url: str, ctype: str, body: str) -> [Res
         rbody = db
     } else {
         clv := hdr_of(resp, hdrs, "content-length")
+        if len(clv) == 0 && find(hdrs, "\r\ncontent-length:") >= 0 {
+            // header present but empty — malformed framing, not "no
+            // length given"; silently accepting it hides an error
+            return bad, errors.new("http: empty content-length")
+        }
         if len(clv) > 0 {
             [cln, cle] = strconv.atoi(clv)
             if cle != nil || cln < 0 {

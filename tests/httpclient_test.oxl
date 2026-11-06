@@ -85,6 +85,20 @@ fn main() {
     // an overflowing chunk size must error, not unwrap as a terminator
     [or, oe] = get_retry("http://127.0.0.1:18343/o")
     testing.expect(oe != nil, "overflow chunk size errors")
+
+    // `0\r\n` at stream end without the trailer blank line is
+    // truncated framing — an error, not a complete body
+    [ur, ue] = get_retry("http://127.0.0.1:18343/u")
+    testing.expect(ue != nil, "missing final CRLF errors")
+
+    // legal trailers between the zero chunk and the blank line pass
+    [vr, ve] = get_retry("http://127.0.0.1:18343/v")
+    ck(ve, "trailers connect")
+    testing.expect(vr.body == "hello", "trailer body got " + vr.body)
+
+    // present-but-empty content-length is malformed framing
+    [xr, xe] = get_retry("http://127.0.0.1:18343/x")
+    testing.expect(xe != nil, "empty content-length errors")
     println("httpclient done")
     exit(0)
 }
@@ -120,6 +134,18 @@ fn raw_chunked() {
             // 17-hex-digit chunk size wraps parseint onto a small
             // value — must error, never return a truncated body
             write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n10000000000000000\r\nhi\r\n0\r\n\r\n")
+        } else if find(req, " /u ") >= 0 {
+            // chunked body ending at `0\r\n` with no trailer blank
+            // line — the terminator is truncated, must error
+            write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nhello\r\n0\r\n")
+        } else if find(req, " /v ") >= 0 {
+            // trailers are legal — lines between `0\r\n` and the
+            // blank line must simply be framed, then the body lands
+            write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nhello\r\n0\r\nx-trailer: yes\r\n\r\n")
+        } else if find(req, " /x ") >= 0 {
+            // content-length present but empty — malformed framing,
+            // must error rather than read to close
+            write_out(c, "HTTP/1.1 200 OK\r\ncontent-length:\r\nconnection: close\r\n\r\nsome body")
         } else {
             write_out(c, "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
         }
