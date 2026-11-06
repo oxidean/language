@@ -6,7 +6,7 @@ import "oxl/bootstrap/lexlib"
 
 import "oxl/bootstrap/parser"
 
-import "std/json"
+import "std/encoding/json"
 
 // readfile signals failure as "" — the same result a legitimately
 // empty file produces — so probe readability first to tell them apart

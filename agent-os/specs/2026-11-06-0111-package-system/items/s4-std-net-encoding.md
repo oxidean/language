@@ -12,7 +12,7 @@ entirely. This is the "core packages" bulk of the ask.
   iface-typed (Conn implements `io.Reader`/`Writer`/`Closer` —
   S2's interfaces pay off). Backed by existing `rt.c` socket externs;
   the pilot's raw calls migrate behind it.
-- `std/net/http` — moved from `std/http`, rebuilt on `std/net` +
+- `std/net/http` — moved from `std/http` (S1), rebuilt on `std/net` +
   `std/io` + `std/bufio`: `serve(port, handler)` keeps today's shape;
   `Client`/`get`/`post` is the growth (Go's `http.Get` equivalent —
   client-side HTTP on `net.dial`).

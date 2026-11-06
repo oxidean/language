@@ -2,6 +2,6 @@ package main
 
 import "std/strings"
 
-import "std/json" as strings
+import "std/encoding/json" as strings
 
 fn main() {}

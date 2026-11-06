@@ -143,7 +143,7 @@ print the cycle chain.
 | `examples/http-crud-sqlite/main.oxl` | the flagship pilot: HTTP server + SQLite + per-connection tasks |
 | `examples/smoke_test.oxl` | `oxl test` scoped test harness |
 | `tests/stdlib_test.oxl` | stdlib + break/continue coverage |
-| `tests/stdmods_test.oxl` | `std/json`, `std/sync`, `std/time` end-to-end |
+| `tests/stdmods_test.oxl` | `std/encoding/json`, `std/sync`, `std/time` end-to-end |
 | `examples/gui-todo/` | GTK todo app over `extern fn` FFI (see `docs/gui-pilot.md`) |
 | `bootstrap/cmd/lex` | **self-host**: the language's lexer written in the language |
 | `bootstrap/parser/` | **self-host**: the language's parser written in the language — parses itself, zero skips |

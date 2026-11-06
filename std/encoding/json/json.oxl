@@ -1,6 +1,6 @@
 package json
 
-// std/json — a minimal JSON value tree, serializer, and parser.
+// std/encoding/json — a minimal JSON value tree, serializer, and parser.
 //
 // One node type carries everything:
 //   kind: 0 null · 1 bool · 2 int · 3 str · 4 obj · 5 arr

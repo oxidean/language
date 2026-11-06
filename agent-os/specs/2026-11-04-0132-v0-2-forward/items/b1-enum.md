@@ -3,7 +3,7 @@
 ## Problem
 
 The AST is a tagged-union problem. `bootstrap/parser.oxl` models it
-with `std/json` nodes and kind ints — works, but verbose and
+with `std/encoding/json` nodes and kind ints — works, but verbose and
 type-unsafe. `bootstrap/check.oxl` (the next self-host component) is
 genuinely blocked: it needs real sum types for `ExprKind`, `Ty`, `Item`.
 
