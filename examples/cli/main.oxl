@@ -1,3 +1,5 @@
+package main
+
 // simple CLI pilot: greets by name, counts args — exercises argv,
 // string ops, [v, err], and the toolchain end to end.
 //

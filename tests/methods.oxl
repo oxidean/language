@@ -1,3 +1,5 @@
+package main
+
 // D3: methods + interface dispatch
 
 // --- value + pointer receivers, both call shapes ---

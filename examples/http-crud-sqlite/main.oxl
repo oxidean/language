@@ -1,3 +1,5 @@
+package main
+
 // HTTP CRUD + SQLite pilot — the v0.0.1 success bar for services.
 // Now built on std/http: the server plumbing lives in stdlib, this file
 // only declares the route handler.

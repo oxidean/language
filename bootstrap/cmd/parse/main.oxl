@@ -1,0 +1,31 @@
+package main
+
+// oxl parse driver — emits the file's AST as JSON
+//   oxl run bootstrap/cmd/parse -- <file.oxl>
+import "bootstrap/lexlib"
+
+import "bootstrap/parser"
+
+import "std/json"
+
+// readfile signals failure as "" — the same result a legitimately
+// empty file produces — so probe readability first to tell them apart
+extern fn rt_file_readable(path: cstr) -> int
+
+fn main() {
+    if argc() < 2 {
+        println("usage: parser <file.oxl>")
+        exit(1)
+    }
+    if rt_file_readable(cstr(argv(1))) == 0 {
+        println("cannot read " + argv(1))
+        exit(1)
+    }
+    src := readfile(argv(1))
+    // empty source is fine: lex just yields the EOF token
+    ast := parser.parse(lexlib.lex(src))
+    if ast == nil {
+        exit(1)
+    }
+    println(json.tojson(parser.to_json(ast)))
+}

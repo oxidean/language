@@ -12,6 +12,19 @@ pub struct Parser<'a> {
 
 pub fn parse(toks: &[Token], diags: &mut Diags) -> Crate {
     let mut p = Parser { toks, i: 0, diags, no_lit: false };
+    let mut pkg = String::new();
+    let mut pkg_span = Span::new(0, 0);
+    if p.eat_kw(Kw::Package) {
+        pkg_span = p.toks[p.i - 1].span;
+        if let Some((n, sp)) = p.ident() {
+            pkg = n;
+            pkg_span = Span::join(pkg_span, sp);
+        }
+        p.eat_p(P::Semi);
+    } else {
+        let sp = p.span();
+        p.diags.push(Diag::err(sp, "parse", "expected package clause"));
+    }
     let mut items = Vec::new();
     while !p.at_eof() {
         let before = p.i;
@@ -25,7 +38,7 @@ pub fn parse(toks: &[Token], diags: &mut Diags) -> Crate {
             }
         }
     }
-    Crate { items }
+    Crate { pkg, pkg_span, items }
 }
 
 impl<'a> Parser<'a> {

@@ -1,3 +1,5 @@
+package main
+
 import "std/testing"
 
 fn dmark(x: int) {

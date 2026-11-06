@@ -1,3 +1,5 @@
+package main
+
 // exercises the v0 surface: structs, own, [v, err], if err != nil,
 // for, scope/spawn, channels, extern FFI
 struct Point { x: int, y: int }

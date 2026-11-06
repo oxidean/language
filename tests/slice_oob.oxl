@@ -1,3 +1,5 @@
+package main
+
 // B3 negative: out-of-range index must trap (nonzero exit), not corrupt
 fn main() {
     s := mkslice(int, 3)

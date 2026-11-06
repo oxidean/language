@@ -1,3 +1,5 @@
+package main
+
 // A1 scale check: K tasks parked on recv must live in frames, not
 // OS threads. Measure VmRSS externally during the parked window:
 //

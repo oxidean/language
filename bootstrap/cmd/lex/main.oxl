@@ -1,6 +1,8 @@
+package main
+
 // bootstrap/lexer.oxl — token dump driver over bootstrap/lexlib.
 //   oxl run bootstrap/lexer.oxl -- examples/hello.oxl
-import "lexlib"
+import "bootstrap/lexlib"
 
 // readfile signals failure as "" — the same result a legitimately
 // empty file produces — so probe readability first to tell them apart

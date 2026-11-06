@@ -2,6 +2,11 @@ use crate::diag::Span;
 
 #[derive(Clone, Debug)]
 pub struct Crate {
+    /// `package <ident>` — mandatory first item of every file
+    pub pkg: String,
+    /// byte range of the clause (`0..0` when absent/synthetic) — fmt
+    /// needs it to re-attach header comments around `package`
+    pub pkg_span: Span,
     pub items: Vec<Item>,
 }
 

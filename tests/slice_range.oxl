@@ -1,3 +1,5 @@
+package main
+
 // B3 negative: inverted view range must trap (nonzero exit)
 fn main() {
     s := mkslice(int, 4)

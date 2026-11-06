@@ -258,6 +258,25 @@ impl<'a> Fmt<'a> {
     }
 
     fn krate(&mut self, k: &Crate) {
+        if !k.pkg.is_empty() {
+            // header comments precede the clause (a source blank
+            // between them survives via gap); a comment sharing the
+            // clause line trails it — the pushed clause text is the
+            // "previous construct" drain_trailing measures against
+            self.drain(k.pkg_span.lo, 0);
+            self.gap(k.pkg_span.lo);
+            self.nl(0);
+            self.out.push_str("package ");
+            self.out.push_str(&k.pkg);
+            let next = k
+                .items
+                .first()
+                .map(item_span)
+                .map(|s| s.lo)
+                .unwrap_or(u32::MAX);
+            self.drain_trailing(next);
+            self.blank();
+        }
         for (i, it) in k.items.iter().enumerate() {
             self.drain_trailing(item_span(it).lo);
             if i > 0 {

@@ -1,3 +1,5 @@
+package main
+
 // A3: buffered channels — mkchan(n) ring buffer
 import "std/time"
 

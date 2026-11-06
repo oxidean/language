@@ -1,3 +1,5 @@
+package d5b
+
 // d5 fixture: same exported name as d5a — coexistence is the test
 fn f() -> int {
     return 2

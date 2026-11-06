@@ -1,3 +1,5 @@
+package http
+
 // std/http — minimal HTTP/1.1 server written in the language over libc
 // sockets. Import with `import "std/http"` and hand `serve` a Handler:
 //

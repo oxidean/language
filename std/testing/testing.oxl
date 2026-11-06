@@ -1,3 +1,5 @@
+package testing
+
 // std/testing — tiny assertion helpers for `oxl test`.
 // Import with `import "std/testing"`.
 

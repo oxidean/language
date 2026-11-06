@@ -1,3 +1,5 @@
+package main
+
 // A1 ping-pong regression bench: one ponger task, N rendezvous
 // round-trips through the scheduler.
 //

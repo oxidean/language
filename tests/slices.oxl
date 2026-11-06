@@ -1,3 +1,5 @@
+package main
+
 // B3: slices — []T is a {ptr,len,cap} fat header passed by value.
 // mkslice/push/index/view per spec b3-slices.md
 

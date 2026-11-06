@@ -1,3 +1,5 @@
+package main
+
 // A2 cancel: a task parked in `select` must be force-woken when a
 // sibling traps — before the parked-wake registry this hung the join
 // forever. run.sh asserts this exits nonzero (the trap) *quickly*

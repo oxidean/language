@@ -23,7 +23,7 @@ jobs:
         run: |
           mkdir -p dist/oxl-toolchain
           cp oxl/target/release/oxl dist/oxl-toolchain/
-          cp -r stdlib examples dist/oxl-toolchain/
+          cp -r std examples dist/oxl-toolchain/
           # gui_shim.c includes ../../runtime/rt.h — ship the header at
           # the same relative spot so the packaged example still builds
           mkdir -p dist/oxl-toolchain/runtime
@@ -34,14 +34,14 @@ jobs:
           cat > dist/oxl-toolchain/README.md <<'EOF'
           # oxl toolchain
 
-          The `oxl` compiler plus `stdlib/` library sources and `examples/` pilots.
+          The `oxl` compiler plus `std/` library sources and `examples/` pilots.
 
           ```sh
           ./oxl run examples/hello.oxl    # compile + run (needs cc on PATH)
           ./oxl build examples/http-crud-sqlite/main.oxl   # sqlite pilots also need libsqlite3-dev
           ```
 
-          `import "std/x"` resolves against `stdlib/` next to the binary.
+          `import "std/x"` resolves against `std/` next to the binary.
           EOF
           cd dist && tar czf oxl-toolchain-linux-x86_64.tar.gz oxl-toolchain
       - name: github release
