@@ -484,8 +484,9 @@ for try in 1 2; do
     done
     wait $base_pid 2>/dev/null || true
     # retry only the observed flake: the run completed (printed done)
-    # yet yielded no sample — a spawn-registration race, not a crash
-    if [ "$base_rss" -gt 0 ] || [ "$(tail -1 "$scratch/base.out")" != "done" ]; then
+    # yet yielded no sample — a spawn-registration race, not a crash;
+    # relaunch only while an iteration remains to consume it
+    if [ "$base_rss" -gt 0 ] || [ "$(tail -1 "$scratch/base.out")" != "done" ] || [ "$try" -eq 2 ]; then
         break
     fi
     "$scratch/conc_scale$EXE" 0 0 2500 > "$scratch/base.out" 2>&1 &
