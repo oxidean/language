@@ -2090,12 +2090,16 @@ OxlStr rt_bufstr(void *buf, int64_t n) {
 }
 void rt_poke8(void *buf, int64_t off, int64_t v) { ((uint8_t *)buf)[off] = (uint8_t)v; }
 void rt_poke16(void *buf, int64_t off, int64_t v) {
-    uint16_t x = htons((uint16_t)v);
-    memcpy((uint8_t *)buf + off, &x, sizeof x);
+    uint8_t *p = (uint8_t *)buf + off;
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
 }
 void rt_poke32(void *buf, int64_t off, int64_t v) {
-    uint32_t x = htonl((uint32_t)v);
-    memcpy((uint8_t *)buf + off, &x, sizeof x);
+    uint8_t *p = (uint8_t *)buf + off;
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
 }
 #ifdef OXL_NET
 int64_t rt_htons(int64_t v) { return htons((uint16_t)v); }
