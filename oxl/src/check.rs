@@ -1590,6 +1590,10 @@ impl<'a> Checker<'a> {
                             self.assignable(&Ty::Float, &lt, l.span);
                             self.assignable(&Ty::Float, &rt, r.span);
                             Ty::Float
+                        } else if lt == Ty::Byte && rt == Ty::Byte {
+                            // byte op byte stays byte — chained ops keep
+                            // the mod-256 wrap the type promises
+                            Ty::Byte
                         } else {
                             self.assignable(&Ty::Int, &lt, l.span);
                             self.assignable(&Ty::Int, &rt, r.span);
@@ -1598,15 +1602,22 @@ impl<'a> Checker<'a> {
                     }
                     BinOp::BitAnd | BinOp::BitOr | BinOp::Xor => {
                         // bit ops are int-only — no float promotion
-                        self.assignable(&Ty::Int, &lt, l.span);
-                        self.assignable(&Ty::Int, &rt, r.span);
-                        Ty::Int
+                        if lt == Ty::Byte && rt == Ty::Byte {
+                            Ty::Byte
+                        } else {
+                            self.assignable(&Ty::Int, &lt, l.span);
+                            self.assignable(&Ty::Int, &rt, r.span);
+                            Ty::Int
+                        }
                     }
                     _ => {
                         if lt == Ty::Float || rt == Ty::Float {
                             self.assignable(&Ty::Float, &lt, l.span);
                             self.assignable(&Ty::Float, &rt, r.span);
                             return Ty::Float;
+                        }
+                        if lt == Ty::Byte && rt == Ty::Byte {
+                            return Ty::Byte;
                         }
                         self.assignable(&Ty::Int, &lt, l.span);
                         self.assignable(&Ty::Int, &rt, r.span);

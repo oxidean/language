@@ -1216,6 +1216,9 @@ fn xty_bin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> int {
     if lk == check.k_float() || rk == check.k_float() {
         return check.tk(g.ck, check.k_float())
     }
+    if lk == check.k_byte() && rk == check.k_byte() {
+        return check.t_byte(g.ck)
+    }
     return check.t_int(g.ck)
 }
 
@@ -2001,7 +2004,8 @@ fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> str {
     lv := gx(g, l)
     rv := gx(g, r)
     // byte arithmetic wraps mod 256 — C would promote to int and
-    // carry bits the oxl type says don't exist
+    // carry bits the oxl type says don't exist. Any byte operand
+    // makes it byte arithmetic (`255 as byte + 1` wraps to 0).
     if tyk(g, gdt(g, lt)) == check.k_byte() && (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^") {
         return "((uint8_t)(" + lv + " " + op + " " + rv + "))"
     }

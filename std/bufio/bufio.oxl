@@ -7,22 +7,29 @@ import "std/io"
 
 import "std/errors"
 
-/// Reader buffers an io.Reader.
-struct Reader { r: io.Reader, buf: []byte, ri: int, wi: int }
+/// Reader buffers an io.Reader. `stuck` latches the first underlying
+/// error — Go's bufio semantics: once the source fails, reads drain
+/// the window then keep returning that error instead of re-reading.
+struct Reader { r: io.Reader, buf: []byte, ri: int, wi: int, stuck: err }
 
 /// newreader — default 4096 window.
 fn newreader(r: io.Reader) -> Reader {
-    return Reader{r: r, buf: mkslice(byte, 4096), ri: 0, wi: 0}
+    return Reader{r: r, buf: mkslice(byte, 4096), ri: 0, wi: 0, stuck: nil}
 }
 
 /// newreadersize — caller-picked window.
 fn newreadersize(r: io.Reader, sz: int) -> Reader {
-    return Reader{r: r, buf: mkslice(byte, sz), ri: 0, wi: 0}
+    return Reader{r: r, buf: mkslice(byte, sz), ri: 0, wi: 0, stuck: nil}
 }
 
-// fill compacts then pulls — eof/error ride out tagged with whether
-// the window already had data (callers drain it first).
+// fill compacts then pulls. n>0 bytes are kept even when the call
+// returns an error — Readers may report data-then-eof, and those
+// bytes are real. The error latches in `stuck` so callers drain the
+// window first, then see it on the next pull.
 fn (b mut Reader) fill() -> err {
+    if b.stuck != nil {
+        return b.stuck
+    }
     if b.ri > 0 {
         i := 0
         for i < b.wi - b.ri {
@@ -36,22 +43,28 @@ fn (b mut Reader) fill() -> err {
         return errors.new("bufio: buffer full")
     }
     [n, e] = b.r.read(b.buf[b.wi:])
+    if n > 0 {
+        b.wi = b.wi + n
+    }
     if e != nil {
+        b.stuck = e
         return e
     }
-    b.wi = b.wi + n
     return nil
 }
 
 /// read — buffered then pass-through for large p; [n, err].
 fn (b mut Reader) read(p: []byte) -> [int, err] {
     if b.ri == b.wi {
+        if b.stuck != nil {
+            return 0, b.stuck
+        }
         // window empty — big reads skip the buffer entirely
         if len(p) >= len(b.buf) {
             return b.r.read(p)
         }
         e := b.fill()
-        if e != nil {
+        if b.ri == b.wi {
             return 0, e
         }
     }
@@ -98,7 +111,7 @@ fn (b mut Reader) readline() -> [str, err] {
             return out as str, nil
         }
         e := b.fill()
-        if e != nil {
+        if e != nil && b.wi - b.ri == 0 {
             if e == io.eof() && len(out) > 0 {
                 return out as str, e
             }
@@ -116,12 +129,17 @@ fn (b mut Reader) peek(n: int) -> [str, err] {
         if b.wi >= len(b.buf) && b.ri == 0 {
             break
         }
+        was := b.wi
         e := b.fill()
-        if e != nil {
-            if e == io.eof() && b.wi - b.ri > 0 {
-                return b.buf[b.ri:b.wi] as str, nil
+        if e != nil && b.wi == was {
+            end := b.ri + n
+            if end > b.wi {
+                end = b.wi
             }
-            return "", e
+            if e == io.eof() && end > b.ri {
+                return b.buf[b.ri:end] as str, nil
+            }
+            return b.buf[b.ri:end] as str, e
         }
     }
     end := b.ri + n
@@ -164,18 +182,29 @@ fn (b mut Writer) write(p: []byte) -> [int, err] {
     return len(p), nil
 }
 
-/// flush pushes the buffered window down; nil on success.
+/// flush pushes the buffered window down; nil on success. On failure
+/// only the unwritten suffix stays buffered — a retry can't duplicate
+/// the prefix the writer already consumed.
 fn (b mut Writer) flush() -> err {
     off := 0
     for off < len(b.buf) {
         [n, e] = b.w.write(b.buf[off:])
-        if e != nil {
-            return e
+        if n > 0 {
+            off = off + n
         }
-        if n <= 0 {
+        if e != nil || n <= 0 {
+            rem := len(b.buf) - off
+            i := 0
+            for i < rem {
+                b.buf[i] = b.buf[off + i]
+                i = i + 1
+            }
+            b.buf = b.buf[:rem]
+            if e != nil {
+                return e
+            }
             return errors.new("bufio: short write")
         }
-        off = off + n
     }
     b.buf = mkslice(byte, 0)
     return nil

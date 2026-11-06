@@ -2698,11 +2698,19 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
             assignable(ck, tk(ck, k_float()), rt)
             return tk(ck, k_float())
         }
+        if lk == k_byte() && rk == k_byte() {
+            // byte op byte stays byte — chained ops keep the mod-256
+            // wrap the type promises
+            return t_byte(ck)
+        }
         assignable(ck, t_int(ck), lt)
         assignable(ck, t_int(ck), rt)
         return t_int(ck)
     }
     if op == "&" || op == "|" || op == "^" {
+        if lk == k_byte() && rk == k_byte() {
+            return t_byte(ck)
+        }
         assignable(ck, t_int(ck), lt)
         assignable(ck, t_int(ck), rt)
         return t_int(ck)
@@ -2712,6 +2720,9 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
         assignable(ck, tk(ck, k_float()), lt)
         assignable(ck, tk(ck, k_float()), rt)
         return tk(ck, k_float())
+    }
+    if lk == k_byte() && rk == k_byte() {
+        return t_byte(ck)
     }
     assignable(ck, t_int(ck), lt)
     assignable(ck, t_int(ck), rt)

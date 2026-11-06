@@ -114,9 +114,22 @@ echo "== oxl test: io (s2) =="
 out=$("$OXL" test tests/io_test.oxl)
 printf '%s
 ' "$out" >&2
-for t in test_bytes test_strconv test_fmt test_errs test_stdstreams test_io_files; do
+for t in test_bytes test_strconv test_fmt test_errs test_fill_keeps_err_bytes test_flush_keeps_unwritten test_stdstreams test_io_files; do
     grep -q "$t ... ok" <<<"$out" || { echo "FAIL io: $out"; exit 1; }
 done
+# char literals decode to their scalar (scratch, not corpus — fmt
+# normalizes 'a' to 97 in formatted files)
+cat > "$scratch/charlit.oxl" <<'EOF'
+package main
+fn main() {
+    ok := 'a' == 97 && '\n' == 10 && '\\' == 92 && '\'' == 39 && 'A' == 65
+    if ok {
+        println("charlit ok")
+    }
+}
+EOF
+out=$("$OXL" run "$scratch/charlit.oxl")
+grep -q "charlit ok" <<<"$out" || { echo "FAIL charlit: $out"; exit 1; }
 # char-literal lex errors — '' and multi-char are rejected at lex time
 cat > "$scratch/badchar.oxl" <<'EOF'
 package main

@@ -1234,15 +1234,18 @@ impl<'a> Gen<'a> {
                         Ty::Str
                     } else if la == Ty::Float || ra == Ty::Float {
                         Ty::Float
+                    } else if la == Ty::Byte && ra == Ty::Byte {
+                        Ty::Byte
                     } else {
                         Ty::Int
                     }
                 }
                 _ => {
-                    if self.dt(&self.expr_ty(l)) == Ty::Float
-                        || self.dt(&self.expr_ty(r)) == Ty::Float
-                    {
+                    let (la, ra) = (self.dt(&self.expr_ty(l)), self.dt(&self.expr_ty(r)));
+                    if la == Ty::Float || ra == Ty::Float {
                         Ty::Float
+                    } else if la == Ty::Byte && ra == Ty::Byte {
+                        Ty::Byte
                     } else {
                         Ty::Int
                     }
@@ -1778,7 +1781,9 @@ impl<'a> Gen<'a> {
                     BinOp::And => "&&", BinOp::Or => "||",
                 };
                 // byte arithmetic wraps mod 256 — C would promote to int
-                // and carry bits the oxl type says don't exist
+                // and carry bits the oxl type says don't exist. Any byte
+                // operand makes the op byte arithmetic (the untyped-
+                // constant case in Go: `255 as byte + 1` wraps to 0).
                 if self.dt(&lt) == Ty::Byte && matches!(op,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
                     | BinOp::BitAnd | BinOp::BitOr | BinOp::Xor)

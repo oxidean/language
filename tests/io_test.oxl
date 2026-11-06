@@ -115,7 +115,7 @@ fn test_bytes() {
     testing.expect_streq(b as str, "hello", "[]byte->str")
     x := 65 as byte
     testing.expect(x == 65, "int->byte + char literal")
-    testing.expect(97 == 97 && 10 == 10 && 92 == 92, "char literals")
+    testing.expect(97 == 97 && 10 == 10 && 92 == 92 && 39 == 39, "char literals")
     testing.expect(255 as byte + 1 == 0, "byte wrap")
     testing.expect(bytes.equal("ab" as []byte, "ab" as []byte), "equal")
     testing.expect(!bytes.equal("ab" as []byte, "ac" as []byte), "!equal")
@@ -167,6 +167,80 @@ fn test_errs() {
     testing.expect_streq(errors.msg(e), "EOF", "err msg")
     testing.expect_streq(errors.msg(nil), "", "msg(nil)")
     testing.expect_streq(errors.msg(errors.new("boom")), "boom", "new msg")
+}
+
+// Chunky returns 3 bytes WITH eof on its second read — the
+// data-then-error case: fill must keep the bytes, the error must
+// surface only after the window drains.
+struct Chunky { calls: int }
+
+fn (c mut Chunky) read(b: []byte) -> [int, err] {
+    c.calls = c.calls + 1
+    if c.calls == 1 {
+        b[0] = 104
+        b[1] = 105
+        return 2, nil
+    }
+    if c.calls == 2 {
+        b[0] = 33
+        b[1] = 33
+        b[2] = 33
+        return 3, io.eof()
+    }
+    return 0, io.eof()
+}
+
+fn (c mut Chunky) asreader() -> io.Reader {
+    return c
+}
+
+// Flaky accepts 3 bytes then fails — flush must keep only the
+// unwritten suffix or a retry duplicates the prefix.
+struct Flaky { calls: int, got: []byte }
+
+fn (w mut Flaky) write(b: []byte) -> [int, err] {
+    w.calls = w.calls + 1
+    if w.calls == 1 {
+        w.got = push(w.got, b[0])
+        w.got = push(w.got, b[1])
+        w.got = push(w.got, b[2])
+        return 3, errors.new("disk full")
+    }
+    i := 0
+    for i < len(b) {
+        w.got = push(w.got, b[i])
+        i = i + 1
+    }
+    return len(b), nil
+}
+
+fn (w mut Flaky) aswriter() -> io.Writer {
+    return w
+}
+
+fn test_fill_keeps_err_bytes() {
+    c := Chunky{calls: 0}
+    br := bufio.newreadersize(c.asreader(), 16)
+    p := mkslice(byte, 16)
+    [n1, e1] = br.read(p)
+    testing.expect(n1 == 2 && e1 == nil, "first read")
+    [n2, e2] = br.read(p[n1:])
+    testing.expect(n2 == 3 && e2 == nil, "bytes carried with eof arrive")
+    [n3, e3] = br.read(p)
+    testing.expect(n3 == 0 && e3 == io.eof(), "sticky eof after drain")
+}
+
+fn test_flush_keeps_unwritten() {
+    w := Flaky{calls: 0, got: mkslice(byte, 0)}
+    bw := bufio.newwriter(w.aswriter())
+    [_, we] = bw.write("abcdef" as []byte)
+    testing.expect(we == nil, "buffered write")
+    e := bw.flush()
+    testing.expect(e != nil, "flush fails")
+    testing.expect(len(w.got) == 3, "writer got 3")
+    e2 := bw.flush()
+    testing.expect(e2 == nil, "retry succeeds")
+    testing.expect_streq(w.got as str, "abcdef", "no duplicated prefix")
 }
 
 fn test_stdstreams() {

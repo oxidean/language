@@ -43,7 +43,7 @@ extern fn rt_fd_read(fd: int, b: []byte) -> int
 
 extern fn rt_fd_write(fd: int, b: []byte) -> int
 
-extern fn rt_fd_close(fd: int)
+extern fn rt_fd_close(fd: int) -> int
 
 extern fn rt_remove(path: str) -> int
 
@@ -77,6 +77,9 @@ fn (f ref File) read(b: []byte) -> [int, err] {
         return 0, errors.new("read: " + rt_errstr(-n))
     }
     if n == 0 {
+        if len(b) == 0 {
+            return 0, nil
+        }
         return 0, io_eof()
     }
     return n, nil
@@ -91,9 +94,13 @@ fn (f ref File) write(b: []byte) -> [int, err] {
     return n, nil
 }
 
-/// close the fd; nil error on success.
+/// close the fd; nil on success, err on failure — deferred write
+/// errors (full fs, NFS) surface here, so the result is real.
 fn (f ref File) close() -> err {
-    rt_fd_close(f.fd)
+    r := rt_fd_close(f.fd)
+    if r < 0 {
+        return errors.new("close: " + rt_errstr(-r))
+    }
     return nil
 }
 
