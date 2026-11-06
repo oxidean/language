@@ -1,0 +1,418 @@
+package main
+
+// S5 acceptance: the ported Go-regexp corpus — literals, anchors,
+// classes (incl. posix + rune ranges), alternation priority,
+// quantifiers (greedy/lazy/bounded), escapes, findall/split/
+// replaceall semantics, compile-error cases, and the pathological
+// pattern that hangs backtrackers but not a Pike VM.
+import "std/testing"
+
+import "std/regexp"
+
+import "std/slices"
+
+// -- list helpers: expected []str built via pushes, compared with
+// slices.equal (no slice literals in the language).
+fn eqs(got: []str, want: []str, msg: str) {
+    if !slices.equal(got, want) {
+        testing.expect_eq(len(got), len(want), msg + " (len)")
+        i := 0
+        for i < len(got) && i < len(want) {
+            testing.expect_streq(got[i], want[i], msg)
+            i = i + 1
+        }
+        testing.expect(false, msg + " (list mismatch)")
+    }
+    testing.expect(true, msg)
+}
+
+fn l0() -> own []str {
+    return new(mkslice(str, 0))
+}
+
+fn l1(a: str) -> own []str {
+    v := mkslice(str, 0)
+    v = push(v, a)
+    return new(v)
+}
+
+fn l2(a: str, b: str) -> own []str {
+    v := mkslice(str, 0)
+    v = push(v, a)
+    v = push(v, b)
+    return new(v)
+}
+
+fn l3(a: str, b: str, c: str) -> own []str {
+    v := mkslice(str, 0)
+    v = push(v, a)
+    v = push(v, b)
+    v = push(v, c)
+    return new(v)
+}
+
+fn l4(a: str, b: str, c: str, d: str) -> own []str {
+    v := mkslice(str, 0)
+    v = push(v, a)
+    v = push(v, b)
+    v = push(v, c)
+    v = push(v, d)
+    return new(v)
+}
+
+// must compiles or traps via expect — the corpus's happy path.
+fn must(p: str) -> regexp.Re {
+    [re, e] = regexp.compile(p)
+    testing.expect(e == nil, "compile " + p)
+    return re
+}
+
+fn test_literals() {
+    re := must("a")
+    testing.expect(re.matchstr("abcabcac"), "lit a matches")
+    testing.expect_streq(re.find("abcabcac"), "a", "lit a leftmost")
+    testing.expect(!re.matchstr("xyz"), "lit a absent")
+
+    e := must("")
+    testing.expect(e.matchstr("abc"), "empty pattern matches")
+    testing.expect_streq(e.find("abc"), "", "empty find")
+
+    ab := must("a+bbc")
+    testing.expect_streq(ab.find("ccabcbbbcbbbc"), "", "cat absent")
+    testing.expect_streq(ab.find("xabbcy"), "abbc", "cat leftmost")
+
+    plus := must("a\\+c")
+    testing.expect_streq(plus.find("xa+cy"), "a+c", "escaped +")
+    star := must("a\\*")
+    testing.expect_streq(star.find("a*a"), "a*", "escaped *")
+    hat := must("\\^a\\$")
+    testing.expect_streq(hat.find("^a$x"), "^a$", "escaped anchors lit")
+    bs := must("a\\\\b")
+    testing.expect_streq(bs.find("a\\b"), "a\\b", "escaped backslash")
+}
+
+fn test_anchors() {
+    re := must("^abcdefg")
+    testing.expect(re.matchstr("abcdefg"), "bol prefix")
+    testing.expect(!re.matchstr("xabcdefg"), "bol rejects mid")
+    e := must("a$")
+    testing.expect(e.matchstr("ba"), "eol suffix")
+    testing.expect(!e.matchstr("ab"), "eol rejects mid")
+    f := must("^a$")
+    testing.expect(f.matchstr("a"), "bol+eol")
+    testing.expect(!f.matchstr("aab"), "bol+eol strict")
+    testing.expect(!f.matchstr("a\n"), "$ is end of text not line")
+    g := must("^a")
+    testing.expect(!g.matchstr("\na"), "^ is start of text not line")
+    aa := must("\\Aabc")
+    testing.expect(aa.matchstr("abc"), "\\A")
+    testing.expect(!aa.matchstr("xabc"), "\\A mid")
+    zz := must("abc\\z")
+    testing.expect(zz.matchstr("abc"), "\\z")
+    testing.expect(!zz.matchstr("abc\n"), "\\z strict")
+}
+
+fn test_dot() {
+    re := must("a.c")
+    testing.expect_streq(re.find("abc"), "abc", "dot")
+    testing.expect_streq(re.find("axc"), "axc", "dot mid")
+    testing.expect(!re.matchstr("ac"), "dot needs a rune")
+    testing.expect(!re.matchstr("a\nc"), ". excludes newline")
+    d := must(".")
+    testing.expect_streq(d.find("é"), "é", "dot is a rune")
+    p := must(".+")
+    testing.expect_streq(p.find("héllo"), "héllo", "dot+ utf8")
+}
+
+fn test_classes() {
+    re := must("[a-c]+")
+    testing.expect_streq(re.find("abcd"), "abc", "class range")
+    testing.expect_streq(re.find("bcda"), "bc", "class range 2")
+    n := must("[^a-c]+")
+    testing.expect_streq(n.find("abcde"), "de", "negated class")
+    v := must("[aeiou]")
+    testing.expect_streq(v.find("hello"), "e", "vowel set")
+    cl := must("[]a]")
+    testing.expect_streq(cl.find("]b"), "]", "] literal first")
+    ncl := must("[^]a]+")
+    testing.expect_streq(ncl.find("]xb"), "xb", "negated ]")
+    dash := must("[a-]")
+    testing.expect_streq(dash.find("a-b"), "a", "trailing - literal")
+    dash2 := must("[-a]")
+    testing.expect_streq(dash2.find("-a"), "-", "leading - literal")
+    mixed := must("[a-c-e]")
+    testing.expect_streq(mixed.find("-"), "-", "- inside class")
+    rng := must("[--z]")
+    testing.expect_streq(rng.find("A"), "A", "- to z is a range")
+    dg := must("[\\d]+")
+    testing.expect_streq(dg.find("a123b"), "123", "class \\d")
+    w := must("[\\w]+")
+    testing.expect_streq(w.find("hi_there!"), "hi_there", "class \\w")
+    sp := must("[\\s]+")
+    testing.expect_streq(sp.find("a b"), " ", "class \\s")
+    e := must("[a\\-z]")
+    testing.expect_streq(e.find("-"), "-", "escaped -")
+    e2 := must("[\\]]")
+    testing.expect_streq(e2.find("]"), "]", "escaped ]")
+}
+
+fn test_posix() {
+    re := must("[[:alpha:]]+")
+    testing.expect_streq(re.find("abc123"), "abc", "posix alpha")
+    d := must("[[:digit:]]+")
+    testing.expect_streq(d.find("abc123"), "123", "posix digit")
+    nd := must("[[:^digit:]]+")
+    testing.expect_streq(nd.find("abc123"), "abc", "posix ^digit")
+    an := must("[[:alnum:]]+")
+    testing.expect_streq(an.find("--a1--"), "a1", "posix alnum")
+    x := must("[[:xdigit:]]+")
+    testing.expect_streq(x.find("xxFFzz"), "FF", "posix xdigit")
+    s := must("[[:space:]]+")
+    testing.expect_streq(s.find("a\t b"), "\t ", "posix space")
+}
+
+fn test_alternation() {
+    re := must("a|ab")
+    testing.expect_streq(re.find("ab"), "a", "first alt preferred")
+    re2 := must("ab|a")
+    testing.expect_streq(re2.find("ab"), "ab", "first alt wins")
+    re3 := must("(a|b)+")
+    testing.expect_streq(re3.find("abba"), "abba", "alt in group")
+    re4 := must("a(b|c)d")
+    testing.expect_streq(re4.find("abd"), "abd", "alt arm 1")
+    testing.expect_streq(re4.find("acd"), "acd", "alt arm 2")
+    re5 := must("(x|xy)+z")
+    testing.expect_streq(re5.find("xyz"), "xyz", "alt backtrack-free")
+    testing.expect_streq(re5.find("xxyz"), "xxyz", "alt greedy")
+    re6 := must("(|a)b")
+    testing.expect_streq(re6.find("b"), "b", "empty alt arm")
+    re7 := must("a|")
+    testing.expect_streq(re7.find("x"), "", "trailing empty alt")
+    re8 := must("h[ae]llo|w.rld")
+    testing.expect_streq(re8.find("oh hello world"), "hello", "leftmost over alt")
+}
+
+fn test_quantifiers() {
+    re := must("ba{1,3}")
+    testing.expect_streq(re.find("baaa"), "baaa", "bounded max")
+    testing.expect_streq(re.find("ba"), "ba", "bounded min")
+    testing.expect(!re.matchstr("b"), "bounded floor")
+    e := must("a{2}")
+    testing.expect(e.matchstr("aa"), "exact")
+    testing.expect(!e.matchstr("a"), "exact floor")
+    u := must("a{2,}")
+    testing.expect_streq(u.find("aaaa"), "aaaa", "unbounded")
+    testing.expect(!u.matchstr("a"), "unbounded floor")
+    z := must("a{0,2}")
+    testing.expect_streq(z.find("aaa"), "aa", "zero-to-two")
+    g := must("(ab){2}")
+    testing.expect_streq(g.find("abab"), "abab", "group repeat")
+    q := must("a?")
+    testing.expect_streq(q.find("a"), "a", "quest")
+    testing.expect_streq(q.find("b"), "", "quest empty")
+    testing.expect(q.matchstr("b"), "quest matches empty")
+    s := must("a*")
+    testing.expect_streq(s.find("aa"), "aa", "star greedy")
+    testing.expect_streq(s.find("ba"), "", "star empty at 0")
+    pp := must("a+")
+    testing.expect_streq(pp.find("baa"), "aa", "plus")
+    testing.expect(!pp.matchstr("b"), "plus needs one")
+}
+
+fn test_lazy() {
+    re := must("a*?")
+    testing.expect_streq(re.find("aaa"), "", "lazy star empty")
+    p := must("a+?")
+    testing.expect_streq(p.find("aaa"), "a", "lazy plus one")
+    q := must("a??")
+    testing.expect_streq(q.find("a"), "", "lazy quest empty")
+    b := must("a{2,4}?")
+    testing.expect_streq(b.find("aaaaa"), "aa", "lazy bounded min")
+    gr := must("a+")
+    testing.expect_streq(gr.find("aaa"), "aaa", "greedy contrast")
+}
+
+fn test_escapes() {
+    d := must("\\d{3}-\\d{4}")
+    testing.expect_streq(d.find("call 555-1234"), "555-1234", "\\d seq")
+    w := must("\\w+@\\w+")
+    testing.expect_streq(w.find("a@b"), "a@b", "\\w seq")
+    nd := must("\\D+")
+    testing.expect_streq(nd.find("ab1"), "ab", "\\D")
+    ns := must("\\S+")
+    testing.expect_streq(ns.find("a b"), "a", "\\S")
+    nw := must("\\W+")
+    testing.expect_streq(nw.find("a!b"), "!", "\\W")
+    x := must("\\x41")
+    testing.expect_streq(x.find("A"), "A", "\\xhh")
+    xb := must("\\x{263A}")
+    testing.expect_streq(xb.find("x☺y"), "☺", "\\x{...}")
+    o := must("\\101")
+    testing.expect_streq(o.find("A"), "A", "octal")
+    nl := must("a\\nb")
+    testing.expect(nl.matchstr("a\nb"), "\\n")
+    tr := must("\\t\\r")
+    testing.expect(tr.matchstr("\t\r"), "\\t\\r")
+    qt := must("\\Qa+b\\E")
+    testing.expect_streq(qt.find("a+b"), "a+b", "\\Q..\\E literal")
+    qe := must("\\Qab")
+    testing.expect_streq(qe.find("ab"), "ab", "\\Q to end")
+    qq := must("\\Q\\Ea")
+    testing.expect_streq(qq.find("a"), "a", "\\Q\\E empty")
+}
+
+fn test_word_boundary() {
+    re := must("\\bcat\\b")
+    testing.expect_streq(re.find("the cat sat"), "cat", "\\b match")
+    testing.expect(!re.matchstr("concat"), "\\b rejects interior")
+    testing.expect(!re.matchstr("cats"), "\\b rejects suffix")
+    nb := must("\\Bcat")
+    testing.expect_streq(nb.find("concat"), "cat", "\\B interior")
+    testing.expect(!nb.matchstr("cat"), "\\B rejects start")
+    st := must("\\bcat")
+    testing.expect_streq(st.find("cats"), "cat", "\\b prefix only")
+}
+
+fn test_utf8() {
+    re := must("é")
+    testing.expect_streq(re.find("café"), "é", "utf8 literal")
+    cl := must("[α-ω]+")
+    testing.expect_streq(cl.find("xβγδy"), "βγδ", "utf8 class range")
+    alt := must("a|é|b")
+    testing.expect_streq(alt.find("é"), "é", "utf8 alt")
+    an := must("é*")
+    testing.expect_streq(an.find("ééé"), "ééé", "utf8 star")
+}
+
+fn test_findall() {
+    re := must("a")
+    eqs(re.findall("banana", -1), l3("a", "a", "a"), "findall lit")
+    s := must("a*")
+    eqs(s.findall("aa", -1), l1("aa"), "findall a* aa")
+    eqs(s.findall("ba", -1), l2("", "a"), "findall a* ba")
+    b := must("b*")
+    eqs(b.findall("ab", -1), l2("", "b"), "findall b* ab")
+    e := must("")
+    eqs(e.findall("ab", -1), l3("", "", ""), "findall empty")
+    n := must("a")
+    eqs(n.findall("aaa", 2), l2("a", "a"), "findall n=2")
+    eqs(n.findall("aaa", 0), l0(), "findall n=0")
+    eqs(n.findall("b", -1), l0(), "findall none")
+    g := must("an+")
+    eqs(g.findall("banana", -1), l2("an", "an"), "findall an+")
+    fi := must("b+")
+    sp := fi.findidx("aabbc")
+    testing.expect_eq(sp.s, 2, "findidx start")
+    testing.expect_eq(sp.e, 4, "findidx end")
+    nm := must("z")
+    spn := nm.findidx("abc")
+    testing.expect_eq(spn.s, -1, "findidx none")
+    f2 := must("é+")
+    testing.expect_streq(f2.find("héllo"), "é", "find utf8")
+}
+
+fn test_replaceall() {
+    re := must("a")
+    testing.expect_streq(re.replaceall("banana", "o"), "bonono", "repl lit")
+    p := must("a+")
+    testing.expect_streq(p.replaceall("banana", "-"), "b-n-n-", "repl a+")
+    e := must("")
+    testing.expect_streq(e.replaceall("ab", "-"), "-a-b-", "repl empty")
+    al := must("a|ab")
+    testing.expect_streq(al.replaceall("ab", "-"), "-b", "repl alt")
+    nm := must("z")
+    testing.expect_streq(nm.replaceall("abc", "-"), "abc", "repl nomatch")
+    dl := must("\\$")
+    testing.expect_streq(dl.replaceall("a$", "USD"), "aUSD", "repl literal $")
+}
+
+fn test_split() {
+    re := must(",")
+    eqs(re.split("a,b,c", -1), l3("a", "b", "c"), "split basic")
+    eqs(re.split("a,b,c,d", 2), l2("a", "b,c,d"), "split n=2")
+    eqs(re.split("a,b,c", 1), l1("a,b,c"), "split n=1")
+    eqs(re.split("abc", -1), l1("abc"), "split nomatch")
+    e := must("")
+    eqs(e.split("abc", -1), l3("a", "b", "c"), "split empty pat")
+    eqs(e.split("", -1), l0(), "split empty both")
+    a := must("a")
+    eqs(a.split("", -1), l1(""), "split empty s")
+    eqs(a.split("aaa", -1), l4("", "", "", ""), "split all seps")
+    p := must("a+")
+    eqs(p.split("XaXaaX", -1), l3("X", "X", "X"), "split a+")
+    eqs(p.split("aaa", -1), l2("", ""), "split one match")
+    b := must("b*")
+    eqs(b.split("ab", -1), l2("a", ""), "split b*")
+}
+
+fn test_compile_errors() {
+    [r1, e1] = regexp.compile("*a")
+    testing.expect(e1 != nil, "err *a")
+    [r2, e2] = regexp.compile("+")
+    testing.expect(e2 != nil, "err +")
+    [r3, e3] = regexp.compile("a**")
+    testing.expect(e3 != nil, "err a**")
+    [r4, e4] = regexp.compile("a*+")
+    testing.expect(e4 != nil, "err a*+")
+    [r5, e5] = regexp.compile("a{2,1}")
+    testing.expect(e5 != nil, "err a{2,1}")
+    [r6, e6] = regexp.compile("a{1001}")
+    testing.expect(e6 != nil, "err a{1001}")
+    [r7, e7] = regexp.compile("(a")
+    testing.expect(e7 != nil, "err (a")
+    [r8, e8] = regexp.compile("a)")
+    testing.expect(e8 != nil, "err a)")
+    [r9, e9] = regexp.compile("[a")
+    testing.expect(e9 != nil, "err [a")
+    [r10, e10] = regexp.compile("[z-a]")
+    testing.expect(e10 != nil, "err [z-a]")
+    [r11, e11] = regexp.compile("\\")
+    testing.expect(e11 != nil, "err bs")
+    [r12, e12] = regexp.compile("\\x")
+    testing.expect(e12 != nil, "err \\x")
+    [r13, e13] = regexp.compile("\\8")
+    testing.expect(e13 != nil, "err \\8")
+    [r14, e14] = regexp.compile("\\C")
+    testing.expect(e14 != nil, "err \\C")
+    [r15, e15] = regexp.compile("\\pL")
+    testing.expect(e15 != nil, "err \\p")
+    [r16, e16] = regexp.compile("(?P<>a)")
+    testing.expect(e16 != nil, "err (?P<>")
+    [r17, e17] = regexp.compile("(?=a)")
+    testing.expect(e17 != nil, "err (?=")
+    [r18, e18] = regexp.compile("(?i)a")
+    testing.expect(e18 != nil, "err (?i)")
+    [r19, e19] = regexp.compile("a{2")
+    testing.expect(e19 == nil, "a{2 is literal")
+    [r20, e20] = regexp.compile("a{x")
+    testing.expect(e20 == nil, "a{x literal")
+    [r21, e21] = regexp.compile("a{")
+    testing.expect(e21 == nil, "a{ literal")
+    testing.expect_streq(r21.find("a{"), "a{", "a{ matches lit")
+    [r22, e22] = regexp.compile("(?:a)")
+    testing.expect(e22 == nil, "(?: ok")
+    [r23, e23] = regexp.compile("(?P<n>a)")
+    testing.expect(e23 == nil, "(?P<n> ok")
+    [r24, e24] = regexp.compile("(?<n>a)")
+    testing.expect(e24 == nil, "(?<n> ok")
+    [r25, e25] = regexp.compile("{2}a")
+    testing.expect(e25 != nil, "err {2}a")
+    [r26, e26] = regexp.compile("{")
+    testing.expect(e26 == nil, "{ literal")
+    [r27, e27] = regexp.compile("(a{999}){999}")
+    testing.expect(e27 != nil, "err nested repeat too large")
+}
+
+fn test_pathological() {
+    // (x+x+)+y on x^30 with no y: exponential for a backtracker,
+    // O(pat*input) for the Pike VM — finishing at all is the proof.
+    re := must("(x+x+)+y")
+    testing.expect(!re.matchstr("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), "pathological completes")
+    // (a|a)*$ matches all a's — the exponential-blowup case for
+    // backtrackers (both arms match); NFA steps it linearly.
+    aa := must("(a|a)*$")
+    testing.expect(aa.matchstr("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "star dup completes")
+    testing.expect_streq(aa.find("aaab"), "", "star dup empty at end")
+    ok := must("a+")
+    testing.expect_streq(ok.find("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "long run")
+}

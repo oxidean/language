@@ -1,0 +1,1550 @@
+package regexp
+
+// std/regexp — Go's regexp shaped for oxl: an RE2-subset parser
+// compiling to a Thompson NFA, executed as a Pike VM with ordered
+// thread lists. Matching is O(len(pattern) x len(input)) — no
+// backtracking, so the exponential-blowup class of regexps doesn't
+// exist here. Runes throughout (utf8), ASCII-word \b.
+import "std/errors"
+
+import "std/unicode/utf8"
+
+// ---- instruction ops ----
+let OP_CHAR = 1 // match rune arg, advance
+
+let OP_CLS = 2 // match rune in class arg, advance
+
+let OP_ANY = 3 // match any rune except \n, advance
+
+let OP_BOL = 4 // assert pos == 0  (^, \A)
+
+let OP_EOL = 5 // assert pos == len ($, \z)
+
+let OP_WB = 6 // assert word boundary (\b)
+
+let OP_NWB = 7 // assert not-word-boundary (\B)
+
+let OP_SPLIT = 8 // epsilon fork: try x then y (priority order)
+
+let OP_JMP = 9 // epsilon jump to x
+
+let OP_MATCH = 10 // accepting state
+
+struct Inst { op: int, x: int, y: int, arg: int }
+
+// Cls is a union of code-point ranges [lo..hi]; neg inverts it.
+struct Cls { neg: int, lo: []int, hi: []int }
+
+// ---- AST nodes (arena-allocated, indices not pointers) ----
+let N_LIT = 1 // ch = rune
+
+let N_ANY = 2
+
+let N_CLS = 3 // cidx = class index
+
+let N_CAT = 4 // a . b
+
+let N_ALT = 5 // a | b
+
+let N_REP = 6 // a repeated lo..hi (hi<0 = unbounded), lazy swaps arm order
+
+let N_BOL = 7
+
+let N_EOL = 8
+
+let N_WB = 9
+
+let N_NWB = 10
+
+let N_EMP = 11 // empty (from () or bare | branches)
+
+struct Node {
+    kind: int,
+    ch: int,
+    cidx: int,
+    a: int,
+    b: int,
+    lo: int,
+    hi: int,
+    lazy: int,
+}
+
+/// Span is a [start,end) byte-offset pair — findidx's return.
+struct Span { s: int, e: int }
+
+/// Re is a compiled program: instructions plus their class table.
+struct Re { ins: []Inst, cls: []Cls, pat: str }
+
+// Par is the parser state.
+struct Par { s: str, pos: int, nodes: []Node, cls: []Cls }
+
+fn perr(msg: str) -> err {
+    return errors.new("regexp: " + msg)
+}
+
+fn pnode(p: mut Par, n: Node) -> int {
+    p.nodes = push(p.nodes, n)
+    return len(p.nodes) - 1
+}
+
+fn pcls(p: mut Par, neg: int, lo: []int, hi: []int) -> int {
+    p.cls = push(p.cls, Cls{neg: neg, lo: lo, hi: hi})
+    return len(p.cls) - 1
+}
+
+// prune decodes the rune at p.pos without advancing.
+fn prune(p: ref Par) -> int {
+    if p.pos >= len(p.s) {
+        return -1
+    }
+    return utf8.decode(p.s, p.pos).r
+}
+
+// pnext decodes and advances; caller has checked pos < len.
+fn pnext(p: mut Par) -> int {
+    d := utf8.decode(p.s, p.pos)
+    p.pos = p.pos + d.n
+    if d.n < 1 {
+        p.pos = p.pos + 1
+    }
+    return d.r
+}
+
+// pmalformed reports whether the decode at byte i was a bad byte —
+// a high byte yielding RuneError at width 1 can't be a real U+FFFD
+// (that encodes as three bytes).
+fn pmalformed(s: str, i: int) -> bool {
+    d := utf8.decode(s, i)
+    return byteat(s, i) >= 128 && d.r == 65533 && d.n == 1
+}
+
+// --- builtin range tables (code points, ASCII where Go says ASCII) ---
+
+// addr appends a [lo,hi] range through the out-param slices. Slices
+// share backing so element writes stick; push is caller-side — this
+// shape keeps append sites one-liners.
+struct Ranges { lo: []int, hi: []int }
+
+fn addr(r: mut Ranges, lo: int, hi: int) {
+    r.lo = push(r.lo, lo)
+    r.hi = push(r.hi, hi)
+}
+
+fn add_digits(r: mut Ranges) {
+    addr(r, 48, 57)
+}
+
+fn add_ndigits(r: mut Ranges) {
+    addr(r, 0, 47)
+    addr(r, 58, 1114111)
+}
+
+fn add_space(r: mut Ranges) {
+    addr(r, 9, 10)
+    addr(r, 12, 13)
+    addr(r, 32, 32)
+}
+
+fn add_nspace(r: mut Ranges) {
+    addr(r, 0, 8)
+    addr(r, 11, 11)
+    addr(r, 14, 31)
+    addr(r, 33, 1114111)
+}
+
+fn add_word(r: mut Ranges) {
+    addr(r, 48, 57)
+    addr(r, 65, 90)
+    addr(r, 95, 95)
+    addr(r, 97, 122)
+}
+
+fn add_nword(r: mut Ranges) {
+    addr(r, 0, 47)
+    addr(r, 58, 64)
+    addr(r, 91, 94)
+    addr(r, 96, 96)
+    addr(r, 123, 1114111)
+}
+
+// posix class table — Go's ASCII-only [[:name:]] sets.
+fn posix_ranges(name: str, r: mut Ranges) -> err {
+    if name == "alnum" {
+        addr(r, 48, 57)
+        addr(r, 65, 90)
+        addr(r, 97, 122)
+        return nil
+    }
+    if name == "alpha" {
+        addr(r, 65, 90)
+        addr(r, 97, 122)
+        return nil
+    }
+    if name == "ascii" {
+        addr(r, 0, 127)
+        return nil
+    }
+    if name == "blank" {
+        addr(r, 9, 9)
+        addr(r, 32, 32)
+        return nil
+    }
+    if name == "cntrl" {
+        addr(r, 0, 31)
+        addr(r, 127, 127)
+        return nil
+    }
+    if name == "digit" {
+        addr(r, 48, 57)
+        return nil
+    }
+    if name == "graph" {
+        addr(r, 33, 126)
+        return nil
+    }
+    if name == "lower" {
+        addr(r, 97, 122)
+        return nil
+    }
+    if name == "print" {
+        addr(r, 32, 126)
+        return nil
+    }
+    if name == "punct" {
+        addr(r, 33, 47)
+        addr(r, 58, 64)
+        addr(r, 91, 96)
+        addr(r, 123, 126)
+        return nil
+    }
+    if name == "space" {
+        addr(r, 9, 13)
+        addr(r, 32, 32)
+        return nil
+    }
+    if name == "upper" {
+        addr(r, 65, 90)
+        return nil
+    }
+    if name == "word" {
+        addr(r, 48, 57)
+        addr(r, 65, 90)
+        addr(r, 95, 95)
+        addr(r, 97, 122)
+        return nil
+    }
+    if name == "xdigit" {
+        addr(r, 48, 57)
+        addr(r, 65, 70)
+        addr(r, 97, 102)
+        return nil
+    }
+    return perr("invalid character class range: `[[:" + name + ":]]`")
+}
+
+// posix_neg merges the complement of a posix class (for [[:^name:]]).
+fn posix_neg(name: str, r: mut Ranges) -> err {
+    if name == "alnum" {
+        addr(r, 0, 47)
+        addr(r, 58, 64)
+        addr(r, 91, 96)
+        addr(r, 123, 1114111)
+        return nil
+    }
+    if name == "alpha" {
+        addr(r, 0, 64)
+        addr(r, 91, 96)
+        addr(r, 123, 1114111)
+        return nil
+    }
+    if name == "ascii" {
+        addr(r, 128, 1114111)
+        return nil
+    }
+    if name == "blank" {
+        addr(r, 0, 8)
+        addr(r, 10, 31)
+        addr(r, 33, 1114111)
+        return nil
+    }
+    if name == "cntrl" {
+        addr(r, 32, 126)
+        addr(r, 128, 1114111)
+        return nil
+    }
+    if name == "digit" {
+        addr(r, 0, 47)
+        addr(r, 58, 1114111)
+        return nil
+    }
+    if name == "graph" {
+        addr(r, 0, 32)
+        addr(r, 127, 1114111)
+        return nil
+    }
+    if name == "lower" {
+        addr(r, 0, 96)
+        addr(r, 123, 1114111)
+        return nil
+    }
+    if name == "print" {
+        addr(r, 0, 31)
+        addr(r, 127, 1114111)
+        return nil
+    }
+    if name == "punct" {
+        addr(r, 0, 32)
+        addr(r, 48, 57)
+        addr(r, 65, 90)
+        addr(r, 97, 122)
+        addr(r, 127, 1114111)
+        return nil
+    }
+    if name == "space" {
+        addr(r, 0, 8)
+        addr(r, 14, 31)
+        addr(r, 33, 1114111)
+        return nil
+    }
+    if name == "upper" {
+        addr(r, 0, 64)
+        addr(r, 91, 1114111)
+        return nil
+    }
+    if name == "word" {
+        addr(r, 0, 47)
+        addr(r, 58, 64)
+        addr(r, 91, 94)
+        addr(r, 96, 96)
+        addr(r, 123, 1114111)
+        return nil
+    }
+    if name == "xdigit" {
+        addr(r, 0, 47)
+        addr(r, 58, 64)
+        addr(r, 71, 96)
+        addr(r, 103, 1114111)
+        return nil
+    }
+    return perr("invalid character class range: `[[:" + name + ":]]`")
+}
+
+// ---- escapes ----
+
+// hexval is 0..15 or -1.
+fn hexval(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return -1
+}
+
+// phex parses `\x` — either exactly two hex digits or \x{h..h}.
+// Errors match Go's "invalid escape sequence" umbrella.
+fn phex(p: mut Par) -> [int, err] {
+    if p.pos >= len(p.s) {
+        return 0, perr("invalid escape sequence: `\\x`")
+    }
+    if byteat(p.s, p.pos) == 123 { // {
+        p.pos = p.pos + 1
+        v := 0
+        nd := 0
+        for p.pos < len(p.s) && byteat(p.s, p.pos) != 125 { // }
+            h := hexval(pnext(p))
+            if h < 0 {
+                return 0, perr("invalid escape sequence")
+            }
+            v = v * 16 + h
+            if v > 1114111 {
+                return 0, perr("invalid escape sequence")
+            }
+            nd = nd + 1
+        }
+        if p.pos >= len(p.s) || nd == 0 {
+            return 0, perr("invalid escape sequence")
+        }
+        p.pos = p.pos + 1 // }
+        return v, nil
+    }
+    if p.pos + 1 >= len(p.s) {
+        return 0, perr("invalid escape sequence: `\\x`")
+    }
+    h1 := hexval(byteat(p.s, p.pos))
+    h2 := hexval(byteat(p.s, p.pos + 1))
+    if h1 < 0 || h2 < 0 {
+        return 0, perr("invalid escape sequence")
+    }
+    p.pos = p.pos + 2
+    return h1 * 16 + h2, nil
+}
+
+// poctal parses 0ddd|dd|ddd after a `\`. Go requires a leading 0 or
+// at least two digits for nonzero starts (\1 alone is an error —
+// that shape is reserved for backrefs RE2 doesn't have).
+fn poctal(p: mut Par) -> [int, err] {
+    nd := 0
+    v := 0
+    first := byteat(p.s, p.pos)
+    for nd < 3 && p.pos < len(p.s) {
+        c := byteat(p.s, p.pos)
+        if c < 48 || c > 55 {
+            break
+        }
+        v = v * 8 + (c - 48)
+        p.pos = p.pos + 1
+        nd = nd + 1
+    }
+    if nd == 0 || first != 48 && nd < 2 {
+        return 0, perr("invalid escape sequence")
+    }
+    return v, nil
+}
+
+// esc_class merges \d \s \w and negations into r; returns false for
+// any other escape letter so the caller can treat it as a char.
+fn esc_class(c: int, r: mut Ranges) -> bool {
+    if c == 100 {
+        add_digits(r)
+        return true
+    } // d
+    if c == 68 {
+        add_ndigits(r)
+        return true
+    } // D
+    if c == 115 {
+        add_space(r)
+        return true
+    } // s
+    if c == 83 {
+        add_nspace(r)
+        return true
+    } // S
+    if c == 119 {
+        add_word(r)
+        return true
+    } // w
+    if c == 87 {
+        add_nword(r)
+        return true
+    } // W
+    return false
+}
+
+fn esc_literal(c: int) -> int {
+    if c == 110 {
+        return 10
+    } // n
+    if c == 114 {
+        return 13
+    } // r
+    if c == 116 {
+        return 9
+    } // t
+    if c == 102 {
+        return 12
+    } // f
+    if c == 118 {
+        return 11
+    } // v
+    if c == 97 {
+        return 7
+    } // a
+    return -1
+}
+
+// pesc parses one escape after `\`, used in atom position and inside
+// classes. Result: kind 0 = literal rune in `out`, kind 1 = a class
+// escape merged into `rg`, kind 2 = an assertion node kind (>0).
+// `\b` is a word-boundary assertion OUTSIDE classes and an error
+// inside (Go rejects `[\b]`); inclass selects.
+struct Esc { kind: int, out: int, nod: int }
+
+fn pesc(p: mut Par, rg: mut Ranges, inclass: int) -> [Esc, err] {
+    if p.pos >= len(p.s) {
+        return Esc{kind: 0, out: 0, nod: 0}, perr("trailing backslash at end of expression")
+    }
+    if pmalformed(p.s, p.pos) {
+        return Esc{kind: 0, out: 0, nod: 0}, perr("invalid UTF-8")
+    }
+    c := pnext(p)
+    // class escapes \d\s\w\D\S\W merge ranges in both contexts
+    if esc_class(c, rg) {
+        return Esc{kind: 1, out: 0, nod: 0}, nil
+    }
+    l := esc_literal(c)
+    if l >= 0 {
+        return Esc{kind: 0, out: l, nod: 0}, nil
+    }
+    if c == 120 { // x
+        [v, e] = phex(p)
+        if e != nil {
+            return Esc{kind: 0, out: 0, nod: 0}, e
+        }
+        return Esc{kind: 0, out: v, nod: 0}, nil
+    }
+    if c >= 48 && c <= 55 { // octal
+        p.pos = p.pos - 1
+        [v, e] = poctal(p)
+        if e != nil {
+            return Esc{kind: 0, out: 0, nod: 0}, e
+        }
+        return Esc{kind: 0, out: v, nod: 0}, nil
+    }
+    if inclass == 0 {
+        if c == 98 {
+            return Esc{kind: 2, out: 0, nod: N_WB}, nil
+        } // b
+        if c == 66 {
+            return Esc{kind: 2, out: 0, nod: N_NWB}, nil
+        } // B
+        if c == 65 {
+            return Esc{kind: 2, out: 0, nod: N_BOL}, nil
+        } // A
+        if c == 122 {
+            return Esc{kind: 2, out: 0, nod: N_EOL}, nil
+        } // z
+        if c == 81 { // Q — \Q..\E literal text
+            return Esc{kind: 3, out: 0, nod: 0}, nil
+        }
+    }
+    // any remaining ASCII punctuation escapes to itself; word chars
+    // (letters/digits incl \b in-class, \8, \C, \p) are errors.
+    if c >= 97 && c <= 122 || c >= 65 && c <= 90 || c >= 48 && c <= 57 {
+        return Esc{kind: 0, out: 0, nod: 0}, perr("invalid escape sequence")
+    }
+    return Esc{kind: 0, out: c, nod: 0}, nil
+}
+
+// ---- character class parser ----
+
+// cls_char reads one class item. Returns the rune, or -2 when the
+// item was a class escape (ranges merged into rg by caller path
+// through pesc) — class escapes can't be range endpoints.
+fn cls_char(p: mut Par, rg: mut Ranges) -> [int, err] {
+    if byteat(p.s, p.pos) == 92 { // backslash
+        p.pos = p.pos + 1
+        [es, e] = pesc(p, rg, 1)
+        if e != nil {
+            return 0, e
+        }
+        if es.kind == 1 {
+            return -2, nil
+        }
+        if es.kind != 0 {
+            return 0, perr("invalid escape sequence")
+        }
+        return es.out, nil
+    }
+    if pmalformed(p.s, p.pos) {
+        return 0, perr("invalid UTF-8")
+    }
+    return pnext(p), nil
+}
+
+// pa_posix parses `[[:name:]]` / `[[:^name:]]` at the `[:` position.
+fn pa_posix(p: mut Par, rg: mut Ranges) -> err {
+    p.pos = p.pos + 1 // '['
+    p.pos = p.pos + 1 // ':'
+    neg := 0
+    if p.pos < len(p.s) && byteat(p.s, p.pos) == 94 {
+        neg = 1
+        p.pos = p.pos + 1
+    }
+    st := p.pos
+    for p.pos < len(p.s) && byteat(p.s, p.pos) != 58 {
+        c := byteat(p.s, p.pos)
+        if !(c >= 97 && c <= 122 || c >= 65 && c <= 90) {
+            return perr("invalid character class range")
+        }
+        p.pos = p.pos + 1
+    }
+    if p.pos + 1 >= len(p.s) || byteat(p.s, p.pos + 1) != 93 {
+        return perr("invalid character class range")
+    }
+    name := substr(p.s, st, p.pos)
+    p.pos = p.pos + 2 // :] consumes ]
+    if neg == 1 {
+        return posix_neg(name, rg)
+    }
+    return posix_ranges(name, rg)
+}
+
+// pa_class parses `[…]` (the `[` already consumed), merges items
+// into Ranges, and registers the class; neg set for `[^…]`.
+fn pa_class(p: mut Par) -> [int, err] {
+    neg := 0
+    if p.pos < len(p.s) && byteat(p.s, p.pos) == 94 {
+        neg = 1
+        p.pos = p.pos + 1
+    }
+    rg := new(Ranges{lo: mkslice(int, 0), hi: mkslice(int, 0)})
+    first := 1
+    for true {
+        if p.pos >= len(p.s) {
+            return 0, perr("missing closing ]: `[...]`")
+        }
+        if byteat(p.s, p.pos) == 93 && first == 0 { // ]
+            p.pos = p.pos + 1
+            break
+        }
+        if byteat(p.s, p.pos) == 93 && first == 1 { // ] literal first
+            p.pos = p.pos + 1
+            addr(rg, 93, 93)
+            first = 0
+            continue
+        }
+        first = 0
+        // posix named class
+        if byteat(p.s, p.pos) == 91 && p.pos + 1 < len(p.s) && byteat(p.s, p.pos + 1) == 58 {
+            e := pa_posix(p, rg)
+            if e != nil {
+                return 0, e
+            }
+            continue
+        }
+        [c, e] = cls_char(p, rg)
+        if e != nil {
+            return 0, e
+        }
+        if c == -2 {
+            continue // \d-style merge, no range continuation
+        }
+        // range? `-` then a char that isn't the closing ]
+        if p.pos < len(p.s) && byteat(p.s, p.pos) == 45 && p.pos + 1 < len(p.s) && byteat(p.s, p.pos + 1) != 93 {
+            p.pos = p.pos + 1
+            if byteat(p.s, p.pos) == 91 && p.pos + 1 < len(p.s) && byteat(p.s, p.pos + 1) == 58 {
+                return 0, perr("invalid character class range")
+            }
+            [h, e2] = cls_char(p, rg)
+            if e2 != nil {
+                return 0, e2
+            }
+            if h == -2 {
+                return 0, perr("invalid character class range")
+            }
+            if h < c {
+                return 0, perr("invalid character class range")
+            }
+            addr(rg, c, h)
+            continue
+        }
+        addr(rg, c, c)
+    }
+    return pcls(p, neg, rg.lo, rg.hi), nil
+}
+
+// ---- recursive descent ----
+
+// is_rep_op reports whether byte c begins a repetition postfix —
+// `*+?` always; `{` only when it opens a well-formed {n[,m]}.
+fn is_rep_char(c: int) -> bool {
+    return c == 42 || c == 43 || c == 63
+}
+
+// rep_at scans a `{n}`, `{n,}` or `{n,m}` at p.pos without
+// committing. Returns ok=1 plus (lo,hi,end) where hi<0 = unbounded.
+// Malformed shapes → ok=0, and callers treat `{` as a literal.
+struct RepScan { ok: int, lo: int, hi: int, end: int }
+
+fn rep_at(s: str, i: int) -> RepScan {
+    j := i + 1
+    lo := 0
+    nd := 0
+    for j < len(s) && byteat(s, j) >= 48 && byteat(s, j) <= 57 {
+        lo = lo * 10 + (byteat(s, j) - 48)
+        if lo > 1000000 {
+            return RepScan{ok: 0, lo: 0, hi: 0, end: 0}
+        }
+        j = j + 1
+        nd = nd + 1
+    }
+    if nd == 0 {
+        return RepScan{ok: 0, lo: 0, hi: 0, end: 0}
+    }
+    if j < len(s) && byteat(s, j) == 125 { // }
+        return RepScan{ok: 1, lo: lo, hi: lo, end: j + 1}
+    }
+    if j >= len(s) || byteat(s, j) != 44 { // ,
+        return RepScan{ok: 0, lo: 0, hi: 0, end: 0}
+    }
+    j = j + 1
+    if j < len(s) && byteat(s, j) == 125 { // {n,}
+        return RepScan{ok: 1, lo: lo, hi: -1, end: j + 1}
+    }
+    hi := 0
+    nd = 0
+    for j < len(s) && byteat(s, j) >= 48 && byteat(s, j) <= 57 {
+        hi = hi * 10 + (byteat(s, j) - 48)
+        if hi > 1000000 {
+            return RepScan{ok: 0, lo: 0, hi: 0, end: 0}
+        }
+        j = j + 1
+        nd = nd + 1
+    }
+    if nd == 0 || j >= len(s) || byteat(s, j) != 125 {
+        return RepScan{ok: 0, lo: 0, hi: 0, end: 0}
+    }
+    return RepScan{ok: 1, lo: lo, hi: hi, end: j + 1}
+}
+
+// is_word_name is Go's named-group charset [A-Za-z0-9_].
+fn is_word_name(c: int) -> bool {
+    return c >= 97 && c <= 122 || c >= 65 && c <= 90 || c >= 48 && c <= 57 || c == 95
+}
+
+// pa_group parses `(…)` — `(?:`, `(?P<name>`, `(?<name>` all open
+// a plain group for a non-capturing engine; flag groups (?i) are
+// rejected as unsupported v1 surface.
+fn pa_group(p: mut Par) -> [int, err] {
+    if p.pos < len(p.s) && byteat(p.s, p.pos) == 63 { // ?
+        // (? forms — consume the marker, then shape-check.
+        p.pos = p.pos + 1
+        if p.pos >= len(p.s) {
+            return 0, perr("invalid or unsupported Perl syntax: `(?`")
+        }
+        c := byteat(p.s, p.pos)
+        if c == 58 { // (?: — non-capturing, same for us
+            p.pos = p.pos + 1
+        } else {
+            // (?P<name> or (?<name>
+            if c == 80 {
+                p.pos = p.pos + 1
+                if p.pos >= len(p.s) || byteat(p.s, p.pos) != 60 {
+                    return 0, perr("invalid named capture: `(?P`")
+                }
+            } else if c != 60 {
+                return 0, perr("invalid or unsupported Perl syntax")
+            }
+            p.pos = p.pos + 1
+            st := p.pos
+            if p.pos >= len(p.s) || !is_word_name(byteat(p.s, p.pos)) || byteat(p.s, p.pos) >= 48 && byteat(p.s, p.pos) <= 57 {
+                return 0, perr("invalid named capture")
+            }
+            for p.pos < len(p.s) && is_word_name(byteat(p.s, p.pos)) {
+                p.pos = p.pos + 1
+            }
+            if p.pos >= len(p.s) || byteat(p.s, p.pos) != 62 { // >
+                return 0, perr("invalid named capture")
+            }
+            if p.pos == st {
+                return 0, perr("invalid named capture")
+            }
+            p.pos = p.pos + 1
+        }
+    }
+    [ni, e] = pa_alt(p)
+    if e != nil {
+        return 0, e
+    }
+    if p.pos >= len(p.s) || byteat(p.s, p.pos) != 41 { // )
+        return 0, perr("missing closing ): `(...)`")
+    }
+    p.pos = p.pos + 1
+    return ni, nil
+}
+
+// pa_quoted consumes runes after \Q until \E or end, as a cat of
+// literal nodes.
+fn pa_quoted(p: mut Par) -> [int, err] {
+    cur := -1
+    for p.pos < len(p.s) {
+        if byteat(p.s, p.pos) == 92 && p.pos + 1 < len(p.s) && byteat(p.s, p.pos + 1) == 69 { // \E
+            p.pos = p.pos + 2
+            break
+        }
+        if pmalformed(p.s, p.pos) {
+            return 0, perr("invalid UTF-8")
+        }
+        r := pnext(p)
+        ni := pnode(p, Node{kind: N_LIT, ch: r, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0})
+        if cur < 0 {
+            cur = ni
+        } else {
+            cur = pnode(p, Node{kind: N_CAT, ch: 0, cidx: 0, a: cur, b: ni, lo: 0, hi: 0, lazy: 0})
+        }
+    }
+    if cur < 0 {
+        cur = pnode(p, Node{kind: N_EMP, ch: 0, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0})
+    }
+    return cur, nil
+}
+
+// pa_atom parses one atom — literal, ., ^, $, escape, group, class.
+fn pa_atom(p: mut Par) -> [int, err] {
+    if p.pos >= len(p.s) {
+        return 0, perr("unexpected end of pattern")
+    }
+    b := byteat(p.s, p.pos)
+    if b == 42 || b == 43 || b == 63 { // * + ?
+        return 0, perr("missing argument to repetition operator")
+    }
+    if b == 123 { // {
+        rs := rep_at(p.s, p.pos)
+        if rs.ok == 1 {
+            return 0, perr("missing argument to repetition operator")
+        }
+        // literal { — fall through
+    }
+    if b == 40 { // (
+        p.pos = p.pos + 1
+        return pa_group(p)
+    }
+    if b == 91 { // [
+        p.pos = p.pos + 1
+        [ci, e] = pa_class(p)
+        if e != nil {
+            return 0, e
+        }
+        return pnode(p, Node{kind: N_CLS, ch: 0, cidx: ci, a: 0, b: 0, lo: 0, hi: 0, lazy: 0}), nil
+    }
+    if b == 46 { // .
+        p.pos = p.pos + 1
+        return pnode(p, Node{kind: N_ANY, ch: 0, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0}), nil
+    }
+    if b == 94 { // ^
+        p.pos = p.pos + 1
+        return pnode(p, Node{kind: N_BOL, ch: 0, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0}), nil
+    }
+    if b == 36 { // $
+        p.pos = p.pos + 1
+        return pnode(p, Node{kind: N_EOL, ch: 0, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0}), nil
+    }
+    if b == 92 { // backslash
+        p.pos = p.pos + 1
+        rg := new(Ranges{lo: mkslice(int, 0), hi: mkslice(int, 0)})
+        [es, e] = pesc(p, rg, 0)
+        if e != nil {
+            return 0, e
+        }
+        if es.kind == 3 { // \Q..\E
+            return pa_quoted(p)
+        }
+        if es.kind == 2 { // assertion
+            return pnode(p, Node{kind: es.nod, ch: 0, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0}), nil
+        }
+        if es.kind == 1 { // \d-style: ranges → N_CLS
+            ci := pcls(p, 0, rg.lo, rg.hi)
+            return pnode(p, Node{kind: N_CLS, ch: 0, cidx: ci, a: 0, b: 0, lo: 0, hi: 0, lazy: 0}), nil
+        }
+        return pnode(p, Node{kind: N_LIT, ch: es.out, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0}), nil
+    }
+    // literal rune
+    if pmalformed(p.s, p.pos) {
+        return 0, perr("invalid UTF-8")
+    }
+    r := pnext(p)
+    return pnode(p, Node{kind: N_LIT, ch: r, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0}), nil
+}
+
+// pa_rep parses atom + postfix quantifiers. A second quantifier
+// right after one is Go's "invalid nested repetition" error; `?`
+// directly on a quantifier is the lazy marker instead.
+fn pa_rep(p: mut Par) -> [int, err] {
+    [ni, e] = pa_atom(p)
+    if e != nil {
+        return 0, e
+    }
+    repd := 0
+    for p.pos < len(p.s) {
+        b := byteat(p.s, p.pos)
+        lo := 0
+        hi := 0
+        if b == 42 { // *
+            lo = 0
+            hi = -1
+            p.pos = p.pos + 1
+        } else if b == 43 { // +
+            lo = 1
+            hi = -1
+            p.pos = p.pos + 1
+        } else if b == 63 { // ?
+            lo = 0
+            hi = 1
+            p.pos = p.pos + 1
+        } else if b == 123 { // {
+            rs := rep_at(p.s, p.pos)
+            if rs.ok == 0 {
+                break // literal { — not a quantifier
+            }
+            if rs.lo > 1000 || rs.hi > 1000 {
+                return 0, perr("invalid repeat count")
+            }
+            if rs.hi >= 0 && rs.hi < rs.lo {
+                return 0, perr("invalid repeat count")
+            }
+            lo = rs.lo
+            hi = rs.hi
+            p.pos = rs.end
+        } else {
+            break
+        }
+        lazy := 0
+        if p.pos < len(p.s) && byteat(p.s, p.pos) == 63 { // lazy ?
+            lazy = 1
+            p.pos = p.pos + 1
+        }
+        ni = pnode(p, Node{kind: N_REP, ch: 0, cidx: 0, a: ni, b: 0, lo: lo, hi: hi, lazy: lazy})
+        repd = 1
+        // a second quantifier on a quantified expr is an error —
+        // `a**`, `a*+`, `a*{2}` (only a well-formed {} counts).
+        if p.pos < len(p.s) {
+            c2 := byteat(p.s, p.pos)
+            if is_rep_char(c2) {
+                return 0, perr("invalid nested repetition operator")
+            }
+            if c2 == 123 && rep_at(p.s, p.pos).ok == 1 {
+                return 0, perr("invalid nested repetition operator")
+            }
+        }
+    }
+    if repd == 0 {
+        return ni, nil
+    }
+    return ni, nil
+}
+
+// pa_cat parses a run of quantified atoms until | ) or end.
+fn pa_cat(p: mut Par) -> [int, err] {
+    cur := -1
+    for p.pos < len(p.s) {
+        b := byteat(p.s, p.pos)
+        if b == 124 || b == 41 { // | or )
+            break
+        }
+        [ni, e] = pa_rep(p)
+        if e != nil {
+            return 0, e
+        }
+        if cur < 0 {
+            cur = ni
+        } else {
+            cur = pnode(p, Node{kind: N_CAT, ch: 0, cidx: 0, a: cur, b: ni, lo: 0, hi: 0, lazy: 0})
+        }
+    }
+    if cur < 0 {
+        cur = pnode(p, Node{kind: N_EMP, ch: 0, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0})
+    }
+    return cur, nil
+}
+
+// pa_alt parses cat (| cat)* — left-deep N_ALT preserves branch
+// priority order at emit (earlier alternative = higher priority).
+fn pa_alt(p: mut Par) -> [int, err] {
+    [cur, e] = pa_cat(p)
+    if e != nil {
+        return 0, e
+    }
+    for p.pos < len(p.s) && byteat(p.s, p.pos) == 124 { // |
+        p.pos = p.pos + 1
+        [nx, e2] = pa_cat(p)
+        if e2 != nil {
+            return 0, e2
+        }
+        cur = pnode(p, Node{kind: N_ALT, ch: 0, cidx: 0, a: cur, b: nx, lo: 0, hi: 0, lazy: 0})
+    }
+    return cur, nil
+}
+
+// ---- emit: AST -> Thompson program ----
+let MAXINS = 65536
+
+struct Pg { ins: []Inst, cls: []Cls }
+
+fn pushi(pg: mut Pg, i: Inst) -> err {
+    pg.ins = push(pg.ins, i)
+    if len(pg.ins) > MAXINS {
+        return perr("expression too large")
+    }
+    return nil
+}
+
+// setxy patches branch targets after the arms are emitted.
+fn setx(pg: mut Pg, i: int, x: int) {
+    in := pg.ins[i]
+    in.x = x
+    pg.ins[i] = in
+}
+
+fn sety(pg: mut Pg, i: int, y: int) {
+    in := pg.ins[i]
+    in.y = y
+    pg.ins[i] = in
+}
+
+// emit_app appends the program for node ni. Returns err only for
+// the size cap — everything else was validated at parse.
+fn emit_app(pg: mut Pg, ns: []Node, ni: int) -> err {
+    n := ns[ni]
+    k := n.kind
+    if k == N_EMP {
+        return nil
+    }
+    if k == N_LIT {
+        return pushi(pg, Inst{op: OP_CHAR, x: 0, y: 0, arg: n.ch})
+    }
+    if k == N_ANY {
+        return pushi(pg, Inst{op: OP_ANY, x: 0, y: 0, arg: 0})
+    }
+    if k == N_CLS {
+        return pushi(pg, Inst{op: OP_CLS, x: 0, y: 0, arg: n.cidx})
+    }
+    if k == N_BOL {
+        return pushi(pg, Inst{op: OP_BOL, x: 0, y: 0, arg: 0})
+    }
+    if k == N_EOL {
+        return pushi(pg, Inst{op: OP_EOL, x: 0, y: 0, arg: 0})
+    }
+    if k == N_WB {
+        return pushi(pg, Inst{op: OP_WB, x: 0, y: 0, arg: 0})
+    }
+    if k == N_NWB {
+        return pushi(pg, Inst{op: OP_NWB, x: 0, y: 0, arg: 0})
+    }
+    if k == N_CAT {
+        e := emit_app(pg, ns, n.a)
+        if e != nil {
+            return e
+        }
+        return emit_app(pg, ns, n.b)
+    }
+    if k == N_ALT {
+        // split L_a, L_b — x arm first (priority), y patched after
+        i := len(pg.ins)
+        e := pushi(pg, Inst{op: OP_SPLIT, x: 0, y: 0, arg: 0})
+        if e != nil {
+            return e
+        }
+        setx(pg, i, len(pg.ins))
+        e = emit_app(pg, ns, n.a)
+        if e != nil {
+            return e
+        }
+        j := len(pg.ins)
+        e = pushi(pg, Inst{op: OP_JMP, x: 0, y: 0, arg: 0})
+        if e != nil {
+            return e
+        }
+        sety(pg, i, len(pg.ins))
+        e = emit_app(pg, ns, n.b)
+        if e != nil {
+            return e
+        }
+        setx(pg, j, len(pg.ins))
+        return nil
+    }
+    if k == N_REP {
+        return emit_rep(pg, ns, n)
+    }
+    return perr("internal: bad node")
+}
+
+// emit_star/plus/quest write the loop skeletons; lazy swaps which
+// split arm is tried first.
+fn emit_star(pg: mut Pg, ns: []Node, a: int, lazy: int) -> err {
+    i := len(pg.ins)
+    e := pushi(pg, Inst{op: OP_SPLIT, x: 0, y: 0, arg: 0})
+    if e != nil {
+        return e
+    }
+    body := len(pg.ins)
+    e = emit_app(pg, ns, a)
+    if e != nil {
+        return e
+    }
+    e = pushi(pg, Inst{op: OP_JMP, x: i, y: 0, arg: 0})
+    if e != nil {
+        return e
+    }
+    after := len(pg.ins)
+    if lazy == 0 {
+        setx(pg, i, body)
+        sety(pg, i, after)
+    } else {
+        setx(pg, i, after)
+        sety(pg, i, body)
+    }
+    return nil
+}
+
+fn emit_plus(pg: mut Pg, ns: []Node, a: int, lazy: int) -> err {
+    body := len(pg.ins)
+    e := emit_app(pg, ns, a)
+    if e != nil {
+        return e
+    }
+    i := len(pg.ins)
+    e = pushi(pg, Inst{op: OP_SPLIT, x: 0, y: 0, arg: 0})
+    if e != nil {
+        return e
+    }
+    after := len(pg.ins)
+    if lazy == 0 {
+        setx(pg, i, body)
+        sety(pg, i, after)
+    } else {
+        setx(pg, i, after)
+        sety(pg, i, body)
+    }
+    return nil
+}
+
+fn emit_quest(pg: mut Pg, ns: []Node, a: int, lazy: int) -> err {
+    i := len(pg.ins)
+    e := pushi(pg, Inst{op: OP_SPLIT, x: 0, y: 0, arg: 0})
+    if e != nil {
+        return e
+    }
+    body := len(pg.ins)
+    e = emit_app(pg, ns, a)
+    if e != nil {
+        return e
+    }
+    after := len(pg.ins)
+    if lazy == 0 {
+        setx(pg, i, body)
+        sety(pg, i, after)
+    } else {
+        setx(pg, i, after)
+        sety(pg, i, body)
+    }
+    return nil
+}
+
+// emit_rep expands {n,m}: lo copies, then hi-lo quests for bounded,
+// or lo-1 copies + plus for unbounded (a{n,} == a^(n-1).a+).
+fn emit_rep(pg: mut Pg, ns: []Node, n: Node) -> err {
+    k := 0
+    if n.hi < 0 { // unbounded
+        if n.lo == 0 {
+            return emit_star(pg, ns, n.a, n.lazy)
+        }
+        for k < n.lo - 1 {
+            e := emit_app(pg, ns, n.a)
+            if e != nil {
+                return e
+            }
+            k = k + 1
+        }
+        return emit_plus(pg, ns, n.a, n.lazy)
+    }
+    for k < n.lo {
+        e := emit_app(pg, ns, n.a)
+        if e != nil {
+            return e
+        }
+        k = k + 1
+    }
+    k = n.lo
+    for k < n.hi {
+        e := emit_quest(pg, ns, n.a, n.lazy)
+        if e != nil {
+            return e
+        }
+        k = k + 1
+    }
+    return nil
+}
+
+/// compile parses pat and lowers it to an NFA program — Go's
+/// regexp.Compile shape: [Re, err].
+fn compile(pat: str) -> [Re, err] {
+    p := new(Par{s: pat, pos: 0, nodes: mkslice(Node, 0), cls: mkslice(Cls, 0)})
+    [root, e] = pa_alt(p)
+    if e != nil {
+        return Re{ins: nil, cls: nil, pat: ""}, e
+    }
+    if p.pos < len(p.s) {
+        return Re{ins: nil, cls: nil, pat: ""}, perr("unexpected ): `" + pat + "`")
+    }
+    pg := new(Pg{ins: mkslice(Inst, 0), cls: p.cls})
+    e = emit_app(pg, p.nodes, root)
+    if e != nil {
+        return Re{ins: nil, cls: nil, pat: ""}, e
+    }
+    e = pushi(pg, Inst{op: OP_MATCH, x: 0, y: 0, arg: 0})
+    if e != nil {
+        return Re{ins: nil, cls: nil, pat: ""}, e
+    }
+    return Re{ins: pg.ins, cls: pg.cls, pat: pat}, nil
+}
+
+// ---- Pike VM ----
+fn isword(r: int) -> bool {
+    return r >= 48 && r <= 57 || r >= 97 && r <= 122 || r >= 65 && r <= 90 || r == 95
+}
+
+fn incls(c: Cls, r: int) -> bool {
+    i := 0
+    hit := 0
+    for i < len(c.lo) {
+        if r >= c.lo[i] && r <= c.hi[i] {
+            hit = 1
+            break
+        }
+        i = i + 1
+    }
+    if c.neg == 1 {
+        return hit == 0
+    }
+    return hit == 1
+}
+
+// Run is the simulator state: two thread lists (pc + match start,
+// parallel arrays), a gen-stamped dedupe, and a closure DFS stack.
+struct Run {
+    ins: []Inst,
+    cls: []Cls,
+    s: str,
+    apc: []int,
+    ast: []int,
+    an: int,
+    bpc: []int,
+    bst: []int,
+    bn: int,
+    mark: []int,
+    gen: int,
+    stk: []int,
+    sn: int,
+    cs: int,
+    ce: int,
+    dead: int,
+}
+
+fn run_new(re: ref Re, s: str) -> own Run {
+    cap := len(re.ins)
+    return new(Run{ins: re.ins, cls: re.cls, s: s, apc: mkslice(int, cap), ast: mkslice(int, cap), an: 0, bpc: mkslice(int, cap), bst: mkslice(int, cap), bn: 0, mark: mkslice(int, cap), gen: 1, stk: mkslice(int, cap), sn: 0, cs: -1, ce: -1, dead: 0})
+}
+
+// trypush dedupes by pc through the gen stamp — one pc enters a
+// list at most once (the earlier, higher-priority start wins).
+fn trypush(r: mut Run, pc: int) {
+    if r.mark[pc] != r.gen {
+        r.mark[pc] = r.gen
+        r.stk[r.sn] = pc
+        r.sn = r.sn + 1
+    }
+}
+
+// addthread runs the epsilon closure for thread (pc, spos) — to=0
+// appends into the a-list, to=1 into the b-list — evaluating
+// assertions at byte pos, where prevr is the rune ending at pos
+// (-1 at 0). Iterative DFS: pushing y before x makes x pop first,
+// which is exactly priority order. On MATCH the candidate span is
+// recorded and dead cuts everything lower priority.
+fn addthread(r: mut Run, to: int, pc: int, spos: int, pos: int, prevr: int) {
+    trypush(r, pc)
+    for r.sn > 0 {
+        r.sn = r.sn - 1
+        c := r.stk[r.sn]
+        op := r.ins[c].op
+        if op == OP_SPLIT {
+            trypush(r, r.ins[c].y)
+            trypush(r, r.ins[c].x)
+            continue
+        }
+        if op == OP_JMP {
+            trypush(r, r.ins[c].x)
+            continue
+        }
+        if op == OP_BOL {
+            if pos == 0 {
+                trypush(r, c + 1)
+            }
+            continue
+        }
+        if op == OP_EOL {
+            if pos == len(r.s) {
+                trypush(r, c + 1)
+            }
+            continue
+        }
+        if op == OP_WB || op == OP_NWB {
+            cur := -1
+            if pos < len(r.s) {
+                cur = utf8.decode(r.s, pos).r
+            }
+            wb := isword(prevr) != isword(cur)
+            if op == OP_WB && wb || op == OP_NWB && !wb {
+                trypush(r, c + 1)
+            }
+            continue
+        }
+        if op == OP_MATCH {
+            if r.dead == 0 {
+                r.cs = spos
+                r.ce = pos
+                r.dead = 1
+            }
+            r.sn = 0
+            return
+        }
+        if r.dead == 0 {
+            if to == 0 {
+                r.apc[r.an] = c
+                r.ast[r.an] = spos
+                r.an = r.an + 1
+            } else {
+                r.bpc[r.bn] = c
+                r.bst[r.bn] = spos
+                r.bn = r.bn + 1
+            }
+        }
+    }
+}
+
+// step consumes rune ru at thread (c, sp) and closes into the
+// b-list at npos, where prevr = ru.
+fn step(r: mut Run, c: int, sp: int, ru: int, npos: int) {
+    op := r.ins[c].op
+    nx := c + 1
+    if op == OP_CHAR {
+        if ru == r.ins[c].arg {
+            addthread(r, 1, nx, sp, npos, ru)
+        }
+    }
+    if op == OP_CLS {
+        if incls(r.cls[r.ins[c].arg], ru) {
+            addthread(r, 1, nx, sp, npos, ru)
+        }
+    }
+    if op == OP_ANY {
+        if ru != 10 {
+            addthread(r, 1, nx, sp, npos, ru)
+        }
+    }
+}
+
+// prevrune returns the rune that ends at byte pos, or -1 at the
+// start — what \b needs on the left edge. Continuation bytes walk
+// back to the lead, and malformed input yields RuneError (a
+// non-word rune, matching Go's treatment).
+fn prevrune(s: str, pos: int) -> int {
+    if pos <= 0 {
+        return -1
+    }
+    i := pos - 1
+    for i > 0 && byteat(s, i) >= 128 && byteat(s, i) < 192 {
+        i = i - 1
+    }
+    return utf8.decode(s, i).r
+}
+
+// findat is the leftmost-first search of s from byte k: a
+// low-priority seed thread enters at every rune boundary, so the
+// earliest start always wins (RE2's trick — dedupe by pc keeps the
+// earlier of two threads at the same pc).
+fn findat(re: ref Re, s: str, k: int) -> Span {
+    r := run_new(re, s)
+    pos := k
+    prevr := prevrune(s, k)
+    for pos <= len(s) {
+        // seed only while no match exists — a thread starting
+        // after r.cs can never produce a preferred (earlier
+        // start) result, so later seeds are all dead weight.
+        if r.cs < 0 {
+            addthread(r, 0, 0, pos, pos, prevr)
+        }
+        if pos == len(s) {
+            break
+        }
+        d := utf8.decode(s, pos)
+        ru := d.r
+        w := d.n
+        if w < 1 {
+            w = 1
+        }
+        r.dead = 0
+        r.gen = r.gen + 1
+        r.bn = 0
+        i := 0
+        for i < r.an {
+            step(r, r.apc[i], r.ast[i], ru, pos + w)
+            i = i + 1
+        }
+        sw := r.apc
+        r.apc = r.bpc
+        r.bpc = sw
+        sw = r.ast
+        r.ast = r.bst
+        r.bst = sw
+        r.an = r.bn
+        pos = pos + w
+        prevr = ru
+    }
+    return Span{s: r.cs, e: r.ce}
+}
+
+// ---- API ----
+
+/// matchstr reports whether s contains a match — Go's MatchString.
+fn (r ref Re) matchstr(s: str) -> bool {
+    return findat(r, s, 0).s >= 0
+}
+
+/// find returns the leftmost match text, or "" — Go's FindString.
+fn (r ref Re) find(s: str) -> str {
+    sp := findat(r, s, 0)
+    if sp.s < 0 {
+        return ""
+    }
+    return substr(s, sp.s, sp.e)
+}
+
+/// findidx returns the leftmost match's byte span; s is -1 when
+/// there is no match — Go's FindStringIndex as a struct pair.
+fn (r ref Re) findidx(s: str) -> Span {
+    return findat(r, s, 0)
+}
+
+/// findall returns successive non-overlapping matches — Go's
+/// FindAllString. n<0 is all, n>=0 caps the count, n==0 is empty.
+/// Empty matches abutting the previous match's end are skipped and
+/// an accepted empty match advances the scan one rune.
+fn (r ref Re) findall(s: str, n: int) -> own []str {
+    out := mkslice(str, 0)
+    if n == 0 {
+        return new(out)
+    }
+    k := 0
+    last := -1
+    i := 0
+    for (n < 0 || i < n) && k <= len(s) {
+        sp := findat(r, s, k)
+        if sp.s < 0 {
+            break
+        }
+        if sp.e == k { // empty match at the scan point
+            w := 1
+            if k < len(s) {
+                d := utf8.decode(s, k)
+                w = d.n
+                if w < 1 {
+                    w = 1
+                }
+            }
+            k = k + w
+            if sp.s == last {
+                last = sp.e
+                continue
+            }
+            last = sp.e
+            out = push(out, substr(s, sp.s, sp.e))
+            i = i + 1
+            continue
+        }
+        last = sp.e
+        out = push(out, substr(s, sp.s, sp.e))
+        i = i + 1
+        k = sp.e
+    }
+    return new(out)
+}
+
+/// replaceall substitutes literal repl for every match — Go's
+/// ReplaceAllLiteralString semantics (no $ expansion, there are
+// no capture spans in v1).
+fn (r ref Re) replaceall(s: str, repl: str) -> str {
+    out := ""
+    k := 0
+    beg := 0 // end of the last delivered match
+    last := -1 // previous match end (abutment check)
+    seen := 0
+    for k <= len(s) {
+        sp := findat(r, s, k)
+        if sp.s < 0 {
+            break
+        }
+        if sp.e == k { // empty at the scan point
+            w := 1
+            if k < len(s) {
+                d := utf8.decode(s, k)
+                w = d.n
+                if w < 1 {
+                    w = 1
+                }
+            }
+            if sp.s != last {
+                out = out + substr(s, beg, sp.s) + repl
+                seen = 1
+                beg = sp.e
+            }
+            last = sp.e
+            k = k + w
+            continue
+        }
+        out = out + substr(s, beg, sp.s) + repl
+        seen = 1
+        beg = sp.e
+        last = sp.e
+        k = sp.e
+    }
+    if seen == 1 {
+        return out + substr(s, beg, len(s))
+    }
+    return s
+}
+
+/// split cuts s around each match — Go's Split: n<0 is all, n==0
+/// an empty result, n>0 caps the piece count; a match ending at
+/// byte 0 doesn't emit a leading piece, and a trailing piece is
+/// only emitted when the last match doesn't reach end of input.
+fn (r ref Re) split(s: str, n: int) -> own []str {
+    out := mkslice(str, 0)
+    if n == 0 {
+        return new(out)
+    }
+    if len(r.pat) > 0 && len(s) == 0 {
+        out = push(out, "")
+        return new(out)
+    }
+    k := 0
+    last := -1
+    beg := 0
+    end := 0
+    for k <= len(s) && (n < 0 || len(out) < n - 1 || n == 1) {
+        if n == 1 {
+            break
+        }
+        sp := findat(r, s, k)
+        if sp.s < 0 {
+            break
+        }
+        if sp.e == k { // empty at the scan point
+            w := 1
+            if k < len(s) {
+                d := utf8.decode(s, k)
+                w = d.n
+                if w < 1 {
+                    w = 1
+                }
+            }
+            if sp.s != last {
+                end = sp.s
+                if sp.e != 0 {
+                    out = push(out, substr(s, beg, end))
+                }
+                beg = sp.e
+            }
+            last = sp.e
+            k = k + w
+            continue
+        }
+        end = sp.s
+        if sp.e != 0 {
+            out = push(out, substr(s, beg, end))
+        }
+        beg = sp.e
+        last = sp.e
+        k = sp.e
+    }
+    if end != len(s) {
+        out = push(out, substr(s, beg, len(s)))
+    }
+    return new(out)
+}
