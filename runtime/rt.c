@@ -965,6 +965,7 @@ void rt_scope_leave(RtScope *s) {
 int rt_scope_try(RtScope *s) { return join_scope(s); }
 
 void rt_trap(int64_t code) {
+    fflush(stdout); /* don't lose buffered prints (test FAILED lines) on trap */
     RtScope *s = tls_scope;
     if (!s) { fprintf(stderr, "trap %lld outside scope\n", (long long)code); abort(); }
     RtTask *t = tls_task;

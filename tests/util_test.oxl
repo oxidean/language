@@ -74,7 +74,7 @@ fn test_filepath() {
         testing.expect(!filepath.isabs("x\\y"), "win rel")
         testing.expect_streq(filepath.toslash("a\\b\\c"), "a/b/c", "toslash")
         testing.expect_streq(filepath.fromslash("a/b/c"), "a\\b\\c", "fromslash")
-        testing.expect_streq(filepath.clean("C:\\a\\..\\b"), "C:\\b", "win clean")
+        testing.expect_streq(filepath.clean("C:\\a\\..\\b"), "C:/b", "win clean -> canonical / form")
     } else {
         testing.expect_streq(filepath.volume_name("/a/b"), "", "volume none posix")
         testing.expect(filepath.isabs("/x"), "posix abs")
