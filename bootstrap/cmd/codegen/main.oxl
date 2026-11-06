@@ -69,8 +69,15 @@ struct GLab { c: str, b: str, d: int }
 // buffer-length snapshot before one decl's emission — every line an
 // emit appends to a buffer lands in that decl's unit (Rust drain())
 struct GSnp {
-    h: int, tp: int, fd: int, cp: int, vt: int, fb: int,
-    ob: int, cb: int, gi: int,
+    h: int,
+    tp: int,
+    fd: int,
+    cp: int,
+    vt: int,
+    fb: int,
+    ob: int,
+    cb: int,
+    gi: int,
 }
 
 // one reachability unit — the emitted C owned by a single decl (or a
@@ -79,9 +86,17 @@ struct GSnp {
 // init lines for globals (Rust Unit). A token in live text spelling
 // one of defs is a use edge.
 struct GUnit {
-    hd: []str, tp: []str, fd: []str, cp: []str, vt: []str,
-    fb: []str, ob: []str, cb: []str, gi: []str,
-    defs: []str, root: int,
+    hd: []str,
+    tp: []str,
+    fd: []str,
+    cp: []str,
+    vt: []str,
+    fb: []str,
+    ob: []str,
+    cb: []str,
+    gi: []str,
+    defs: []str,
+    root: int,
 }
 
 // forward-appending Node list builder for the hoist transform
@@ -209,17 +224,13 @@ fn wpop(g: mut G) {
 }
 
 // ---------- G1 reachability (Rust Unit/drain/scan_refs) ----------
-
 fn gusnap(g: ref G) -> GSnp {
-    return GSnp{h: len(g.head), tp: len(g.tramp), fd: len(g.fhead),
-        cp: len(g.clpro), vt: len(g.vout), fb: len(g.fbody),
-        ob: len(g.w), cb: len(g.clbod), gi: len(g.ginit)}
+    return GSnp{h: len(g.head), tp: len(g.tramp), fd: len(g.fhead), cp: len(g.clpro), vt: len(g.vout), fb: len(g.fbody), ob: len(g.w), cb: len(g.clbod), gi: len(g.ginit)}
 }
 
 // open a fresh unit — returns its index
 fn gubegin(g: mut G) -> int {
-    g.units = push(g.units, GUnit{hd: nil, tp: nil, fd: nil, cp: nil,
-        vt: nil, fb: nil, ob: nil, cb: nil, gi: nil, defs: nil, root: 0})
+    g.units = push(g.units, GUnit{hd: nil, tp: nil, fd: nil, cp: nil, vt: nil, fb: nil, ob: nil, cb: nil, gi: nil, defs: nil, root: 0})
     return len(g.units) - 1
 }
 
@@ -227,23 +238,50 @@ fn gubegin(g: mut G) -> int {
 // buffers stay as staging only; output joins live units per band
 fn gudrain(g: mut G, u: int, s: GSnp) {
     i := s.h
-    for i < len(g.head) { g.units[u].hd = push(g.units[u].hd, g.head[i]); i = i + 1 }
+    for i < len(g.head) {
+        g.units[u].hd = push(g.units[u].hd, g.head[i])
+        i = i + 1
+    }
     i = s.tp
-    for i < len(g.tramp) { g.units[u].tp = push(g.units[u].tp, g.tramp[i]); i = i + 1 }
+    for i < len(g.tramp) {
+        g.units[u].tp = push(g.units[u].tp, g.tramp[i])
+        i = i + 1
+    }
     i = s.fd
-    for i < len(g.fhead) { g.units[u].fd = push(g.units[u].fd, g.fhead[i]); i = i + 1 }
+    for i < len(g.fhead) {
+        g.units[u].fd = push(g.units[u].fd, g.fhead[i])
+        i = i + 1
+    }
     i = s.cp
-    for i < len(g.clpro) { g.units[u].cp = push(g.units[u].cp, g.clpro[i]); i = i + 1 }
+    for i < len(g.clpro) {
+        g.units[u].cp = push(g.units[u].cp, g.clpro[i])
+        i = i + 1
+    }
     i = s.vt
-    for i < len(g.vout) { g.units[u].vt = push(g.units[u].vt, g.vout[i]); i = i + 1 }
+    for i < len(g.vout) {
+        g.units[u].vt = push(g.units[u].vt, g.vout[i])
+        i = i + 1
+    }
     i = s.fb
-    for i < len(g.fbody) { g.units[u].fb = push(g.units[u].fb, g.fbody[i]); i = i + 1 }
+    for i < len(g.fbody) {
+        g.units[u].fb = push(g.units[u].fb, g.fbody[i])
+        i = i + 1
+    }
     i = s.ob
-    for i < len(g.w) { g.units[u].ob = push(g.units[u].ob, g.w[i]); i = i + 1 }
+    for i < len(g.w) {
+        g.units[u].ob = push(g.units[u].ob, g.w[i])
+        i = i + 1
+    }
     i = s.cb
-    for i < len(g.clbod) { g.units[u].cb = push(g.units[u].cb, g.clbod[i]); i = i + 1 }
+    for i < len(g.clbod) {
+        g.units[u].cb = push(g.units[u].cb, g.clbod[i])
+        i = i + 1
+    }
     i = s.gi
-    for i < len(g.ginit) { g.units[u].gi = push(g.units[u].gi, g.ginit[i]); i = i + 1 }
+    for i < len(g.ginit) {
+        g.units[u].gi = push(g.units[u].gi, g.ginit[i])
+        i = i + 1
+    }
 }
 
 // init-phase drain: eval stmts appended to g.w join the global's init
@@ -251,7 +289,10 @@ fn gudrain(g: mut G, u: int, s: GSnp) {
 // they belong inside oxl_main's prologue (Rust u.init)
 fn gudrain_init(g: mut G, u: int, s: GSnp) {
     i := s.ob
-    for i < len(g.w) { g.units[u].gi = push(g.units[u].gi, g.w[i]); i = i + 1 }
+    for i < len(g.w) {
+        g.units[u].gi = push(g.units[u].gi, g.w[i])
+        i = i + 1
+    }
     gudrain(g, u, s)
 }
 
@@ -280,12 +321,12 @@ fn gscan(g: mut G, text: str) {
     i := 0
     for i < n {
         c := byteat(text, i)
-        if c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
+        if c == 95 || c >= 65 && c <= 90 || c >= 97 && c <= 122 {
             st := i
             i = i + 1
             for i < n {
                 c = byteat(text, i)
-                if c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) {
+                if c == 95 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c >= 48 && c <= 57 {
                     i = i + 1
                 } else {
                     break
@@ -4430,36 +4471,36 @@ fn gemit_proto(g: mut G, i: int) {
 
 // `o_fnv_wrap_<qn>` — zero-env wrapper over a named fn (Rust fnv_wraps pass)
 fn gemit_fnv_one(g: mut G, n: str) {
-        [fi, err] = collections.map_get(g.ck.fns, n)
-        if err == nil {
-            sig := g.ck.fnsv[fi]
-            ret_c := "void"
-            if sig.retk == 1 {
-                ret_c = gcty(g, sig.ret1)
-            }
-            psig := ""
-            argl := ""
-            il := sig.params
-            i := 0
-            for il != nil {
-                psig = psig + ", " + gcty(g, il.v) + " a" + itoa(i)
-                if i > 0 {
-                    argl = argl + ", "
-                }
-                argl = argl + "a" + itoa(i)
-                i = i + 1
-                il = il.next
-            }
-            callee := n
-            if sig.is_extern == 0 {
-                callee = "o_f_" + cname(n)
-            }
-            ret_kw := "return "
-            if ret_c == "void" {
-                ret_kw = ""
-            }
-            g.clpro = push(g.clpro, "static " + ret_c + " o_fnv_wrap_" + cname(n) + "(void* _e" + psig + ") { " + ret_kw + callee + "(" + argl + "); }\n")
+    [fi, err] = collections.map_get(g.ck.fns, n)
+    if err == nil {
+        sig := g.ck.fnsv[fi]
+        ret_c := "void"
+        if sig.retk == 1 {
+            ret_c = gcty(g, sig.ret1)
         }
+        psig := ""
+        argl := ""
+        il := sig.params
+        i := 0
+        for il != nil {
+            psig = psig + ", " + gcty(g, il.v) + " a" + itoa(i)
+            if i > 0 {
+                argl = argl + ", "
+            }
+            argl = argl + "a" + itoa(i)
+            i = i + 1
+            il = il.next
+        }
+        callee := n
+        if sig.is_extern == 0 {
+            callee = "o_f_" + cname(n)
+        }
+        ret_kw := "return "
+        if ret_c == "void" {
+            ret_kw = ""
+        }
+        g.clpro = push(g.clpro, "static " + ret_c + " o_fnv_wrap_" + cname(n) + "(void* _e" + psig + ") { " + ret_kw + callee + "(" + argl + "); }\n")
+    }
 }
 
 // bind a generic impl method's ty params from the iface-declared
@@ -4521,108 +4562,108 @@ fn gseed_vtab_insts(g: mut G) -> int {
 // concrete vtabs + receiver-normalizing thunks for every (iface, impl)
 // pair a conversion site produced (Rust emit_vtabs)
 fn gemvtab_one(g: mut G, vu: ref GVU) {
-        w := vu.w
-        impl := vu.impl
-        ii := check.iface_ent(g.ck, w)
-        if ii >= 0 {
-            ml := g.ck.ifacesv[ii].methods
-            slots := ""
-            i := 0
-            for ml != nil {
-                m := ml.v
-                tname := "o_vtt_" + cname(w) + "_" + gvtkey(impl) + "_" + itoa(i)
-                ret_c := "void"
+    w := vu.w
+    impl := vu.impl
+    ii := check.iface_ent(g.ck, w)
+    if ii >= 0 {
+        ml := g.ck.ifacesv[ii].methods
+        slots := ""
+        i := 0
+        for ml != nil {
+            m := ml.v
+            tname := "o_vtt_" + cname(w) + "_" + gvtkey(impl) + "_" + itoa(i)
+            ret_c := "void"
+            if m.retk == 1 {
+                ret_c = gcty(g, m.ret1)
+            }
+            if m.retk == 2 {
+                ret_c = "struct o_vret_" + cname(w) + "_" + cname(m.n)
+            }
+            psig := ""
+            argl := ""
+            il := m.params
+            k := 0
+            for il != nil {
+                psig = psig + ", " + gcty(g, il.v) + " a" + itoa(k)
+                argl = argl + ", a" + itoa(k)
+                il = il.next
+                k = k + 1
+            }
+            g.vout = push(g.vout, "static " + ret_c + " " + tname + "(void* _d" + psig + ") {")
+            if len(impl) > 6 && substr(impl, 0, 6) == "iface:" {
+                // iface->iface rewrap: forward through the source
+                // pair's vtab (Rust same-impl arm)
+                w2 := substr(impl, 6, len(impl))
+                j := gimidx(g, w2, m.n)
+                vsig := "void*"
+                il = m.params
+                for il != nil {
+                    vsig = vsig + ", " + gcty(g, il.v)
+                    il = il.next
+                }
+                if m.retk == 0 {
+                    g.vout = push(g.vout, "    RtIface *_iv = (RtIface*)_d;\n    ((void (*)(" + vsig + "))_iv->vtab[" + itoa(j) + "])(_iv->data" + argl + ");\n}\n")
+                }
                 if m.retk == 1 {
-                    ret_c = gcty(g, m.ret1)
+                    g.vout = push(g.vout, "    RtIface *_iv = (RtIface*)_d;\n    return ((" + ret_c + " (*)(" + vsig + "))_iv->vtab[" + itoa(j) + "])(_iv->data" + argl + ");\n}\n")
                 }
                 if m.retk == 2 {
-                    ret_c = "struct o_vret_" + cname(w) + "_" + cname(m.n)
+                    src := "struct o_vret_" + cname(w2) + "_" + cname(m.n)
+                    g.vout = push(g.vout, "    RtIface *_iv = (RtIface*)_d;\n    " + src + " _r = ((" + src + " (*)(" + vsig + "))_iv->vtab[" + itoa(j) + "])(_iv->data" + argl + ");\n    return (" + ret_c + "){ _r.val, _r.err };\n}\n")
                 }
-                psig := ""
-                argl := ""
-                il := m.params
-                k := 0
-                for il != nil {
-                    psig = psig + ", " + gcty(g, il.v) + " a" + itoa(k)
-                    argl = argl + ", a" + itoa(k)
-                    il = il.next
-                    k = k + 1
+            } else {
+                // concrete impl — normalize the erased receiver to
+                // the method's declared receiver ty
+                fname := impl + "." + m.n
+                cn := "struct o_s_" + cname(impl)
+                if collections.map_has(g.ck.enums, impl) {
+                    cn = "struct o_en_" + cname(impl)
                 }
-                g.vout = push(g.vout, "static " + ret_c + " " + tname + "(void* _d" + psig + ") {")
-                if len(impl) > 6 && substr(impl, 0, 6) == "iface:" {
-                    // iface->iface rewrap: forward through the source
-                    // pair's vtab (Rust same-impl arm)
-                    w2 := substr(impl, 6, len(impl))
-                    j := gimidx(g, w2, m.n)
-                    vsig := "void*"
-                    il = m.params
-                    for il != nil {
-                        vsig = vsig + ", " + gcty(g, il.v)
-                        il = il.next
-                    }
-                    if m.retk == 0 {
-                        g.vout = push(g.vout, "    RtIface *_iv = (RtIface*)_d;\n    ((void (*)(" + vsig + "))_iv->vtab[" + itoa(j) + "])(_iv->data" + argl + ");\n}\n")
-                    }
-                    if m.retk == 1 {
-                        g.vout = push(g.vout, "    RtIface *_iv = (RtIface*)_d;\n    return ((" + ret_c + " (*)(" + vsig + "))_iv->vtab[" + itoa(j) + "])(_iv->data" + argl + ");\n}\n")
-                    }
-                    if m.retk == 2 {
-                        src := "struct o_vret_" + cname(w2) + "_" + cname(m.n)
-                        g.vout = push(g.vout, "    RtIface *_iv = (RtIface*)_d;\n    " + src + " _r = ((" + src + " (*)(" + vsig + "))_iv->vtab[" + itoa(j) + "])(_iv->data" + argl + ");\n    return (" + ret_c + "){ _r.val, _r.err };\n}\n")
-                    }
-                } else {
-                    // concrete impl — normalize the erased receiver to
-                    // the method's declared receiver ty
-                    fname := impl + "." + m.n
-                    cn := "struct o_s_" + cname(impl)
-                    if collections.map_has(g.ck.enums, impl) {
-                        cn = "struct o_en_" + cname(impl)
-                    }
-                    callee := "o_f_" + cname(fname)
-                    let bind: own collections.Map = nil
-                    mret := m.retk
-                    mfi := gfn(g, fname)
-                    if mfi >= 0 {
-                        mret = g.ck.fnsv[mfi].retk
-                        if g.ck.fnsv[mfi].typarams != nil {
-                            bind = gvtab_bind(g, mfi, m)
-                            if bind != nil {
-                                callee = "o_f_" + cname(ginst_name(g, fname, g.ck.fnsv[mfi].typarams, bind))
-                            }
-                        }
-                    }
-                    recv := "((" + cn + "*)_d)"
-                    if mfi >= 0 && g.ck.fnsv[mfi].params != nil {
-                        rty := g.ck.fnsv[mfi].params.v
+                callee := "o_f_" + cname(fname)
+                let bind: own collections.Map = nil
+                mret := m.retk
+                mfi := gfn(g, fname)
+                if mfi >= 0 {
+                    mret = g.ck.fnsv[mfi].retk
+                    if g.ck.fnsv[mfi].typarams != nil {
+                        bind = gvtab_bind(g, mfi, m)
                         if bind != nil {
-                            rty = check.subst_ty(g.ck, rty, bind)
-                        }
-                        rk0 := tyk(g, rty)
-                        if rk0 == check.k_struct() || rk0 == check.k_enum() {
-                            recv = "(*(" + cn + "*)_d)"
+                            callee = "o_f_" + cname(ginst_name(g, fname, g.ck.fnsv[mfi].typarams, bind))
                         }
                     }
-                    cargs := recv + argl
-                    if mret == 0 {
-                        g.vout = push(g.vout, "    " + callee + "(" + cargs + ");\n}\n")
+                }
+                recv := "((" + cn + "*)_d)"
+                if mfi >= 0 && g.ck.fnsv[mfi].params != nil {
+                    rty := g.ck.fnsv[mfi].params.v
+                    if bind != nil {
+                        rty = check.subst_ty(g.ck, rty, bind)
                     }
-                    if mret == 1 {
-                        g.vout = push(g.vout, "    return " + callee + "(" + cargs + ");\n}\n")
-                    }
-                    if mret == 2 {
-                        rtag := substr(callee, 4, len(callee))
-                        g.vout = push(g.vout, "    struct o_ret_" + rtag + " _r = " + callee + "(" + cargs + ");\n    return (" + ret_c + "){ _r.val, _r.err };\n}\n")
+                    rk0 := tyk(g, rty)
+                    if rk0 == check.k_struct() || rk0 == check.k_enum() {
+                        recv = "(*(" + cn + "*)_d)"
                     }
                 }
-                if len(slots) > 0 {
-                    slots = slots + ", "
+                cargs := recv + argl
+                if mret == 0 {
+                    g.vout = push(g.vout, "    " + callee + "(" + cargs + ");\n}\n")
                 }
-                slots = slots + "(void*)" + tname
-                ml = ml.next
-                i = i + 1
+                if mret == 1 {
+                    g.vout = push(g.vout, "    return " + callee + "(" + cargs + ");\n}\n")
+                }
+                if mret == 2 {
+                    rtag := substr(callee, 4, len(callee))
+                    g.vout = push(g.vout, "    struct o_ret_" + rtag + " _r = " + callee + "(" + cargs + ");\n    return (" + ret_c + "){ _r.val, _r.err };\n}\n")
+                }
             }
-            g.vout = push(g.vout, "static void* o_vt_" + cname(w) + "_" + gvtkey(impl) + "[] = { " + slots + " };\n")
+            if len(slots) > 0 {
+                slots = slots + ", "
+            }
+            slots = slots + "(void*)" + tname
+            ml = ml.next
+            i = i + 1
         }
+        g.vout = push(g.vout, "static void* o_vt_" + cname(w) + "_" + gvtkey(impl) + "[] = { " + slots + " };\n")
+    }
 }
 
 fn genall(g: mut G) -> str {
@@ -4921,23 +4962,50 @@ fn genall(g: mut G) -> str {
         work = work[0:len(work) - 1]
         g.uhits = mkslice(int, 0)
         j := 0
-        for j < len(g.units[t].hd) { gscan(g, g.units[t].hd[j]); j = j + 1 }
+        for j < len(g.units[t].hd) {
+            gscan(g, g.units[t].hd[j])
+            j = j + 1
+        }
         j = 0
-        for j < len(g.units[t].tp) { gscan(g, g.units[t].tp[j]); j = j + 1 }
+        for j < len(g.units[t].tp) {
+            gscan(g, g.units[t].tp[j])
+            j = j + 1
+        }
         j = 0
-        for j < len(g.units[t].fd) { gscan(g, g.units[t].fd[j]); j = j + 1 }
+        for j < len(g.units[t].fd) {
+            gscan(g, g.units[t].fd[j])
+            j = j + 1
+        }
         j = 0
-        for j < len(g.units[t].cp) { gscan(g, g.units[t].cp[j]); j = j + 1 }
+        for j < len(g.units[t].cp) {
+            gscan(g, g.units[t].cp[j])
+            j = j + 1
+        }
         j = 0
-        for j < len(g.units[t].vt) { gscan(g, g.units[t].vt[j]); j = j + 1 }
+        for j < len(g.units[t].vt) {
+            gscan(g, g.units[t].vt[j])
+            j = j + 1
+        }
         j = 0
-        for j < len(g.units[t].fb) { gscan(g, g.units[t].fb[j]); j = j + 1 }
+        for j < len(g.units[t].fb) {
+            gscan(g, g.units[t].fb[j])
+            j = j + 1
+        }
         j = 0
-        for j < len(g.units[t].ob) { gscan(g, g.units[t].ob[j]); j = j + 1 }
+        for j < len(g.units[t].ob) {
+            gscan(g, g.units[t].ob[j])
+            j = j + 1
+        }
         j = 0
-        for j < len(g.units[t].cb) { gscan(g, g.units[t].cb[j]); j = j + 1 }
+        for j < len(g.units[t].cb) {
+            gscan(g, g.units[t].cb[j])
+            j = j + 1
+        }
         j = 0
-        for j < len(g.units[t].gi) { gscan(g, g.units[t].gi[j]); j = j + 1 }
+        for j < len(g.units[t].gi) {
+            gscan(g, g.units[t].gi[j])
+            j = j + 1
+        }
         j = 0
         for j < len(g.uhits) {
             h := g.uhits[j]
@@ -4958,27 +5026,74 @@ fn genall(g: mut G) -> str {
         }
         i = i + 1
     }
+    // splice the hole only inside the synthesized oxl_main unit —
+    // identical text elsewhere is string data, not a hole
+    i = 0
+    for i < len(g.units[ru].ob) {
+        g.units[ru].ob[i] = gsplice(g.units[ru].ob[i], "@@GLOBALS@@", ginits)
+        i = i + 1
+    }
     // heads (decls, protos, frame decls, trampolines, vtab rows,
     // closure protos) precede every body; closure + defer-thunk
     // bodies go last since they only reference protos
     out := "#include \"rt.h\"\n\n"
     i = 0
-    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].hd) } i = i + 1 }
+    for i < len(g.units) {
+        if g.live[i] != 0 {
+            out = out + wjoin(g.units[i].hd)
+        }
+        i = i + 1
+    }
     i = 0
-    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].tp) } i = i + 1 }
+    for i < len(g.units) {
+        if g.live[i] != 0 {
+            out = out + wjoin(g.units[i].tp)
+        }
+        i = i + 1
+    }
     i = 0
-    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].fd) } i = i + 1 }
+    for i < len(g.units) {
+        if g.live[i] != 0 {
+            out = out + wjoin(g.units[i].fd)
+        }
+        i = i + 1
+    }
     i = 0
-    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].cp) } i = i + 1 }
+    for i < len(g.units) {
+        if g.live[i] != 0 {
+            out = out + wjoin(g.units[i].cp)
+        }
+        i = i + 1
+    }
     i = 0
-    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].vt) } i = i + 1 }
+    for i < len(g.units) {
+        if g.live[i] != 0 {
+            out = out + wjoin(g.units[i].vt)
+        }
+        i = i + 1
+    }
     i = 0
-    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].fb) } i = i + 1 }
+    for i < len(g.units) {
+        if g.live[i] != 0 {
+            out = out + wjoin(g.units[i].fb)
+        }
+        i = i + 1
+    }
     i = 0
-    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].ob) } i = i + 1 }
+    for i < len(g.units) {
+        if g.live[i] != 0 {
+            out = out + wjoin(g.units[i].ob)
+        }
+        i = i + 1
+    }
     i = 0
-    for i < len(g.units) { if g.live[i] != 0 { out = out + wjoin(g.units[i].cb) } i = i + 1 }
-    return gsplice(out, "@@GLOBALS@@", ginits)
+    for i < len(g.units) {
+        if g.live[i] != 0 {
+            out = out + wjoin(g.units[i].cb)
+        }
+        i = i + 1
+    }
+    return out
 }
 
 // ---------- driver ----------
