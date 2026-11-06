@@ -74,6 +74,52 @@ enum MT {
     Vt(usize, Vec<Ty>, crate::check::Ret),
 }
 
+/// one reachability unit — the emitted C owned by a single decl (or a
+/// synthesized helper: instantiation, vtab pair, fn-value wrapper)
+/// split into the three output layers, plus the C symbols it defines.
+/// `init` is a global's oxl_main initializer line; `root` seeds the
+/// mark pass (oxl_main + main-package globals — their initializers
+/// always ran, so they must still run).
+#[derive(Default)]
+struct Unit {
+    /// decls/protos/frame decls/trampolines — precede every body
+    head: String,
+    /// fn + instantiation bodies and susp poll drivers
+    body: String,
+    /// closure + defer-thunk bodies — after every body (protos only)
+    tail: String,
+    /// `o_g_<name> = <init>;` for oxl_main's prologue (globals only)
+    init: String,
+    /// C symbols this unit defines: o_f_/o_s_/o_en_/o_g_/o_ret_/
+    /// o_vret_/o_vt_/o_fnv_wrap_/o_frm_/o_poll_ names, or an extern's
+    /// bare C name — any identifier token spelling one is a use edge
+    defs: Vec<String>,
+    root: bool,
+}
+
+/// append every identifier token in `text` that some unit defines to
+/// `out` — the emitted C names exactly the symbols it links against,
+/// so scanning it yields the resolved call/type/vtab edges directly
+fn scan_refs(text: &str, defs: &HashMap<String, Vec<usize>>, out: &mut Vec<usize>) {
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'_' || c.is_ascii_alphabetic() {
+            let s = i;
+            i += 1;
+            while i < b.len() && (b[i] == b'_' || b[i].is_ascii_alphanumeric()) {
+                i += 1;
+            }
+            if let Some(us) = defs.get(&text[s..i]) {
+                out.extend_from_slice(us);
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
 struct Gen<'a> {
     out: String,
     trampolines: String,
@@ -113,7 +159,6 @@ struct Gen<'a> {
     cur_fn: String,
     /// fn-scope defer stack — calls run LIFO at each return / fn end
     defers: Vec<Expr>,
-    test_mode: bool,
     /// suspend set from the checker — these fns compile to frames
     susp: HashSet<String>,
     /// inside a suspendable fn's driver right now
@@ -184,7 +229,6 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         cur_ret_ty: Ty::Void,
         cur_fn: String::new(),
         defers: Vec::new(),
-        test_mode,
         susp: susp.clone(),
         in_frame: false,
         fslots: Vec::new(),
@@ -284,100 +328,144 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
         }
     }
 
-    let mut out = String::from("#include \"rt.h\"\n\n");
+    // G1 — every decl lands in a `Unit` carrying the C symbols it
+    // defines; dead decls never reach the output. A unit's reachability
+    // is decided by the emitted text itself: any `o_*` (or extern)
+    // identifier token another unit spells is a use edge, so call edges
+    // are the *resolved* callee names, conv-site `o_vt_*` uses pin their
+    // vtab + its method thunks transitively, and types are pulled by
+    // whatever `o_s_*`/`o_en_*`/`o_ret_*`/`o_vret_*` name a live unit
+    // needs spelled — param/ret/field types survive transitively for
+    // free since they are spelled in the live text that needs them.
+    let mut units: Vec<Unit> = Vec::new();
+    let mut gpend: Vec<(usize, &Global)> = Vec::new();
 
     // enum defs first: variant payload structs + the tagged union —
     // a user struct or another variant may embed an enum by value
     for it in &c.items {
         if let Item::Enum(en) = it {
+            let mut u = Unit::default();
+            u.defs.push(format!("o_en_{}", cname(&en.name)));
             let mut members = String::new();
             for (i, v) in en.variants.iter().enumerate() {
                 let key = format!("{}.{}", en.name, v.name);
+                u.defs.push(format!("o_s_{}", cname(&key)));
                 let fields = g.enum_fields.get(&key).cloned().unwrap_or_default();
                 if fields.is_empty() {
                     continue;
                 }
-                let _ = writeln!(out, "struct o_s_{} {{", cname(&key));
+                let _ = writeln!(u.head, "struct o_s_{} {{", cname(&key));
                 for (fname, fty) in &fields {
-                    let _ = writeln!(out, "    {} f_{};", g.cty(fty), fname);
+                    let _ = writeln!(u.head, "    {} f_{};", g.cty(fty), fname);
                 }
-                let _ = writeln!(out, "}};");
+                let _ = writeln!(u.head, "}};");
                 members.push_str(&format!(" struct o_s_{} v{i};", cname(&key)));
             }
             if members.is_empty() {
                 members.push_str(" char _pad;");
             }
-            let _ = writeln!(out,
+            let _ = writeln!(u.head,
                 "struct o_en_{} {{ int tag; union {{{} }} u; }};\n", cname(&en.name), members);
+            units.push(u);
         }
     }
 
     // struct defs
     for it in &c.items {
         if let Item::Struct(s) = it {
-            let _ = writeln!(out, "struct o_s_{} {{", cname(&s.name));
+            let mut u = Unit::default();
+            let _ = writeln!(u.head, "struct o_s_{} {{", cname(&s.name));
             for f in &s.fields {
-                let _ = writeln!(out, "    {} f_{};", g.cty(&g.ty_of_ref(&f.ty)), f.name);
+                let _ = writeln!(u.head, "    {} f_{};", g.cty(&g.ty_of_ref(&f.ty)), f.name);
             }
-            let _ = writeln!(out, "}};\n");
+            let _ = writeln!(u.head, "}};\n");
+            u.defs.push(format!("o_s_{}", cname(&s.name)));
+            units.push(u);
         }
     }
 
-    // [T, err] result structs must precede fn prototypes
+    // iface vtab call ret structs for `-> [T, err]` methods — one unit
+    // per (iface, method) so unused ifaces drop theirs entirely
     for it in &c.items {
-        if let Item::Fn(f) = it {
-            if f.ty_params.is_empty() {
-                if let RetTy::Pair(t) = &f.ret {
+        if let Item::Interface(i) = it {
+            for m in &i.methods {
+                if let RetTy::Pair(t) = &m.ret {
+                    let mut u = Unit::default();
                     let _ = writeln!(
-                        out, "struct o_ret_{} {{ {} val; int64_t err; }};",
-                        cname(&f.name), g.cty(&g.ty_of_ref(t))
-                    );
+                        u.head, "struct o_vret_{}_{} {{ {} val; int64_t err; }};",
+                        cname(&i.name), cname(&m.name), g.cty(&g.ty_of_ref(t)));
+                    u.defs.push(format!("o_vret_{}_{}", cname(&i.name), cname(&m.name)));
+                    units.push(u);
                 }
             }
         }
     }
 
-    // iface vtab call ret structs for `-> [T, err]` methods
-    for (w, ms) in &g.ifaces {
-        for m in ms {
-            if let crate::check::Ret::Pair(t) = &m.ret {
-                let _ = writeln!(
-                    out, "struct o_vret_{}_{} {{ {} val; int64_t err; }};",
-                    cname(w), cname(&m.name), g.cty(t));
-            }
-        }
-    }
-
-    // file-scope globals (initialized in oxl_main prologue)
+    // file-scope globals — decl now, init expression after the bodies
+    // (pre-G1 order: inits can queue insts + record vtab uses). Only
+    // main's own package globals are reachability roots — their names
+    // stay unqualified; imported ones need a spelled reference.
     for it in &c.items {
         if let Item::Global(gl) = it {
             let t = g.globals.get(&gl.name).cloned().unwrap_or(Ty::Int);
-            let _ = writeln!(out, "static {} o_g_{};", g.cty(&t), cname(&gl.name));
+            let mut u = Unit::default();
+            let _ = writeln!(u.head, "static {} o_g_{};", g.cty(&t), cname(&gl.name));
+            u.defs.push(format!("o_g_{}", cname(&gl.name)));
+            u.root = !gl.name.contains('.');
+            gpend.push((units.len(), gl));
+            units.push(u);
         }
     }
 
-    // fn prototypes + extern passthroughs (generic fns get none — they
-    // only exist as instantiations)
+    // extern protos — one unit each so uncalled externs drop; the def
+    // is the bare C name call sites spell
     for it in &c.items {
-        match it {
-            Item::Fn(f) => {
-                if f.ty_params.is_empty() {
-                    g.proto(&mut out, f, false);
-                }
-            }
-            Item::Extern(f) => g.proto(&mut out, f, true),
-            _ => {}
+        if let Item::Extern(f) = it {
+            let mut u = Unit::default();
+            g.proto(&mut u.head, f, true);
+            u.defs.push(f.name.clone());
+            units.push(u);
         }
     }
 
-    g.out = out;
-    let body_start = g.out.len();
+    // fn units: `[T, err]` decl + proto in head, the body (or suspend
+    // frame) in body — generic decls never become units at all
     for it in &c.items {
         if let Item::Fn(f) = it {
-            if f.ty_params.is_empty() {
-                g.func(f);
+            if !f.ty_params.is_empty() {
+                continue;
             }
+            let mut u = Unit::default();
+            if let RetTy::Pair(t) = &f.ret {
+                let _ = writeln!(
+                    u.head, "struct o_ret_{} {{ {} val; int64_t err; }};",
+                    cname(&f.name), g.cty(&g.ty_of_ref(t))
+                );
+                u.defs.push(format!("o_ret_{}", cname(&f.name)));
+            }
+            g.proto(&mut u.head, f, false);
+            u.defs.push(format!("o_f_{}", cname(&f.name)));
+            if g.susp.contains(&f.name) {
+                u.defs.push(format!("o_frm_{}", cname(&f.name)));
+                u.defs.push(format!("o_poll_{}", cname(&f.name)));
+            }
+            g.func(f);
+            g.drain(&mut u);
+            units.push(u);
         }
+    }
+    // global initializers run first inside oxl_main (base scope exists);
+    // the init lines live on the global's unit so a dropped global
+    // drops its init too — emission order matches the pre-G1
+    // fn-bodies-then-inits order, ahead of the inst drain
+    for (uidx, gl) in gpend {
+        let gt = g.globals.get(&gl.name).cloned().unwrap_or(Ty::Unknown);
+        let v = g.conv(&gl.init, &gt);
+        let mut u = std::mem::take(&mut units[uidx]);
+        u.init = std::mem::take(&mut g.out);
+        let _ = writeln!(u.init, "    o_g_{} = {v};", cname(&gl.name));
+        g.drain(&mut u);
+        units[uidx] = u;
     }
     // monomorphized instantiations + vtab-seeded method insts —
     // co-fixpoint: bodies create conv sites (vtab uses), vtab thunks
@@ -391,7 +479,14 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
             }
             progress = true;
             if let Some(f) = g.ast_fns.get(&fname).cloned() {
+                let mut u = Unit::default();
+                u.defs.push(format!("o_f_{}", cname(&mangled)));
+                u.defs.push(format!("o_ret_{}", cname(&mangled)));
+                u.defs.push(format!("o_frm_{}", cname(&mangled)));
+                u.defs.push(format!("o_poll_{}", cname(&mangled)));
                 g.func_inst(f, &mangled, &bind);
+                g.drain(&mut u);
+                units.push(u);
             }
         }
         progress |= g.seed_vtab_insts();
@@ -399,18 +494,24 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
             break;
         }
     }
-    // concrete vtabs + receiver-normalizing thunks — after every body
-    // so vtab_uses is final
-    let mut vtab_out = String::new();
-    g.emit_vtabs(&mut vtab_out);
+    // concrete vtabs + receiver-normalizing thunks — one unit per
+    // (iface, impl) pair a conversion site produced
+    for (w, implkey) in g.vtab_uses.clone() {
+        let mut u = Unit::default();
+        g.emit_vtab(&mut u.head, &w, &implkey);
+        u.defs.push(format!("o_vt_{}_{}", cname(&w), vtkey(&implkey)));
+        units.push(u);
+    }
     // B4: zero-env wrappers giving named fns the (void* env, args...)
-    // calling convention every fn value shares
+    // calling convention every fn value shares — a fn named anywhere a
+    // value is expected is reachable through its wrapper
     for n in g.fnv_wraps.clone() {
         if let Some((ps, ret)) = g.fns.get(&n).cloned() {
             let ret_c = match &ret {
                 crate::check::Ret::One(t) => g.cty(t),
                 _ => "void".into(),
             };
+            let mut u = Unit::default();
             let mut psig = String::new();
             for (i, p) in ps.iter().enumerate() {
                 psig += &format!(", {} a{i}", g.cty(p));
@@ -422,33 +523,31 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
                 format!("o_f_{}", cname(&n))
             };
             let ret_kw = if ret_c == "void" { "" } else { "return " };
-            let _ = writeln!(g.inst_protos,
+            let _ = writeln!(u.head,
                 "static {ret_c} o_fnv_wrap_{}(void* _e{psig}) {{ {ret_kw}{callee}({}); }}",
                 cname(&n), argl.join(", "));
+            u.defs.push(format!("o_fnv_wrap_{}", cname(&n)));
+            units.push(u);
         }
     }
-    // global initializers run first inside oxl_main (base scope exists)
-    let mut global_inits = String::new();
-    for it in &c.items {
-        if let Item::Global(gl) = it {
-            let gt = g.globals.get(&gl.name).cloned().unwrap_or(Ty::Unknown);
-            let v = g.conv(&gl.init, &gt);
-            let _ = writeln!(global_inits, "    o_g_{} = {v};", cname(&gl.name));
-        }
-    }
+    // oxl_main — the root unit. Its body spells `o_f_main` / the test
+    // runner's `o_f_test_*` (+ `o_frm_*`/`o_poll_*` for susp entries) so
+    // entries mark through ordinary use edges; the /*GLOBALS*/ hole is
+    // spliced with live global inits after the mark.
+    let mut u = Unit::default();
+    u.root = true;
     if test_mode {
-        let _ = writeln!(g.out, "void oxl_main(void) {{");
-        g.out.push_str(&global_inits);
+        u.body.push_str("void oxl_main(void) {\n/*GLOBALS*/");
         let mut id = 0usize;
         for it in &c.items {
             if let Item::Fn(f) = it {
                 if f.name.starts_with("test_") {
                     if g.susp.contains(&f.name) {
-                        let _ = writeln!(g.out,
+                        let _ = writeln!(u.body,
                             "    {{ RtScope _t{id}; rt_scope_enter(&_t{id});\n      struct o_frm_{cn} *_fr = (struct o_frm_{cn} *)rt_task_new(o_poll_{cn}, (int64_t)sizeof(struct o_frm_{cn}));\n      rt_run_root((RtFrame *)_fr);\n      int _e{id} = rt_scope_try(&_t{id});\n      rt_print_str(rt_str(\"  {n} ... \")); rt_println_str(rt_str(_e{id} ? \"FAIL\" : \"ok\")); }}",
                             cn = cname(&f.name), n = f.name, id = id);
                     } else {
-                        let _ = writeln!(g.out,
+                        let _ = writeln!(u.body,
                             "    {{ RtScope _t{id}; rt_scope_enter(&_t{id}); o_f_{cn}(); int _e{id} = rt_scope_try(&_t{id});\n      rt_print_str(rt_str(\"  {n} ... \")); rt_println_str(rt_str(_e{id} ? \"FAIL\" : \"ok\")); }}",
                             cn = cname(&f.name), n = f.name, id = id);
                     }
@@ -456,24 +555,76 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
                 }
             }
         }
-        let _ = writeln!(g.out, "}}\n");
+        let _ = writeln!(u.body, "}}\n");
+    } else if g.susp.contains("main") {
+        u.body.push_str(
+            "void oxl_main(void) { /*GLOBALS*/ struct o_frm_main *_rt = (struct o_frm_main *)rt_task_new(o_poll_main, (int64_t)sizeof(struct o_frm_main));\n    rt_run_root((RtFrame *)_rt); }\n");
+    } else {
+        u.body.push_str("void oxl_main(void) { /*GLOBALS*/ o_f_main(); }\n");
     }
+    units.push(u);
 
-    // trampolines + frame decls must precede the fn bodies that use them
-    g.out = g.out.replace("/*GLOBALS*/", &global_inits);
-    // inst protos precede every body (regular, inst, and frame poll fns);
-    // closure protos likewise — closure wrapper bodies go last since
-    // they only reference protos
-    let mut final_out = g.out[..body_start].to_string();
-    final_out.push_str(&g.trampolines);
-    final_out.push_str(&g.frame_head);
-    final_out.push_str(&g.inst_protos);
-    final_out.push_str(&g.closure_protos);
-    final_out.push_str(&vtab_out);
-    final_out.push_str(&g.inst_out);
-    final_out.push_str(&g.frame_out);
-    final_out.push_str(&g.out[body_start..]);
-    final_out.push_str(&g.closure_bodies);
+    // csym -> units defining it; a colliding symbol (say a struct named
+    // like an enum variant's payload) marks every claimant — safe
+    let mut defs: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, u) in units.iter().enumerate() {
+        for d in &u.defs {
+            defs.entry(d.clone()).or_default().push(i);
+        }
+    }
+    // mark: from the root seeds over use edges until fixpoint
+    let mut live = vec![false; units.len()];
+    let mut work: Vec<usize> = Vec::new();
+    for (i, u) in units.iter().enumerate() {
+        if u.root {
+            live[i] = true;
+            work.push(i);
+        }
+    }
+    while let Some(i) = work.pop() {
+        let mut hits = Vec::new();
+        for text in [&units[i].head, &units[i].body, &units[i].tail, &units[i].init] {
+            scan_refs(text, &defs, &mut hits);
+        }
+        for t in hits {
+            if !live[t] {
+                live[t] = true;
+                work.push(t);
+            }
+        }
+    }
+    // init lines of surviving globals, in unit order — spliced into the
+    // oxl_main placeholder the root unit left
+    let mut global_inits = String::new();
+    for (i, u) in units.iter().enumerate() {
+        if live[i] && !u.init.is_empty() {
+            global_inits.push_str(&u.init);
+        }
+    }
+    let mut out = String::from("#include \"rt.h\"\n\n");
+    // heads (decls, protos, frame decls, trampolines, vtab rows, closure
+    // protos) precede every body; closure + defer-thunk bodies go last
+    // since they only reference protos
+    for (i, u) in units.iter().enumerate() {
+        if live[i] {
+            out.push_str(&u.head);
+        }
+    }
+    for (i, u) in units.iter().enumerate() {
+        if live[i] {
+            out.push_str(&u.body);
+        }
+    }
+    for (i, u) in units.iter().enumerate() {
+        if live[i] {
+            out.push_str(&u.tail);
+        }
+    }
+    let final_out = out.replace("/*GLOBALS*/", &global_inits);
+    // emitted-C dump hook for size audits — `OXL_EMIT_C=path oxl build x`
+    if let Ok(p) = std::env::var("OXL_EMIT_C") {
+        let _ = std::fs::write(&p, &final_out);
+    }
     final_out
 }
 
@@ -707,10 +858,6 @@ impl<'a> Gen<'a> {
     fn func(&mut self, f: &Fn) {
         if self.susp.contains(&f.name) {
             self.func_frame(f, &f.name.clone());
-            if f.name == "main" && !self.test_mode {
-                let _ = writeln!(self.out,
-                    "void oxl_main(void) {{ /*GLOBALS*/ struct o_frm_main *_rt = (struct o_frm_main *)rt_task_new(o_poll_main, (int64_t)sizeof(struct o_frm_main));\n    rt_run_root((RtFrame *)_rt); }}\n");
-            }
             return;
         }
         let ret_c = self.ret_decl(f, true);
@@ -741,9 +888,6 @@ impl<'a> Gen<'a> {
         self.emit_defers();
         self.env.pop();
         let _ = writeln!(self.out, "}}\n");
-        if f.name == "main" && !self.test_mode {
-            let _ = writeln!(self.out, "void oxl_main(void) {{ /*GLOBALS*/ o_f_main(); }}\n");
-        }
     }
 
     /// emit a monomorphized copy of generic fn `f` as `o_f_{mangled}`
@@ -836,6 +980,23 @@ impl<'a> Gen<'a> {
     fn tmp(&mut self) -> usize {
         self.tmp += 1;
         self.tmp
+    }
+
+    /// pull every emit buffer into `u` — buffers stay empty between
+    /// units, so each unit owns exactly what its emission appended.
+    /// Frame decls/inst protos/closure protos are head layer; spawn
+    /// trampolines, frame drivers, inst bodies, and fn bodies are body
+    /// layer — a trampoline's `o_f_*` call needs the callee's proto
+    /// emitted before it, which only the body layer guarantees.
+    fn drain(&mut self, u: &mut Unit) {
+        u.head.push_str(&std::mem::take(&mut self.frame_head));
+        u.head.push_str(&std::mem::take(&mut self.inst_protos));
+        u.head.push_str(&std::mem::take(&mut self.closure_protos));
+        u.body.push_str(&std::mem::take(&mut self.trampolines));
+        u.body.push_str(&std::mem::take(&mut self.inst_out));
+        u.body.push_str(&std::mem::take(&mut self.frame_out));
+        u.body.push_str(&std::mem::take(&mut self.out));
+        u.tail.push_str(&std::mem::take(&mut self.closure_bodies));
     }
 
     fn lookup(&self, n: &str) -> Ty {
@@ -2053,12 +2214,14 @@ impl<'a> Gen<'a> {
         progress
     }
 
-    /// D3: concrete vtabs + receiver-normalizing thunks for every
+    /// D3: the concrete vtab + receiver-normalizing thunks for one
     /// (iface, impl) pair a conversion site produced. Each thunk is a
     /// `RET f(void* _d, params...)` shim that adapts the erased data
     /// ptr to the impl method's receiver and forwards.
-    fn emit_vtabs(&mut self, out: &mut String) {
-        for (w, implkey) in self.vtab_uses.clone() {
+    fn emit_vtab(&mut self, out: &mut String, w: &str, implkey: &str) {
+        {
+            let w = w.to_string();
+            let implkey = implkey.to_string();
             let ms = self.ifaces.get(&w).cloned().unwrap_or_default();
             let mut slots = Vec::new();
             for (i, m) in ms.iter().enumerate() {
@@ -3737,3 +3900,4 @@ fn clone_bind(b: &Bind) -> Bind {
         Bind::Blank => Bind::Blank,
     }
 }
+
