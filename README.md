@@ -57,7 +57,11 @@ oxl test file.oxl             # run all fn test_*() in a scope each
 oxl fmt [-w|--check] file.oxl # canonical AST pretty-print (comments kept)
 oxl doc file.oxl              # /// comments → markdown
 oxl get <path>@<query>        # fetch + pin a dependency (needs git)
-oxl list -m all               # the MVS-selected module build list
+oxl mod init <path>           # write a skeleton oxl.mod
+oxl mod tidy                  # sync requires/oxl.sum with the imports
+oxl mod verify                # re-hash the cache against oxl.sum
+oxl mod list                  # the MVS-selected module build list
+oxl list -m all               # same build list (alias)
 oxl lsp                        # stdio LSP: diagnostics, hover, goto-definition
 ```
 
@@ -150,6 +154,23 @@ sealed read-only; every build verifies a cached module against
 directories bypass cache and sums by design. Private repos work through
 git's own auth (ssh agent, credential helpers); `git` is a toolchain
 dependency for `get` only.
+
+### Maintaining manifests
+
+`oxl mod` keeps `oxl.mod`/`oxl.sum` in sync so neither is edited by
+hand: `oxl mod init <path>` writes a skeleton manifest (refusing to
+overwrite), and `oxl mod tidy` walks the import graph — an import no
+require provides is resolved to its containing module and fetched
+(longest prefix wins, then progressively shorter ones; a required
+module lacking the package is re-probed at `@latest`), modules only
+reached through other modules land as `// indirect` requires at the
+MVS-selected version, and requires nothing imports are dropped — the
+companion to unused imports being compile errors. Rewrites are
+surgical: comments, replaces, and untouched lines survive verbatim.
+`oxl mod verify` re-hashes every required module's cache slot against
+`oxl.sum`; `oxl mod list` prints the build list like `oxl list -m
+all`. `git` is needed only when tidy actually fetches — a manifest
+already in sync tidies offline.
 
 ## Examples
 

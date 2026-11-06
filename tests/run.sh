@@ -505,6 +505,147 @@ rm "$getwork/app/oxl.sum"
 ( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$scratch/selfcheck$EXE" app ) > "$getwork/nosum.self" 2>&1 && { echo "FAIL missing-sum accepted (self)"; exit 1; }
 grep -q 'missing oxl.sum entry for module' "$getwork/nosum.rust" || { echo "FAIL missing-sum text"; cat "$getwork/nosum.rust"; exit 1; }
 diff "$getwork/nosum.rust" "$getwork/nosum.self" >/dev/null || { echo "FAIL missing-sum parity"; cat "$getwork/nosum.rust" "$getwork/nosum.self"; exit 1; }
+
+echo "== v3 oxl mod commands =="
+# tidy syncs the manifest with what the source imports — an
+# un-required import is fetched through the same veneer (its dep's
+# own requires land as // indirect), a require nothing imports is
+# dropped, and oxl.sum is rewritten to the final require set.
+# Same file:// POSIX-only constraint as the get fixture.
+tv="$scratch/tidywork"
+mkdir -p "$tv/dep/util" "$tv/leafpkg/leaf" "$tv/app/app" "$tv/cache" "$tv/locdep/thing"
+( cd "$tv/dep" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/dep\noxl 0.3\nrequire file://%s/leafpkg v1.0.0\n' "$tv" "$tv" > oxl.mod
+  printf 'package util\nimport "file://%s/leafpkg/leaf"\n\nfn answer() -> int { return leaf.leafval() + 41 }\n' "$tv" > util/util.oxl
+  git add -A && git commit -qm dep && git tag v1.0.0 )
+( cd "$tv/leafpkg" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/leafpkg\noxl 0.3\n' "$tv" > oxl.mod
+  printf 'package leaf\n\nfn leafval() -> int { return 1 }\n' > leaf/leaf.oxl
+  git add -A && git commit -qm leaf && git tag v1.0.0 )
+printf 'package thing\n\nfn val() -> int { return 7 }\n' > "$tv/locdep/thing/thing.oxl"
+printf 'module file://%s/locdep\noxl 0.3\n' "$tv" > "$tv/locdep/oxl.mod"
+printf 'package main\nimport "file://%s/dep/util"\n\nfn main() { println("answer=" + itoa(util.answer())) }\n' "$tv" > "$tv/app/app/main.oxl"
+# init: skeleton is a valid manifest, second init refuses
+mkdir "$tv/fresh" && ( cd "$tv/fresh" && "$OXL" mod init example.com/fresh ) > "$tv/init1" 2>&1 || { echo "FAIL init rc"; cat "$tv/init1"; exit 1; }
+grep -q '^module example.com/fresh$' "$tv/fresh/oxl.mod" || { echo "FAIL init manifest"; cat "$tv/fresh/oxl.mod"; exit 1; }
+( cd "$tv/fresh" && "$OXL" mod init example.com/other ) > "$tv/init2" 2>&1 && { echo "FAIL re-init accepted"; cat "$tv/init2"; exit 1; }
+grep -q 'already exists' "$tv/init2" || { echo "FAIL re-init text"; cat "$tv/init2"; exit 1; }
+# tidy with no requires: fetches dep@latest, leafpkg lands // indirect
+( cd "$tv/app" && printf 'module file://%s/app\noxl 0.3\n' "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy1" 2>&1 || { echo "FAIL tidy rc"; cat "$tv/tidy1"; exit 1; }
+grep -q "added file://$tv/dep@" "$tv/tidy1" || { echo "FAIL tidy fetch"; cat "$tv/tidy1"; exit 1; }
+grep -q "file://$tv/leafpkg v1.0.0 // indirect" "$tv/app/oxl.mod" || { echo "FAIL tidy indirect"; cat "$tv/app/oxl.mod"; exit 1; }
+[ "$(grep -c ' h1:' "$tv/app/oxl.sum")" = 4 ] || { echo "FAIL tidy sums"; cat "$tv/app/oxl.sum"; exit 1; }
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" build app -o "$tv/appbin" ) || { echo "FAIL tidy build"; exit 1; }
+[ "$("$tv/appbin")" = "answer=42" ] || { echo "FAIL tidy run"; "$tv/appbin"; exit 1; }
+# tidy drops an unused require; second tidy is a no-op (idempotent)
+printf 'module file://%s/app\noxl 0.3\n\nrequire (\n\tfile://%s/unused v1.9.9 // stale\n\tfile://%s/dep v1.0.0\n\tfile://%s/leafpkg v1.0.0 // indirect\n)\n' "$tv" "$tv" "$tv" "$tv" > "$tv/app/oxl.mod"
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy2" 2>&1 || { echo "FAIL tidy2 rc"; cat "$tv/tidy2"; exit 1; }
+grep -q 'dropped file://' "$tv/tidy2" || { echo "FAIL tidy drop"; cat "$tv/tidy2"; exit 1; }
+! grep -q unused "$tv/app/oxl.mod" || { echo "FAIL unused kept"; cat "$tv/app/oxl.mod"; exit 1; }
+cp "$tv/app/oxl.mod" "$tv/m.save" && cp "$tv/app/oxl.sum" "$tv/s.save"
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) >/dev/null 2>&1 || { echo "FAIL tidy3 rc"; exit 1; }
+diff "$tv/m.save" "$tv/app/oxl.mod" >/dev/null || { echo "FAIL tidy idempotent"; diff "$tv/m.save" "$tv/app/oxl.mod"; exit 1; }
+# replace-only coverage: require is added at Go's placeholder version
+printf 'module file://%s/app\noxl 0.3\n\nreplace file://%s/locdep => ../locdep\n' "$tv" "$tv" > "$tv/app/oxl.mod"
+rm -f "$tv/app/oxl.sum"
+printf 'package main\nimport "file://%s/locdep/thing"\n\nfn main() { println("thing=" + itoa(thing.val())) }\n' "$tv" > "$tv/app/app/main.oxl"
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy4" 2>&1 || { echo "FAIL tidy4 rc"; cat "$tv/tidy4"; exit 1; }
+grep -q 'v0.0.0-00010101000000-000000000000' "$tv/app/oxl.mod" || { echo "FAIL replace placeholder"; cat "$tv/app/oxl.mod"; exit 1; }
+# verify + list + unresolvable error
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod verify ) > "$tv/vfy" 2>&1 || { echo "FAIL verify rc"; cat "$tv/vfy"; exit 1; }
+grep -q 'all modules verified' "$tv/vfy" || { echo "FAIL verify text"; cat "$tv/vfy"; exit 1; }
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod list ) > "$tv/mlist" 2>&1 || { echo "FAIL mod list rc"; cat "$tv/mlist"; exit 1; }
+grep -q "file://$tv/locdep" "$tv/mlist" || { echo "FAIL list locdep"; cat "$tv/mlist"; exit 1; }
+printf 'package main\nimport "file://%s/nosuch/pkg"\n\nfn main() {}\n' "$tv" > "$tv/app/app/main.oxl"
+printf 'module file://%s/app\noxl 0.3\n' "$tv" > "$tv/app/oxl.mod" && rm -f "$tv/app/oxl.sum"
+( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy5" 2>&1 && { echo "FAIL tidy5 accepted"; cat "$tv/tidy5"; exit 1; }
+grep -q 'no required module provides package' "$tv/tidy5" || { echo "FAIL tidy5 text"; cat "$tv/tidy5"; exit 1; }
+# restore keeps the floor: a require pinned at v1.0.0 whose MVS
+# selection is bumped to v1.2.0 by a dependency's own manifest gets
+# re-fetched at the SELECTED version — but the require line is a
+# minimum and must not move; only the missing sums are rewritten
+mkdir -p "$tv/escdep/util" "$tv/esclib/leaf" "$tv/escapp/escapp"
+( cd "$tv/esclib" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/esclib\noxl 0.3\n' "$tv" > oxl.mod
+  printf 'package leaf\n\nfn leafval() -> int { return 1 }\n' > leaf/leaf.oxl
+  git add -A && git commit -qm v1 && git tag v1.0.0
+  printf 'package leaf\n\nfn leafval() -> int { return 2 }\n' > leaf/leaf.oxl
+  git add -A && git commit -qm v2 && git tag v1.2.0 )
+( cd "$tv/escdep" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/escdep\noxl 0.3\nrequire file://%s/esclib v1.2.0\n' "$tv" "$tv" > oxl.mod
+  printf 'package util\nimport "file://%s/esclib/leaf"\n\nfn answer() -> int { return leaf.leafval() + 40 }\n' "$tv" > util/util.oxl
+  git add -A && git commit -qm dep && git tag v1.0.0 )
+printf 'package main\nimport "file://%s/escdep/util"\nimport "file://%s/esclib/leaf"\n\nfn main() { println("esc=" + itoa(util.answer()) + "/" + itoa(leaf.leafval())) }\n' "$tv" "$tv" > "$tv/escapp/escapp/main.oxl"
+( cd "$tv/escapp" && printf 'module file://%s/escapp\noxl 0.3\n\nrequire file://%s/escdep v1.0.0\nrequire file://%s/esclib v1.0.0\n' "$tv" "$tv" "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/escdep@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/esclib@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy6" 2>&1 || { echo "FAIL tidy6 rc"; cat "$tv/tidy6"; exit 1; }
+grep -q "file://$tv/esclib v1.0.0" "$tv/escapp/oxl.mod" || { echo "FAIL floor bumped"; cat "$tv/escapp/oxl.mod"; exit 1; }
+grep -q "file://$tv/esclib v1.2.0 h1:" "$tv/escapp/oxl.sum" || { echo "FAIL restore sums"; cat "$tv/escapp/oxl.sum"; exit 1; }
+( cd "$tv/escapp" && OXLMODCACHE="$tv/cache" "$OXL" build escapp -o "$tv/escbin" ) || { echo "FAIL esc build"; exit 1; }
+[ "$("$tv/escbin")" = "esc=42/2" ] || { echo "FAIL esc run"; "$tv/escbin"; exit 1; }
+# a dropped require takes its MVS edges with it: raiser is never
+# imported but holds libx at v1.2.0 — the version the walk checked.
+# Once raiser drops, keeping the v1.0.0 floor would select an
+# unfetched version whose leaf package doesn't even exist, so tidy
+# bumps the kept floor to the checked selection
+mkdir -p "$tv/raiser/r" "$tv/libx" "$tv/rapp/rapp"
+( cd "$tv/libx" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/libx\noxl 0.3\n' "$tv" > oxl.mod
+  git add -A && git commit -qm v1 && git tag v1.0.0
+  mkdir -p leaf && printf 'package leaf\n\nfn leafval() -> int { return 5 }\n' > leaf/leaf.oxl
+  git add -A && git commit -qm v2 && git tag v1.2.0 )
+( cd "$tv/raiser" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/raiser\noxl 0.3\nrequire file://%s/libx v1.2.0\n' "$tv" "$tv" > oxl.mod
+  printf 'package r\n\nfn rval() -> int { return 0 }\n' > r/r.oxl
+  git add -A && git commit -qm raiser && git tag v1.0.0 )
+printf 'package main\nimport "file://%s/libx/leaf"\n\nfn main() { println("lv=" + itoa(leaf.leafval())) }\n' "$tv" > "$tv/rapp/rapp/main.oxl"
+( cd "$tv/rapp" && printf 'module file://%s/rapp\noxl 0.3\n' "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/raiser@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/libx@v1.2.0" >/dev/null
+  sed 's|libx v1.2.0|libx v1.0.0|' oxl.mod > oxl.mod.tmp && mv oxl.mod.tmp oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy7" 2>&1 || { echo "FAIL tidy7 rc"; cat "$tv/tidy7"; exit 1; }
+grep -q 'dropped file://' "$tv/tidy7" || { echo "FAIL tidy7 drop"; cat "$tv/tidy7"; exit 1; }
+! grep -q 'raiser' "$tv/rapp/oxl.mod" || { echo "FAIL raiser kept"; cat "$tv/rapp/oxl.mod"; exit 1; }
+grep -q "file://$tv/libx v1.2.0" "$tv/rapp/oxl.mod" || { echo "FAIL floor not raised"; cat "$tv/rapp/oxl.mod"; exit 1; }
+( cd "$tv/rapp" && OXLMODCACHE="$tv/cache" "$OXL" build rapp -o "$tv/rbin" ) || { echo "FAIL rapp build"; exit 1; }
+[ "$("$tv/rbin")" = "lv=5" ] || { echo "FAIL rapp run"; "$tv/rbin"; exit 1; }
+# two-hop floor bump: dropping the unused raiser lowers mida below
+# its checked selection so its floor moves — but the raised version
+# drops the edge that was holding libb at the checked version. A
+# single recheck pass would leave libb's floor untouched and write a
+# manifest whose build selects a version lacking the package
+mkdir -p "$tv/libb" "$tv/mida/a" "$tv/raiser2/r" "$tv/tapp/tapp"
+( cd "$tv/libb" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/libb\noxl 0.3\n' "$tv" > oxl.mod
+  git add -A && git commit -qm v1 && git tag v1.0.0
+  mkdir b && printf 'package b\n\nfn bval() -> int { return 3 }\n' > b/b.oxl
+  git add -A && git commit -qm v2 && git tag v1.2.0 )
+( cd "$tv/mida" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/mida\noxl 0.3\nrequire file://%s/libb v1.2.0\n' "$tv" "$tv" > oxl.mod
+  printf 'package a\n\nfn aval() -> int { return 10 }\n' > a/a.oxl
+  git add -A && git commit -qm v1 && git tag v1.0.0
+  printf 'module file://%s/mida\noxl 0.3\n' "$tv" > oxl.mod
+  git add -A && git commit -qm v2 && git tag v1.1.0 )
+( cd "$tv/raiser2" && git init -q . && git config user.email t@t && git config user.name t
+  printf 'module file://%s/raiser2\noxl 0.3\nrequire file://%s/mida v1.1.0\nrequire file://%s/libb v1.2.0\n' "$tv" "$tv" "$tv" > oxl.mod
+  printf 'package r\n\nfn rval() -> int { return 0 }\n' > r/r.oxl
+  git add -A && git commit -qm r && git tag v1.0.0 )
+printf 'package main\nimport "file://%s/mida/a"\nimport "file://%s/libb/b"\n\nfn main() { println("ab=" + itoa(a.aval()) + "/" + itoa(b.bval())) }\n' "$tv" "$tv" > "$tv/tapp/tapp/main.oxl"
+( cd "$tv/tapp" && printf 'module file://%s/tapp\noxl 0.3\n' "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/mida@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/mida@v1.1.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/libb@v1.0.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/libb@v1.2.0" >/dev/null
+  OXLMODCACHE="$tv/cache" "$OXL" get "file://$tv/raiser2@v1.0.0" >/dev/null
+  printf 'module file://%s/tapp\noxl 0.3\n\nrequire file://%s/mida v1.0.0\nrequire file://%s/libb v1.0.0\nrequire file://%s/raiser2 v1.0.0\n' "$tv" "$tv" "$tv" "$tv" > oxl.mod
+  OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) > "$tv/tidy8" 2>&1 || { echo "FAIL tidy8 rc"; cat "$tv/tidy8"; exit 1; }
+grep -q "file://$tv/mida v1.1.0" "$tv/tapp/oxl.mod" || { echo "FAIL tidy8 mida floor"; cat "$tv/tapp/oxl.mod"; exit 1; }
+grep -q "file://$tv/libb v1.2.0" "$tv/tapp/oxl.mod" || { echo "FAIL tidy8 libb floor"; cat "$tv/tapp/oxl.mod"; exit 1; }
+! grep -q raiser2 "$tv/tapp/oxl.mod" || { echo "FAIL tidy8 raiser kept"; cat "$tv/tapp/oxl.mod"; exit 1; }
+( cd "$tv/tapp" && OXLMODCACHE="$tv/cache" "$OXL" build tapp -o "$tv/tbin" ) || { echo "FAIL tidy8 build"; exit 1; }
+[ "$("$tv/tbin")" = "ab=10/3" ] || { echo "FAIL tidy8 run"; "$tv/tbin"; exit 1; }
 ;;
 esac
 
