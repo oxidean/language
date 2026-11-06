@@ -4,7 +4,7 @@ Go-shaped packages, versions, fetching, dead-code elimination, and a
 Go-parity `std/`. Per-item design sketches live in `items/`; this file
 is the order of battle. Milestone-gated, not date-gated.
 
-**Status (2026-11-06): M1 implemented (PR #5); M2–S5 spec'd.**
+**Status (2026-11-06): M1 (PR #5), M2 (PR #6), M3 (PR #7) implemented; V1–S5 spec'd.**
 Review findings folded into the item files — see threads on the PR.
 
 Execution model: Track M is the critical path — every other track
@@ -27,7 +27,7 @@ is the declared package name. Migration commit covers all 86 in-tree
 files + the bootstrap relayout (4 mains can't share a dir under the
 new rule). Everything else in this spec assumes it.
 
-### Task M2: `oxl.mod` + module-aware resolution [not started]
+### Task M2: `oxl.mod` + module-aware resolution [done — PR #6]
 
 `items/m2-module-manifest.md`. Manifest grammar (`module`/`oxl`/
 `require`/`replace`), root discovery by walking up, resolution order
@@ -35,7 +35,7 @@ new rule). Everything else in this spec assumes it.
 diagnostics. v1 resolves `require`d modules via `replace` dirs or the
 cache only — fetching lands in V2.
 
-### Task M3: unused imports = compile error [not started]
+### Task M3: unused imports = compile error [done — PR #7]
 
 `items/m3-unused-imports.md`. Per-file usage, Go wording
 (`imported and not used: "path"`), selective names checked
