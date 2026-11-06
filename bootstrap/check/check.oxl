@@ -5543,6 +5543,7 @@ fn dep_manifest_reqs(text: str) -> own ModEnt {
     // (each [v, err] site emits a fixed C `err` decl — two collide)
     let kwl: own ModEnt = nil
     have_module := 0
+    have_oxl := 0
     bad := 0
     lines := strings.split(text, "\n")
     block := ""
@@ -5575,8 +5576,10 @@ fn dep_manifest_reqs(text: str) -> own ModEnt {
                 have_module = 1
             }
         } else if kw == "oxl" {
-            if n != 2 || ver_tuple(sl_at(toks, 1)) < 0 {
+            if have_oxl == 1 || n != 2 || ver_tuple(sl_at(toks, 1)) < 0 {
                 bad = 1
+            } else {
+                have_oxl = 1
             }
         } else if kw == "require" || kw == "replace" {
             if n == 2 && sl_at(toks, 1) == "(" {
