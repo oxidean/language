@@ -562,6 +562,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
     } else {
         u.body.push_str("void oxl_main(void) { /*GLOBALS*/ o_f_main(); }\n");
     }
+    let main_unit = units.len();
     units.push(u);
 
     // csym -> units defining it; a colliding symbol (say a struct named
@@ -601,6 +602,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
             global_inits.push_str(&u.init);
         }
     }
+    units[main_unit].body = units[main_unit].body.replace("/*GLOBALS*/", &global_inits);
     let mut out = String::from("#include \"rt.h\"\n\n");
     // heads (decls, protos, frame decls, trampolines, vtab rows, closure
     // protos) precede every body; closure + defer-thunk bodies go last
@@ -620,7 +622,7 @@ pub fn generate_mode(c: &Crate, test_mode: bool, susp: &HashSet<String>) -> Stri
             out.push_str(&u.tail);
         }
     }
-    let final_out = out.replace("/*GLOBALS*/", &global_inits);
+    let final_out = out;
     // emitted-C dump hook for size audits — `OXL_EMIT_C=path oxl build x`
     if let Ok(p) = std::env::var("OXL_EMIT_C") {
         let _ = std::fs::write(&p, &final_out);
