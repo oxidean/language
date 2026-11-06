@@ -1,0 +1,7 @@
+package a
+
+import "cyc/b"
+
+fn a() -> int {
+    return b.b()
+}

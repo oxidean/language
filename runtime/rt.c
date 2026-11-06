@@ -2102,6 +2102,54 @@ int64_t rt_htonl(int64_t v) { return htonl((uint32_t)v); }
 
 /* ---------------- file io + process ---------------- */
 
+/* env probe for the module system — "" when unset (matches Rust's
+ * Option env semantics at the call sites that use it) */
+OxlStr rt_getenv(OxlStr name) {
+    char *cp = rt_alloc(name.n + 1);
+    memcpy(cp, name.p, (size_t)name.n);
+    cp[name.n] = 0;
+    const char *v = getenv(cp);
+    return v ? rt_str(v) : rt_str("");
+}
+
+/* file-exists probe — rt_isdir answers dirs; the module loader needs
+ * "is there a FILE here" for oxl.mod discovery */
+int64_t rt_fexists(OxlStr path) {
+    char *cp = rt_alloc(path.n + 1);
+    memcpy(cp, path.p, (size_t)path.n);
+    cp[path.n] = 0;
+    FILE *f = fopen(cp, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+/* absolute canonical path, `/`-separated; "" when the path doesn't
+ * resolve. find_root and the internal-package rule walk/compare real
+ * ancestors, so `.`/relative starts must resolve before the walk */
+OxlStr rt_fullpath(OxlStr path) {
+    char *cp = rt_alloc(path.n + 1);
+    memcpy(cp, path.p, (size_t)path.n);
+    cp[path.n] = 0;
+#ifdef _WIN32
+    char *r = _fullpath(NULL, cp, 0);
+#else
+    char *r = realpath(cp, NULL);
+#endif
+    if (!r) return rt_str("");
+    size_t n = strlen(r);
+    char *out = rt_alloc((int64_t)n + 1);
+#ifdef _WIN32
+    /* canonical paths compare by prefix — emit the oxl separator */
+    for (size_t i = 0; i < n; i++) out[i] = r[i] == '\\' ? '/' : r[i];
+#else
+    memcpy(out, r, n);
+#endif
+    out[n] = 0;
+    free(r);
+    return (OxlStr){ out, (int64_t)n };
+}
+
 OxlStr rt_readfile(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);

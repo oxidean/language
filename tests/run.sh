@@ -373,6 +373,60 @@ for f in tests/diag/*.oxl; do
     fi
 done
 
+echo "== module resolution (m2) =="
+# tests/mod/ holds self-contained module trees; each carries its own
+# oxl.mod so root discovery never escapes into the repo's module.
+# `expected` marks the outcome — `ok` fixtures must build in Rust and
+# print `ok` in the self-hosted checker; error fixtures must be
+# rejected by both checkers with byte-identical diagnostics. The
+# module cache is pointed at an empty dir so `missing module` is
+# deterministic; `tests/mod/widget` and `tests/mod/intmod` are shared
+# replace-targets, not cases.
+mkdir -p "$scratch/oxlmodcache"
+export OXLMODCACHE="$scratch/oxlmodcache"
+for f in tests/mod/*/; do
+    case "$f" in tests/mod/widget/|tests/mod/intmod/) continue ;; esac
+    rust_out=$("$OXL" build "$f" -o "$scratch/modbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //') && rust_rc=0 || rust_rc=1
+    self_out=$("$scratch/selfcheck$EXE" "$f" 2>&1) && self_rc=0 || self_rc=1
+    if [ "$(cat "$f/expected")" = ok ]; then
+        if [ "$rust_rc" != 0 ]; then
+            echo "FAIL module $f: rust checker rejected"; printf '%s\n' "$rust_out"; exit 1
+        fi
+        if [ "$self_rc" != 0 ] || [ "$self_out" != ok ]; then
+            echo "FAIL module $f: self checker rejected"; printf '%s\n' "$self_out"; exit 1
+        fi
+    else
+        if [ "$rust_rc" = 0 ]; then
+            echo "FAIL module $f: rust checker accepted"; exit 1
+        fi
+        if [ "$self_rc" = 0 ]; then
+            echo "FAIL module $f: self checker accepted"; exit 1
+        fi
+        if [ "$rust_out" != "$self_out" ]; then
+            echo "FAIL module parity $f"
+            echo "-- rust --"; printf '%s\n' "$rust_out"
+            echo "-- self --"; printf '%s\n' "$self_out"
+            exit 1
+        fi
+        if [ -z "$rust_out" ]; then
+            echo "FAIL module corpus $f: no diagnostics from either checker"; exit 1
+        fi
+    fi
+done
+# module-off: a tree with no oxl.mod ancestor resolves std only —
+# the local import must fail identically on both checkers.
+mkdir -p "$scratch/modoff"
+printf 'package main\n\nimport "localpkg"\n\nfn main() {}\n' > "$scratch/modoff/main.oxl"
+rust_out=$("$OXL" build "$scratch/modoff" -o "$scratch/modbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //') && rust_rc=0 || rust_rc=1
+self_out=$("$scratch/selfcheck$EXE" "$scratch/modoff" 2>&1) && self_rc=0 || self_rc=1
+if [ "$rust_rc" = 0 ] || [ "$self_rc" = 0 ] || [ "$rust_out" != "$self_out" ]; then
+    echo "FAIL module-off parity"
+    echo "-- rust --"; printf '%s\n' "$rust_out"
+    echo "-- self --"; printf '%s\n' "$self_out"
+    exit 1
+fi
+unset OXLMODCACHE
+
 echo "== bootstrap codegen =="
 # the self-hosted C emitter must produce working binaries — every
 # example plus representative tests, run-and-compared end to end

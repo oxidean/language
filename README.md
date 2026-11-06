@@ -100,6 +100,39 @@ call site; `import "std/strings"` modules with `as` aliases and
 `writefile`, `exit`, `mkshared`/`sget`/`sset`/`scas`/`sadd`,
 `now`/`now_ms`/`usleep`, sqlite3 shims, `assert`.
 
+## Modules
+
+Packages are directories of `.oxl` files that share a `package` clause;
+`package main` marks an executable. A project opts into module mode by
+placing an `oxl.mod` manifest at its root:
+
+```
+module github.com/me/app
+
+oxl 0.3
+
+require github.com/oxidean/widget v1.4.2
+replace github.com/oxidean/widget => ../widget
+```
+
+Directives: `module` (this module's path), `oxl` (minimum toolchain
+version), `require` (a dependency at a version, also in a parenthesized
+block), and `replace` (pin a dependency to a local directory). The
+toolchain walks up from the entry file to the nearest `oxl.mod`;
+without one, only `std/` imports resolve.
+
+Import resolution order:
+
+1. `std/...` — the toolchain's shipped standard library
+2. this module's path — resolved under the manifest's directory
+3. required modules — longest path wins; `replace` directories first,
+   then the module cache (`$OXLMODCACHE` or `~/.oxl/mod`)
+4. anything else — `cannot find package`
+
+Packages under `internal/` may only be imported by code beneath the
+`internal` directory's parent. Import cycles are a compile error and
+print the cycle chain.
+
 ## Examples
 
 | Path | What it proves |
@@ -112,10 +145,10 @@ call site; `import "std/strings"` modules with `as` aliases and
 | `tests/stdlib_test.oxl` | stdlib + break/continue coverage |
 | `tests/stdmods_test.oxl` | `std/json`, `std/sync`, `std/time` end-to-end |
 | `examples/gui-todo/` | GTK todo app over `extern fn` FFI (see `docs/gui-pilot.md`) |
-| `bootstrap/lexer.oxl` | **self-host**: the language's lexer written in the language |
-| `bootstrap/parser.oxl` | **self-host**: the language's parser written in the language — parses itself, zero skips |
-| `bootstrap/check.oxl` | **self-host**: the typechecker written in the language — checks itself clean |
-| `bootstrap/codegen.oxl` | **self-host**: the C emitter written in the language — compiles itself to byte-identical C |
+| `bootstrap/cmd/lex` | **self-host**: the language's lexer written in the language |
+| `bootstrap/parser/` | **self-host**: the language's parser written in the language — parses itself, zero skips |
+| `bootstrap/check/` | **self-host**: the typechecker written in the language — checks itself clean |
+| `bootstrap/cmd/codegen` | **self-host**: the C emitter written in the language — compiles itself to byte-identical C |
 
 Try it:
 
@@ -131,8 +164,9 @@ curl localhost:8080/items                      # → {"items":[{"id":1,"name":"w
 oxl/          the compiler (Rust): lexer → parser → check → codegen → C → cc
 runtime/       rt.c/rt.h — arenas, ObjHdr checks, scopes/traps, executor, channels
 docs/          design doc, semantics annex, prototype report
-stdlib/        the standard library, written in the language (strings, testing, http, json, sync, time, os)
-bootstrap/     self-host components — lexer, parser, checker, codegen (docs/self-hosting.md)
+std/           the standard library, written in the language (strings, testing, http, json, sync, time, os, collections)
+bootstrap/     self-host components — lexlib, parser, check libraries + cmd/ drivers (docs/self-hosting.md)
+oxl.mod        this repo's module manifest (`module oxl`)
 examples/      pilot programs (see above)
 tests/         tests/run.sh end-to-end suite + tests/diag/ checker-diagnostic corpus (runs in CI)
 scripts/       commit-check.sh — commit grammar + no-AI-attribution gate

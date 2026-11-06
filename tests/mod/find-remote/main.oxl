@@ -1,0 +1,5 @@
+package main
+
+import "github.com/other/nope/pkg"
+
+fn main() {}

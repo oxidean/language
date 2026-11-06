@@ -239,7 +239,7 @@ pub struct Checker<'a> {
     enums: HashMap<String, Vec<(String, Vec<(String, Ty)>)>>,
     ifaces: HashMap<String, IfaceDef>,
     /// qualified `T.m` names of method fns — for the susp-method ban
-    method_spans: HashMap<String, Span>,
+    method_spans: HashMap<String, (Span, String)>,
     cur_ret: Ret,
     calls: HashMap<String, HashSet<String>>, // caller -> callee fn names
     cur_fn: String,
@@ -251,9 +251,9 @@ pub struct Checker<'a> {
     globals: HashMap<String, Ty>,
     // B4 deferred checks — susp isn't known until bodies are checked:
     /// named fns taken as values — validated against `suspend` post-pass
-    fnval_uses: Vec<(String, Span)>,
+    fnval_uses: Vec<(String, Span, String)>,
     /// (span, callee idents inside closure, has structural susp seed)
-    closure_checks: Vec<(Span, HashSet<String>, bool)>,
+    closure_checks: Vec<(Span, HashSet<String>, bool, String)>,
     /// Some(inferred) while checking a closure body — `return` feeds it
     closure_ret: Option<Option<Ty>>,
 }
@@ -301,24 +301,33 @@ pub fn check(c: &Crate, files: &[String], diags: &mut Diags) -> Checked {
         index: std::mem::take(&mut ck.index),
     };
     // B4 deferred: susp set only exists once call edges are collected
-    for (n, sp) in &ck.fnval_uses {
+    for (n, sp, f) in &ck.fnval_uses {
         if checked.suspend.contains(n) {
-            ck.diags.push(Diag::err(*sp, "type",
-                format!("suspendable fn `{n}` can't be a value (v0.2)")));
+            ck.diags.push(Diag {
+                file: f.clone(),
+                ..Diag::err(*sp, "type",
+                    format!("suspendable fn `{n}` can't be a value (v0.2)"))
+            });
         }
     }
-    for (sp, callees, seeded) in &ck.closure_checks {
+    for (sp, callees, seeded, f) in &ck.closure_checks {
         if *seeded || callees.iter().any(|n| checked.suspend.contains(n)) {
-            ck.diags.push(Diag::err(*sp, "type",
-                "closures may not suspend — spawn/scope/select/recv/send/sleep inside `{ |..| }`".to_string()));
+            ck.diags.push(Diag {
+                file: f.clone(),
+                ..Diag::err(*sp, "type",
+                    "closures may not suspend — spawn/scope/select/recv/send/sleep inside `{ |..| }`".to_string())
+            });
         }
     }
     // D3: methods can't suspend — vtable/indirect calls don't carry a
     // task frame. Checked post-hoc since `suspend` needs all bodies.
-    for (m, sp) in &ck.method_spans {
+    for (m, (sp, f)) in &ck.method_spans {
         if checked.suspend.contains(m) {
-            ck.diags.push(Diag::err(*sp, "check",
-                format!("suspendable method `{m}` — methods may not suspend (v0.2)")));
+            ck.diags.push(Diag {
+                file: f.clone(),
+                ..Diag::err(*sp, "check",
+                    format!("suspendable method `{m}` — methods may not suspend (v0.2)"))
+            });
         }
     }
     ck.check_suspend_rules(c, &checked.suspend);
@@ -399,6 +408,7 @@ impl<'a> Checker<'a> {
         // resolve (recursive payloads like `own Expr` inside `Expr`)
         for (i, it) in c.items.iter().enumerate() {
             self.cur_file = self.item_file(i);
+            self.diags.pending = self.cur_file.clone();
             if let Item::Struct(s) = it {
                 self.structs.insert(s.name.clone(), Vec::new());
             }
@@ -439,6 +449,7 @@ impl<'a> Checker<'a> {
         }
         for (i, it) in c.items.iter().enumerate() {
             self.cur_file = self.item_file(i);
+            self.diags.pending = self.cur_file.clone();
             if let Item::Enum(e) = it {
                 let mut seen = HashSet::new();
                 let mut variants = Vec::new();
@@ -500,6 +511,7 @@ impl<'a> Checker<'a> {
         }
         for (i, it) in c.items.iter().enumerate() {
             self.cur_file = self.item_file(i);
+            self.diags.pending = self.cur_file.clone();
             match it {
                 Item::Fn(f) | Item::Extern(f) => {
                     self.ty_scope = f.ty_params.iter().map(|(t, _)| t.clone()).collect();
@@ -518,7 +530,7 @@ impl<'a> Checker<'a> {
                             self.diags.push(Diag::err(r.span, "check",
                                 "method receiver must be a declared struct/enum type (optionally behind own/ref/mut)"));
                         }
-                        self.method_spans.insert(f.name.clone(), r.span);
+                        self.method_spans.insert(f.name.clone(), (r.span, self.cur_file.clone()));
                         params.push(rt);
                     }
                     params.extend(f.params.iter().map(|p| self.resolve(&p.ty)));
@@ -614,6 +626,7 @@ impl<'a> Checker<'a> {
     fn check_items(&mut self, c: &Crate) {
         for (i, it) in c.items.iter().enumerate() {
             self.cur_file = self.item_file(i);
+            self.diags.pending = self.cur_file.clone();
             if let Item::Fn(f) = it {
                 self.cur_fn = f.name.clone();
                 let sig = self.fns[&f.name].clone();
@@ -1318,7 +1331,7 @@ impl<'a> Checker<'a> {
                             self.diags.push(Diag::err(e.span, "check",
                                 format!("`{n}` returns `[T, err]` — pair returns can't be fn values (v0.2)")));
                         } else {
-                            self.fnval_uses.push((n.clone(), e.span));
+                            self.fnval_uses.push((n.clone(), e.span, self.cur_file.clone()));
                             let r = match &sig.ret { Ret::One(t) => t.clone(), _ => Ty::Void };
                             return Ty::Fn(sig.params.clone(), Box::new(r));
                         }
@@ -1360,7 +1373,7 @@ impl<'a> Checker<'a> {
                             format!("closure captures `{n}` (`{}`) — borrowed refs may not be stored in heap objects (v0)", t.name())));
                     }
                 }
-                self.closure_checks.push((e.span, scan.callees, scan.seeded));
+                self.closure_checks.push((e.span, scan.callees, scan.seeded, self.cur_file.clone()));
                 let saved = std::mem::replace(&mut self.closure_ret, Some(None));
                 env.push();
                 for (p, t) in params.iter().zip(ptys.iter()) {
@@ -2601,7 +2614,9 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        for it in &c.items {
+        for (i, it) in c.items.iter().enumerate() {
+            self.cur_file = self.item_file(i);
+            self.diags.pending = self.cur_file.clone();
             match it {
                 Item::Fn(f) => {
                     if let Some(b) = &f.body {

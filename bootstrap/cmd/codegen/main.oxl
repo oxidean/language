@@ -10,7 +10,7 @@ package main
 //
 // Full surface: methods + interfaces emit as RtIface/vtab pairs and
 // generic fns mono-instantiate per call binding (Rust insts).
-import "bootstrap/check"
+import "oxl/bootstrap/check"
 
 import "std/collections"
 
