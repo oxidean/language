@@ -646,16 +646,16 @@ fn recv_base(t: &ast::TyRef) -> Option<String> {
     }
 }
 
-/// parse one package file — the `over` buffer substitutes its path so the
+/// parse one package file — `over` buffers substitute their paths so the
 /// LSP analyzes unsaved text. Returns (clause, items); on a parse failure
 /// with loud set the diags have already been reported.
 fn parse_pkg_file(
     path: &Path,
-    over: Option<(&Path, &str)>,
+    over: &[(&Path, &str)],
     loud: bool,
 ) -> Option<(String, Vec<ast::Item>)> {
-    let src = match over {
-        Some((p, s)) if p == path => s.to_string(),
+    let src = match over.iter().find(|(p, _)| *p == path) {
+        Some((_, s)) => s.to_string(),
         _ => match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
@@ -705,7 +705,7 @@ fn load_pkg(
     loading: &mut Vec<(PathBuf, String)>,
     ctx: Option<&ModCtx>,
     entry: &Path,
-    over: Option<(&Path, &str)>,
+    over: &[(&Path, &str)],
     loud: bool,
 ) -> Option<(ast::Crate, Vec<PathBuf>)> {
     // dir packages: canonical key drives both finished-load dedup
@@ -753,7 +753,7 @@ fn load_pkg_inner(
     loading: &mut Vec<(PathBuf, String)>,
     ctx: Option<&ModCtx>,
     entry: &Path,
-    over: Option<(&Path, &str)>,
+    over: &[(&Path, &str)],
     loud: bool,
 ) -> Option<(ast::Crate, Vec<PathBuf>)> {
     let (dir_disp, files): (String, Vec<PathBuf>) = match src {
@@ -989,7 +989,7 @@ fn load_crate(src: &PkgSrc) -> Option<(ast::Crate, Vec<PathBuf>)> {
         &mut loading,
         ctx.as_ref(),
         &entry,
-        None,
+        &[],
         true,
     )
 }
@@ -1486,7 +1486,11 @@ struct Analysis {
     index: check::Index,
 }
 
-fn analyze(path: &Path, src: &str) -> Analysis {
+fn analyze(
+    path: &Path,
+    src: &str,
+    open: &std::collections::HashMap<String, String>,
+) -> Analysis {
     // diagnostic pass: lex+parse the buffer so its parse errors surface
     // (load_pkg re-parses silently for the merged crate)
     let mut diags = diag::Diags::new(path.to_string_lossy(), src);
@@ -1507,6 +1511,12 @@ fn analyze(path: &Path, src: &str) -> Analysis {
     } else {
         PkgSrc::Files(vec![path.to_path_buf()])
     };
+    // every open buffer is authoritative over its path — an unsaved
+    // sibling's decls must resolve, not just the analyzed doc's
+    let over: Vec<(&Path, &str)> = open
+        .iter()
+        .map(|(p, t)| (Path::new(p.as_str()), t.as_str()))
+        .collect();
     let loaded = load_pkg(
         &src_pkg,
         &dir.to_string_lossy(),
@@ -1517,7 +1527,7 @@ fn analyze(path: &Path, src: &str) -> Analysis {
         &mut loading,
         ctx.as_ref(),
         dir,
-        Some((path, src)),
+        &over,
         false,
     );
     let (krate, item_files) = loaded.unwrap_or_else(|| {
@@ -1530,19 +1540,17 @@ fn analyze(path: &Path, src: &str) -> Analysis {
             eprintln!("USE {} {:?} -> {} {:?} `{}`", u.file, u.span, u.def_file, u.def_span, u.sig);
         }
     }
-    // every diag maps against ITS file's text: the open buffer for
-    // `path`, disk contents for siblings
-    let open = path.to_string_lossy().to_string();
-    let mut srcs: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    srcs.insert(open.clone(), src.to_string());
+    // every diag maps against ITS file's text: the open buffers where
+    // they exist, disk contents for closed files
+    let doc = path.to_string_lossy().to_string();
+    let mut srcs: std::collections::HashMap<String, String> = open.clone();
     Analysis {
         diags: diags
             .list
             .iter()
             .map(|d| {
                 // LSP columns are UTF-16 units; publish_diags wants 1-based
-                let f = if d.file.is_empty() { open.clone() } else { d.file.clone() };
+                let f = if d.file.is_empty() { doc.clone() } else { d.file.clone() };
                 let text = srcs
                     .entry(f.clone())
                     .or_insert_with(|| std::fs::read_to_string(&f).unwrap_or_default());
@@ -1762,9 +1770,17 @@ fn cmd_lsp() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut r = std::io::BufReader::new(stdin.lock());
-    // per-doc state: the buffer text and the analysis built from it
-    let mut docs: std::collections::HashMap<String, (String, Analysis)> =
+    // per-doc state is just the buffer text; each analysis run covers
+    // the whole package, so one latest index per package dir is the
+    // freshest source for every file in it
+    let mut docs: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut analyses: std::collections::HashMap<String, Analysis> =
+        std::collections::HashMap::new();
+    // URIs that hold published diagnostics — a file whose list clears
+    // still needs an explicit empty publish or the client shows stale
+    let mut published: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     loop {
         // read headers
         let mut len = 0usize;
@@ -1797,7 +1813,18 @@ fn cmd_lsp() {
         if method == "textDocument/didOpen" || method == "textDocument/didChange" {
             if let (Some(uri), Some(text)) = (json_str(&body, "uri"), json_str(&body, "text")) {
                 let p = uri_to_path(&uri);
-                let a = analyze(Path::new(&p), &text);
+                // every open buffer overrides its disk copy — a sibling's
+                // unsaved edits must resolve in this analysis too
+                let mut open: std::collections::HashMap<String, String> = docs
+                    .iter()
+                    .map(|(u, t)| (uri_to_path(u), t.clone()))
+                    .collect();
+                open.insert(p.clone(), text.clone());
+                let a = analyze(Path::new(&p), &text, &open);
+                let dir_key = Path::new(&p)
+                    .parent()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .unwrap_or_else(|| ".".to_string());
                 let mut order: Vec<String> = Vec::new();
                 let mut by_file: std::collections::HashMap<String, Vec<(usize, usize, String)>> =
                     Default::default();
@@ -1812,19 +1839,34 @@ fn cmd_lsp() {
                 // a client reading one response per didOpen must get it
                 let mut ordered = vec![p.clone()];
                 ordered.extend(order.iter().filter(|f| **f != p).cloned());
+                let mut current: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for f in ordered {
                     // the open doc reuses the client's URI verbatim; a
                     // sibling publishes under its own
                     let u = if f == p { uri.clone() } else { path_to_uri(&f) };
-                    publish_diags(&mut stdout, &u, by_file.get(&f).map(Vec::as_slice).unwrap_or(&[]));
+                    let list = by_file.get(&f).map(Vec::as_slice).unwrap_or(&[]);
+                    publish_diags(&mut stdout, &u, list);
+                    if !list.is_empty() {
+                        current.insert(u);
+                    }
                 }
-                docs.insert(uri, (text, a));
+                // a file whose last diagnostic cleared still needs an
+                // explicit empty publish — the client keeps the old one
+                // otherwise
+                for u in published.difference(&current).cloned().collect::<Vec<_>>() {
+                    publish_diags(&mut stdout, &u, &[]);
+                }
+                published = current;
+                docs.insert(uri, text);
+                analyses.insert(dir_key, a);
             }
             continue;
         }
         if method == "textDocument/didClose" {
             if let Some(uri) = json_str(&body, "uri") {
                 docs.remove(&uri);
+                published.remove(&uri);
             }
             continue;
         }
@@ -1843,8 +1885,14 @@ fn cmd_lsp() {
             );
             let def = method == "textDocument/definition";
             let file = uri_to_path(&uri);
-            let hit = docs.get(&uri).and_then(|(src, a)| {
-                index_at(a, &file, lsp_offset(src, line, col))
+            let dir_key = Path::new(&file)
+                .parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            let hit = docs.get(&uri).and_then(|src| {
+                analyses
+                    .get(&dir_key)
+                    .and_then(|a| index_at(a, &file, lsp_offset(src, line, col)))
             });
             match (hit, def) {
                 (Some(u), false) => format!(
@@ -1855,9 +1903,10 @@ json_escape(&u.sig)
                     // def spans index into their own file's source — the
                     // open doc uses its buffer, imports read from disk
                     let src = docs
-                        .get(&uri)
-                        .map(|(s, _)| s.clone())
-                        .filter(|_| u.def_file == file)
+                        .iter()
+                        .find_map(|(du, t)| {
+                            (uri_to_path(du) == u.def_file).then(|| t.clone())
+                        })
                         .or_else(|| std::fs::read_to_string(&u.def_file).ok())
                         .unwrap_or_default();
                     let (l0, c0) = lsp_line_col(&src, u.def_span.lo);
