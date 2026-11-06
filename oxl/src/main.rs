@@ -1782,10 +1782,14 @@ fn cmd_lsp() {
         std::collections::HashMap::new();
     let mut analyses: std::collections::HashMap<String, Analysis> =
         std::collections::HashMap::new();
-    // URIs that hold published diagnostics — a file whose list clears
-    // still needs an explicit empty publish or the client shows stale
-    let mut published: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    // URIs that hold published diagnostics, per analysis scope — a
+    // file whose list clears still needs an explicit empty publish or
+    // the client shows stale, and scoping keeps one package's analysis
+    // from wiping another's
+    let mut published: std::collections::HashMap<
+        String,
+        std::collections::HashSet<String>,
+    > = std::collections::HashMap::new();
     loop {
         // read headers
         let mut len = 0usize;
@@ -1861,8 +1865,11 @@ fn cmd_lsp() {
                 }
                 // a file whose last diagnostic cleared still needs an
                 // explicit empty publish — the client keeps the old one
-                // otherwise; skip URIs already published in this round
-                for u in published
+                // otherwise. only URIs this scope published before are
+                // cleared: diagnostics other packages own stay valid.
+                // skip URIs already published in this round
+                let prev = published.get(&dir_key).cloned().unwrap_or_default();
+                for u in prev
                     .difference(&current)
                     .filter(|u| !sent.contains(*u))
                     .cloned()
@@ -1870,7 +1877,7 @@ fn cmd_lsp() {
                 {
                     publish_diags(&mut stdout, &u, &[]);
                 }
-                published = current;
+                published.insert(dir_key.clone(), current);
                 docs.insert(uri, text);
                 analyses.insert(dir_key, a);
             }
@@ -1879,7 +1886,9 @@ fn cmd_lsp() {
         if method == "textDocument/didClose" {
             if let Some(uri) = json_str(&body, "uri") {
                 docs.remove(&uri);
-                published.remove(&uri);
+                for set in published.values_mut() {
+                    set.remove(&uri);
+                }
             }
             continue;
         }
