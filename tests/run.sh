@@ -469,15 +469,28 @@ echo "== a1 coroutine scale =="
 # CRT/winsock/heap before main runs vs ~2 MB on POSIX).
 "$OXL" build tests/conc_scale.oxl -o "$scratch/conc_scale$EXE" || {
     echo "FAIL conc_scale: compile failed"; exit 1; }
-"$scratch/conc_scale$EXE" 0 0 2500 > /dev/null 2>&1 &
+"$scratch/conc_scale$EXE" 0 0 2500 > "$scratch/base.out" 2>&1 &
 base_pid=$!
 base_rss=0
-while kill -0 $base_pid 2>/dev/null; do
-    r=$(rss_kb $base_pid || true)
-    [ -n "$r" ] && [ "$r" -gt "$base_rss" ] && base_rss=$r
-    sleep 0.2
+# sample before the liveness gate: a just-spawned native child can lag
+# the git-bash process table on Windows, so a leading kill -0 can skip
+# the whole window and leave base_rss empty on a healthy run
+for try in 1 2; do
+    while :; do
+        r=$(rss_kb $base_pid || true)
+        [ -n "$r" ] && [ "$r" -gt "$base_rss" ] && base_rss=$r
+        kill -0 $base_pid 2>/dev/null || break
+        sleep 0.2
+    done
+    wait $base_pid 2>/dev/null || true
+    # retry only the observed flake: the run completed (printed done)
+    # yet yielded no sample — a spawn-registration race, not a crash
+    if [ "$base_rss" -gt 0 ] || [ "$(tail -1 "$scratch/base.out")" != "done" ]; then
+        break
+    fi
+    "$scratch/conc_scale$EXE" 0 0 2500 > "$scratch/base.out" 2>&1 &
+    base_pid=$!
 done
-wait $base_pid 2>/dev/null || true
 "$scratch/conc_scale$EXE" 10000 1 2500 > "$scratch/scale.out" 2>&1 &
 scale_pid=$!
 # watchdog: a wedged channel/task regression must not hang the whole
@@ -491,9 +504,10 @@ scale_dog=$!
 # ps makes the substitution nonzero and `set -e` would abort the suite
 # before `wait` can report the real result; `|| true` pins it.
 rss=0
-while kill -0 $scale_pid 2>/dev/null; do
+while :; do
     r=$(rss_kb $scale_pid || true)
     [ -n "$r" ] && [ "$r" -gt "$rss" ] && rss=$r
+    kill -0 $scale_pid 2>/dev/null || break
     sleep 0.2
 done
 kill "$scale_dog" 2>/dev/null || true
@@ -503,7 +517,8 @@ wait $scale_pid || scale_rc=$?
 [ "$scale_rc" -eq 0 ] && [ "$(tail -1 "$scratch/scale.out")" = "done" ] || {
     echo "FAIL scale: rc=$scale_rc: $(cat "$scratch/scale.out")"; exit 1; }
 [ -n "$rss" ] && [ "$rss" -gt 0 ] || { echo "FAIL scale: no RSS sample"; exit 1; }
-[ -n "$base_rss" ] && [ "$base_rss" -gt 0 ] || { echo "FAIL scale: no baseline RSS sample"; exit 1; }
+[ -n "$base_rss" ] && [ "$base_rss" -gt 0 ] || {
+    echo "FAIL scale: no baseline RSS sample"; cat "$scratch/base.out"; exit 1; }
 # ~0.3kB/parked task observed on POSIX (RtTask + frame, one alloc);
 # 1kB/task leaves >3x headroom for Windows heap commit granularity
 # yet still fails an order of magnitude under any OS-thread-per-task
