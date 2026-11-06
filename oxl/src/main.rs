@@ -901,6 +901,10 @@ fn load_pkg_inner(
         // targets) in source order for the report
         let mut used = Used::default();
         let mut binds: Vec<(String, String, Vec<String>)> = Vec::new();
+        // every local name an import introduces — a second binding of
+        // the same name is an error (Go: redeclared in this block)
+        let mut bound_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         // pass 1: resolve this file's imports first so its decls see the
         // bindings regardless of source order
         for it in &fitems {
@@ -931,16 +935,34 @@ fn load_pkg_inner(
                                 // package loads, nothing binds, exempt (M3)
                                 if !bound.is_empty() && i.alias.as_deref() != Some("_") {
                                     let qual = i.alias.clone().unwrap_or_else(|| bound.clone());
-                                    aliases.insert(qual.clone(), bound.clone());
-                                    let sels: Vec<String> = i
-                                        .selective
-                                        .iter()
-                                        .map(|s| format!("{bound}.{s}"))
-                                        .collect();
-                                    for s in &i.selective {
-                                        renames.insert(s.clone(), format!("{bound}.{s}"));
+                                    if !bound_names.insert(qual.clone()) {
+                                        if loud {
+                                            eprintln!(
+                                                "error [check] `{qual}` redeclared as imported package name"
+                                            );
+                                            return None;
+                                        }
+                                    } else {
+                                        aliases.insert(qual.clone(), bound.clone());
+                                        let sels: Vec<String> = i
+                                            .selective
+                                            .iter()
+                                            .map(|s| format!("{bound}.{s}"))
+                                            .collect();
+                                        for s in &i.selective {
+                                            if !bound_names.insert(s.clone()) {
+                                                if loud {
+                                                    eprintln!(
+                                                        "error [check] `{s}` redeclared as imported name"
+                                                    );
+                                                    return None;
+                                                }
+                                                continue;
+                                            }
+                                            renames.insert(s.clone(), format!("{bound}.{s}"));
+                                        }
+                                        binds.push((i.path.clone(), qual, sels));
                                     }
-                                    binds.push((i.path.clone(), qual, sels));
                                 }
                                 items.extend(sub.items);
                                 item_files.extend(sub_files);

@@ -1,0 +1,7 @@
+package main
+
+import "std/strings".{split}
+
+import "std/json".{split}
+
+fn main() {}

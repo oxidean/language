@@ -1665,6 +1665,17 @@ fn file_alias_idx(ck: ref Ck, file: str) -> int {
     return -1
 }
 
+// does a ModEnt list already bind local name `a`
+fn modent_has(l: ref ModEnt, a: str) -> int {
+    for l != nil {
+        if l.alias == a {
+            return 1
+        }
+        l = l.next
+    }
+    return 0
+}
+
 // qualifier -> stem for the current file's aliases ("" when unaliased)
 fn alias_stem(ck: ref Ck, q: str) -> str {
     fi := file_alias_idx(ck, ck.cur_file)
@@ -5473,22 +5484,32 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
                                 qual := bound
                                 if len(alias) > 0 {
                                     qual = alias
-                                    al = new(ModEnt{alias: alias, stem: bound, next: al})
-                                } else {
-                                    al = new(ModEnt{alias: bound, stem: bound, next: al})
                                 }
-                                binds = new(ImpBind{path: path, qual: qual, tgt: "", used: 0, next: binds})
-                                nl := names
-                                for nl != nil {
-                                    match nl.v {
-                                        parser.Node.Name(n) => {
-                                            nm = new(ModEnt{alias: n, stem: bound + "." + n, next: nm})
-                                            binds = new(ImpBind{path: path, qual: "", tgt: bound + "." + n, used: 0, next: binds})
+                                // a second binding of the same local name is
+                                // an error (Go: redeclared in this block)
+                                if modent_has(al, qual) == 1 || modent_has(nm, qual) == 1 {
+                                    diag(ck, "check", "`" + qual + "` redeclared as imported package name")
+                                    ck.load_fail = 1
+                                } else {
+                                    al = new(ModEnt{alias: qual, stem: bound, next: al})
+                                    binds = new(ImpBind{path: path, qual: qual, tgt: "", used: 0, next: binds})
+                                    nl := names
+                                    for nl != nil {
+                                        match nl.v {
+                                            parser.Node.Name(n) => {
+                                                if modent_has(al, n) == 1 || modent_has(nm, n) == 1 {
+                                                    diag(ck, "check", "`" + n + "` redeclared as imported name")
+                                                    ck.load_fail = 1
+                                                    break
+                                                }
+                                                nm = new(ModEnt{alias: n, stem: bound + "." + n, next: nm})
+                                                binds = new(ImpBind{path: path, qual: "", tgt: bound + "." + n, used: 0, next: binds})
+                                            }
+                                            _ => {
+                                            }
                                         }
-                                        _ => {
-                                        }
+                                        nl = nl.next
                                     }
-                                    nl = nl.next
                                 }
                             }
                         }
