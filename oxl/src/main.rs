@@ -364,13 +364,15 @@ fn parse_pkg_file(
     Some((krate.pkg, krate.items))
 }
 
-/// last path component, string-level — identical rule on the .oxl side
-/// (trailing slashes ignored); used for the dir-name/package-name check
+/// last path component — Path::file_name so the dir-name/package-name
+/// check survives native separators (`tests\d5a` on Windows; trailing
+/// separators normalize away). Import paths are always `/`-joined, so
+/// this only ever sees filesystem paths.
 fn path_base(p: &str) -> String {
-    p.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or(p)
+    Path::new(p)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
         .to_string()
 }
 
