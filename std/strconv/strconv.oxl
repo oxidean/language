@@ -1,0 +1,128 @@
+package strconv
+
+// std/strconv — string<->number conversions with real error returns.
+// The lenient builtins (atoi/atof stop at the first bad char) sit under
+// validating wrappers; [v, err] everywhere Go has one.
+import "std/errors"
+
+fn synerr(fnname: str, s: str) -> err {
+    return errors.new("strconv." + fnname + ": parsing \"" + s + "\": invalid syntax")
+}
+
+/// atoi parses base-10 signed ints; [value, err].
+fn atoi(s: str) -> [int, err] {
+    return parseint(s, 10)
+}
+
+// the `itoa` builtin is reachable by extern — a same-named package fn
+// would shadow it into infinite recursion
+extern fn rt_itoa(v: int) -> str
+
+/// itoa formats a base-10 int (wraps the builtin).
+fn itoa(v: int) -> str {
+    return rt_itoa(v)
+}
+
+/// parseint parses s in base 2..36; digits then letters. [value, err].
+/// Overflow wraps int64 (v1 bound — Go would report ErrRange).
+fn parseint(s: str, base: int) -> [int, err] {
+    if base < 2 || base > 36 {
+        return 0, errors.new("strconv.parseint: base " + itoa(base) + " out of range")
+    }
+    if len(s) == 0 {
+        return 0, synerr("parseint", s)
+    }
+    i := 0
+    neg := false
+    if byteat(s, 0) == 45 {
+        neg = true
+        i = 1
+    }
+    if byteat(s, 0) == 43 {
+        i = 1
+    }
+    if i >= len(s) {
+        return 0, synerr("parseint", s)
+    }
+    v := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        d := -1
+        if c >= 48 && c <= 57 {
+            d = c - 48
+        }
+        if c >= 97 && c <= 122 {
+            d = c - 87
+        }
+        if c >= 65 && c <= 90 {
+            d = c - 55
+        }
+        if d < 0 || d >= base {
+            return 0, synerr("parseint", s)
+        }
+        v = v * base + d
+        i = i + 1
+    }
+    if neg {
+        v = -v
+    }
+    return v, nil
+}
+
+/// parsefloat parses a decimal float via the atof builtin after a
+/// syntax pass; [value, err]. Exponent + sign accepted.
+fn parsefloat(s: str) -> [float, err] {
+    if len(s) == 0 {
+        return 0.0, synerr("parsefloat", s)
+    }
+    i := 0
+    if byteat(s, 0) == 45 || byteat(s, 0) == 43 {
+        i = 1
+    }
+    mant := 0
+    dots := 0
+    for i < len(s) {
+        c := byteat(s, i)
+        if c >= 48 && c <= 57 {
+            mant = mant + 1
+            i = i + 1
+            continue
+        }
+        if c == 46 && dots == 0 {
+            dots = 1
+            i = i + 1
+            continue
+        }
+        break
+    }
+    if mant == 0 {
+        return 0.0, synerr("parsefloat", s)
+    }
+    if i < len(s) && (byteat(s, i) == 101 || byteat(s, i) == 69) {
+        i = i + 1
+        if i < len(s) && (byteat(s, i) == 45 || byteat(s, i) == 43) {
+            i = i + 1
+        }
+        exd := 0
+        for i < len(s) && is_dig(byteat(s, i)) {
+            exd = exd + 1
+            i = i + 1
+        }
+        if exd == 0 {
+            return 0.0, synerr("parsefloat", s)
+        }
+    }
+    if i < len(s) {
+        return 0.0, synerr("parsefloat", s)
+    }
+    return atof(s), nil
+}
+
+fn is_dig(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+/// formatfloat formats a float (wraps ftoa).
+fn formatfloat(f: float) -> str {
+    return ftoa(f)
+}

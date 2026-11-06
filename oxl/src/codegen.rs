@@ -757,6 +757,7 @@ impl<'a> Gen<'a> {
         match &t.kind {
             TyKind::Named(n) => match n.as_str() {
                 "int" => Ty::Int,
+                "byte" => Ty::Byte,
                 "float" => Ty::Float,
                 "bool" => Ty::Bool,
                 "str" => Ty::Str,
@@ -793,6 +794,7 @@ impl<'a> Gen<'a> {
     fn cty(&self, t: &Ty) -> String {
         match t {
             Ty::Int | Ty::Err => "int64_t".into(),
+            Ty::Byte => "uint8_t".into(),
             Ty::Float => "double".into(),
             Ty::Bool => "int".into(),
             Ty::Str => "OxlStr".into(),
@@ -1192,7 +1194,8 @@ impl<'a> Gen<'a> {
             }
             ExprKind::As { ty, .. } => match &ty.kind {
                 TyKind::Named(n) if self.enum_variant(n).is_some() => Ty::Struct(n.clone()),
-                _ => Ty::Unknown,
+                // conversion casts take the declared target type
+                _ => self.ty_of_ref(ty),
             },
             ExprKind::Match { e: scrut, arms } => {
                 let st = self.expr_ty(scrut);
@@ -1719,6 +1722,28 @@ impl<'a> Gen<'a> {
                 format!("(struct o_s_{}){{ {init} }}", cname(&name))
             }
             ExprKind::As { e: inner, ty } => {
+                // `as` conversions — str<->[]byte and int<->byte ride the
+                // same operator as enum extraction (checker admits the
+                // pairs; each is a bounded emit)
+                let ot = self.expr_ty(inner);
+                let (deref, base) = match &ot {
+                    Ty::Own(b) => (true, (**b).clone()),
+                    t => (false, t.clone()),
+                };
+                let iv = self.expr(inner);
+                let iv = if deref { format!("(*{iv})") } else { iv };
+                let wt = self.ty_of_ref(ty);
+                match (&base, &wt) {
+                    (Ty::Str, Ty::Slice(el)) if **el == Ty::Byte => {
+                        return format!("rt_bytes_str({iv})");
+                    }
+                    (Ty::Slice(el), Ty::Str) if **el == Ty::Byte => {
+                        return format!("rt_str_bytes({iv})");
+                    }
+                    (Ty::Int, Ty::Byte) => return format!("((uint8_t)({iv}))"),
+                    (Ty::Byte, Ty::Int) => return format!("((int64_t)({iv}))"),
+                    _ => {}
+                }
                 // `e as E.V` — extract the variant payload struct
                 let tn = match &ty.kind {
                     TyKind::Named(n) => n.clone(),
@@ -1752,6 +1777,14 @@ impl<'a> Gen<'a> {
                     BinOp::Gt => ">", BinOp::Ge => ">=",
                     BinOp::And => "&&", BinOp::Or => "||",
                 };
+                // byte arithmetic wraps mod 256 — C would promote to int
+                // and carry bits the oxl type says don't exist
+                if self.dt(&lt) == Ty::Byte && matches!(op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                    | BinOp::BitAnd | BinOp::BitOr | BinOp::Xor)
+                {
+                    return format!("((uint8_t)({lv} {cop} {rv}))");
+                }
                 if *op == BinOp::Add && self.dt(&lt) == Ty::Str {
                     format!("rt_strcat({lv}, {rv})")
                 } else if matches!(op, BinOp::Eq | BinOp::Ne) && self.dt(&lt) == Ty::Str {

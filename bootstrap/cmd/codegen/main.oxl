@@ -509,6 +509,9 @@ fn gcty(g: mut G, t: int) -> str {
     if k == check.k_int() || k == check.k_err() {
         return "int64_t"
     }
+    if k == check.k_byte() {
+        return "uint8_t"
+    }
     if k == check.k_float() {
         return "double"
     }
@@ -1136,11 +1139,8 @@ fn xty_lit(g: mut G, obj: ref parser.Node) -> int {
 }
 
 fn xty_as(g: mut G, ty: ref parser.Node) -> int {
-    ev := gev(g, check.ty_str(ty))
-    if ev.ok {
-        return gty(g, ty)
-    }
-    return check.t_unk(g.ck)
+    // declared target type — conversions and enum payloads alike
+    return gty(g, ty)
 }
 
 fn xty_match(g: mut G, scrut: ref parser.Node, arms: ref parser.NList) -> int {
@@ -2000,6 +2000,11 @@ fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node) -> str {
     lt := xty(g, l)
     lv := gx(g, l)
     rv := gx(g, r)
+    // byte arithmetic wraps mod 256 — C would promote to int and
+    // carry bits the oxl type says don't exist
+    if tyk(g, gdt(g, lt)) == check.k_byte() && (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^") {
+        return "((uint8_t)(" + lv + " " + op + " " + rv + "))"
+    }
     if op == "+" && tyk(g, gdt(g, lt)) == check.k_str() {
         return "rt_strcat(" + lv + ", " + rv + ")"
     }
@@ -2119,6 +2124,37 @@ fn gxlit(g: mut G, obj: ref parser.Node, fields: ref parser.NList) -> str {
 }
 
 fn gxas(g: mut G, inner: ref parser.Node, ty: ref parser.Node) -> str {
+    // `as` conversions — str<->[]byte and int<->byte; `own T` unwraps
+    // like Rust's `base`
+    ot := xty(g, inner)
+    deref := false
+    bt := ot
+    if tyk(g, ot) == check.k_own() {
+        i2 := tyi(g, ot)
+        if i2 >= 0 {
+            bt = i2
+            deref = true
+        }
+    }
+    iv := gx(g, inner)
+    if deref {
+        iv = "(*" + iv + ")"
+    }
+    wt := gty(g, ty)
+    bok := tyk(g, bt)
+    wk := tyk(g, wt)
+    if bok == check.k_str() && wk == check.k_slice() && tyk(g, tyi(g, wt)) == check.k_byte() {
+        return "rt_bytes_str(" + iv + ")"
+    }
+    if bok == check.k_slice() && tyk(g, tyi(g, bt)) == check.k_byte() && wk == check.k_str() {
+        return "rt_str_bytes(" + iv + ")"
+    }
+    if bok == check.k_int() && wk == check.k_byte() {
+        return "((uint8_t)(" + iv + "))"
+    }
+    if bok == check.k_byte() && wk == check.k_int() {
+        return "((int64_t)(" + iv + "))"
+    }
     tn := check.ty_str(ty)
     ev := gev(g, check.resolve_named(g.ck, tn))
     if !ev.ok {

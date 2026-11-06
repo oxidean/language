@@ -1,0 +1,189 @@
+package bufio
+
+// std/bufio — buffered io.Reader/io.Writer. The buffer is a plain
+// []byte window: ri reads, wi writes, fill() compacts and pulls more.
+// Reader.readline is the common path — scans for '\n' Go-style.
+import "std/io"
+
+import "std/errors"
+
+/// Reader buffers an io.Reader.
+struct Reader { r: io.Reader, buf: []byte, ri: int, wi: int }
+
+/// newreader — default 4096 window.
+fn newreader(r: io.Reader) -> Reader {
+    return Reader{r: r, buf: mkslice(byte, 4096), ri: 0, wi: 0}
+}
+
+/// newreadersize — caller-picked window.
+fn newreadersize(r: io.Reader, sz: int) -> Reader {
+    return Reader{r: r, buf: mkslice(byte, sz), ri: 0, wi: 0}
+}
+
+// fill compacts then pulls — eof/error ride out tagged with whether
+// the window already had data (callers drain it first).
+fn (b mut Reader) fill() -> err {
+    if b.ri > 0 {
+        i := 0
+        for i < b.wi - b.ri {
+            b.buf[i] = b.buf[b.ri + i]
+            i = i + 1
+        }
+        b.wi = b.wi - b.ri
+        b.ri = 0
+    }
+    if b.wi >= len(b.buf) {
+        return errors.new("bufio: buffer full")
+    }
+    [n, e] = b.r.read(b.buf[b.wi:])
+    if e != nil {
+        return e
+    }
+    b.wi = b.wi + n
+    return nil
+}
+
+/// read — buffered then pass-through for large p; [n, err].
+fn (b mut Reader) read(p: []byte) -> [int, err] {
+    if b.ri == b.wi {
+        // window empty — big reads skip the buffer entirely
+        if len(p) >= len(b.buf) {
+            return b.r.read(p)
+        }
+        e := b.fill()
+        if e != nil {
+            return 0, e
+        }
+    }
+    n := b.wi - b.ri
+    if n > len(p) {
+        n = len(p)
+    }
+    i := 0
+    for i < n {
+        p[i] = b.buf[b.ri + i]
+        i = i + 1
+    }
+    b.ri = b.ri + n
+    return n, nil
+}
+
+/// readline reads through the next '\n' (inclusive); the trailing
+/// newline rides along Go-style — callers trim. On eof mid-line the
+/// partial line returns with eof.
+fn (b mut Reader) readline() -> [str, err] {
+    out := "" as []byte
+    for true {
+        // scan the buffered window for '\n'
+        hit := -1
+        i := b.ri
+        for i < b.wi {
+            if b.buf[i] == 10 {
+                hit = i
+                break
+            }
+            i = i + 1
+        }
+        end := b.wi
+        if hit >= 0 {
+            end = hit + 1
+        }
+        i = b.ri
+        for i < end {
+            out = push(out, b.buf[i])
+            i = i + 1
+        }
+        b.ri = end
+        if hit >= 0 {
+            return out as str, nil
+        }
+        e := b.fill()
+        if e != nil {
+            if e == io.eof() && len(out) > 0 {
+                return out as str, e
+            }
+            return "", e
+        }
+    }
+    return "", nil
+}
+
+/// peek returns the next n buffered bytes without consuming them;
+/// fewer than n (or an error) if the buffer can't fill that far.
+/// The view borrows the window — it dies with the Reader.
+fn (b mut Reader) peek(n: int) -> [str, err] {
+    for b.wi - b.ri < n {
+        if b.wi >= len(b.buf) && b.ri == 0 {
+            break
+        }
+        e := b.fill()
+        if e != nil {
+            if e == io.eof() && b.wi - b.ri > 0 {
+                return b.buf[b.ri:b.wi] as str, nil
+            }
+            return "", e
+        }
+    }
+    end := b.ri + n
+    if end > b.wi {
+        end = b.wi
+    }
+    return b.buf[b.ri:end] as str, nil
+}
+
+/// asreader boxes a borrow of this Reader as an io.Reader — reads
+/// through the box drain the caller's buffered window (Go's `&br`).
+fn (b mut Reader) asreader() -> io.Reader {
+    return b
+}
+
+/// Writer buffers an io.Writer — flush() pushes the window.
+struct Writer { w: io.Writer, buf: []byte }
+
+/// newwriter — default 4096 window.
+fn newwriter(w: io.Writer) -> Writer {
+    return Writer{w: w, buf: mkslice(byte, 0)}
+}
+
+/// write buffers p — big writes flush first then pass through; [n, err].
+fn (b mut Writer) write(p: []byte) -> [int, err] {
+    if len(b.buf) + len(p) > 4096 {
+        e := b.flush()
+        if e != nil {
+            return 0, e
+        }
+        if len(p) > 4096 {
+            return b.w.write(p)
+        }
+    }
+    i := 0
+    for i < len(p) {
+        b.buf = push(b.buf, p[i])
+        i = i + 1
+    }
+    return len(p), nil
+}
+
+/// flush pushes the buffered window down; nil on success.
+fn (b mut Writer) flush() -> err {
+    off := 0
+    for off < len(b.buf) {
+        [n, e] = b.w.write(b.buf[off:])
+        if e != nil {
+            return e
+        }
+        if n <= 0 {
+            return errors.new("bufio: short write")
+        }
+        off = off + n
+    }
+    b.buf = mkslice(byte, 0)
+    return nil
+}
+
+/// aswriter boxes a borrow of this Writer as an io.Writer — writes
+/// through the box buffer into the caller's value, so flush() still
+/// drains them (Go's `&bw`).
+fn (b mut Writer) aswriter() -> io.Writer {
+    return b
+}

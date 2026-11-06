@@ -130,6 +130,52 @@ pub fn lex(src: &str, diags: &mut Diags) -> Vec<Token> {
                 }
                 out.push(Token { tok: Tok::Str(s), span: Span::new(at(lo), at(i)) });
             }
+            b'\'' => {
+                // 'c' — char literal is sugar for its scalar value; a
+                // byte literal's most readable form. Lexes to Int, so
+                // parsers/codegens see no new node. One char exactly
+                // (after escape decoding); escapes mirror strings.
+                let lo = i;
+                i += 1;
+                let mut v: i64 = 0;
+                let mut closed = false;
+                let mut count = 0;
+                while i < b.len() {
+                    match b[i] {
+                        b'\'' => {
+                            i += 1;
+                            closed = true;
+                            break;
+                        }
+                        b'\\' if i + 1 < b.len() => {
+                            let x = src[i + 1..].chars().next().unwrap();
+                            let e = match x {
+                                'n' => '\n',
+                                't' => '\t',
+                                'r' => '\r',
+                                '0' => '\0',
+                                other => other,
+                            };
+                            v = e as i64;
+                            count += 1;
+                            i += 1 + x.len_utf8();
+                        }
+                        _ => {
+                            let c = src[i..].chars().next().unwrap();
+                            v = c as i64;
+                            count += 1;
+                            i += c.len_utf8();
+                        }
+                    }
+                }
+                if !closed {
+                    diags.push(Diag::err(Span::new(at(lo), at(i)), "lex", "unterminated char literal"));
+                } else if count != 1 {
+                    diags.push(Diag::err(Span::new(at(lo), at(i)), "lex",
+                        "char literal must hold exactly one character"));
+                }
+                out.push(Token { tok: Tok::Int(v), span: Span::new(at(lo), at(i)) });
+            }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 let lo = i;
                 while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {

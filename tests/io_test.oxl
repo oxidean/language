@@ -1,0 +1,189 @@
+package main
+
+// S2 acceptance: io interfaces over os.File, bufio buffering, []byte
+// round-trips, strconv both directions, err sentinels, fmt, and the
+// mut-borrow `as*` boxing idiom (Go's &buf — shared writes through the
+// iface while the caller keeps concrete access).
+import "std/io"
+
+import "std/os"
+
+import "std/bufio"
+
+import "std/bytes"
+
+import "std/strconv"
+
+import "std/errors"
+
+import "std/fmt"
+
+import "std/testing"
+
+import "std/time"
+
+fn ck(e: err, m: str) {
+    testing.expect(e == nil, m + ": " + errors.msg(e))
+}
+
+fn run_lines(path: str) {
+    [wf, e0] = os.create(path)
+    ck(e0, "create")
+    bw := bufio.newwriter(wf)
+    [_, e1] = bw.write("line one\nline two\nline three\n" as []byte)
+    ck(e1, "bufio write")
+    ck(bw.flush(), "flush")
+    ck(wf.close(), "close w")
+
+    [rf, e2] = os.open(path)
+    ck(e2, "open")
+    br := bufio.newreader(rf)
+    lines := 0
+    for true {
+        [ln, le] = br.readline()
+        if le == io.eof() {
+            if len(ln) > 0 {
+                lines = lines + 1
+            }
+            break
+        }
+        ck(le, "readline")
+        lines = lines + 1
+    }
+    ck(rf.close(), "close r")
+    testing.expect(lines == 3, "3 lines")
+}
+
+fn run_copy(path: str) {
+    [rf, e3] = os.open(path)
+    ck(e3, "open")
+    buf := bytes.newbuffer()
+    rw := buf.asreadwriter()
+    [nw, e4] = io.copy(rw, rf)
+    ck(e4, "copy")
+    ck(rf.close(), "close r")
+    testing.expect(nw == 29, "copied 29 bytes")
+    testing.expect_streq(buf.str(), "line one\nline two\nline three\n", "copy contents")
+    p := mkslice(byte, 9)
+    [nr, er] = rw.read(p)
+    ck(er, "readback")
+    testing.expect(nr == 9, "readback n")
+    testing.expect_streq(p as str, "line one\n", "readback contents")
+}
+
+fn run_limitreadall(path: str) {
+    [rf, e5] = os.open(path)
+    ck(e5, "open")
+    lr := io.limitreader(rf, 8)
+    [s, e6] = io.readall(lr)
+    ck(e6, "readall")
+    ck(rf.close(), "close r")
+    testing.expect_streq(s, "line one", "limitreader")
+}
+
+fn run_bufio_through_copy(path: str, dst: str) {
+    [wf, ew] = os.create(dst)
+    ck(ew, "create dst")
+    bw := bufio.newwriter(wf)
+    wsh := bw.aswriter()
+    [rf, er] = os.open(path)
+    ck(er, "open src")
+    [_, ec] = io.copy(wsh, rf)
+    ck(ec, "copy->bufio")
+    ck(rf.close(), "close src")
+    ck(bw.flush(), "flush")
+    ck(wf.close(), "close dst")
+    testing.expect_streq(os.readfile_(dst), "line one\nline two\nline three\n", "bufio-through-copy")
+
+    [rf2, e7] = os.open(path)
+    ck(e7, "open2")
+    br := bufio.newreader(rf2)
+    [pk, ep] = br.peek(4)
+    ck(ep, "peek")
+    testing.expect_streq(pk, "line", "peek")
+    out := bytes.newbuffer()
+    w := out.aswriter()
+    [_, ec2] = io.copy(w, br.asreader())
+    ck(ec2, "copy-from-bufio")
+    ck(rf2.close(), "close src2")
+    testing.expect_streq(out.str(), "line one\nline two\nline three\n", "bufio-src copy")
+}
+
+fn test_bytes() {
+    b := "hello" as []byte
+    testing.expect(len(b) == 5 && b[0] == 104, "str->[]byte")
+    testing.expect_streq(b as str, "hello", "[]byte->str")
+    x := 65 as byte
+    testing.expect(x == 65, "int->byte + char literal")
+    testing.expect(97 == 97 && 10 == 10 && 92 == 92, "char literals")
+    testing.expect(255 as byte + 1 == 0, "byte wrap")
+    testing.expect(bytes.equal("ab" as []byte, "ab" as []byte), "equal")
+    testing.expect(!bytes.equal("ab" as []byte, "ac" as []byte), "!equal")
+    testing.expect(bytes.compare("a" as []byte, "b" as []byte) < 0, "compare")
+    testing.expect(bytes.index("hello" as []byte, "ll" as []byte) == 2, "index")
+    testing.expect(bytes.contains("hello" as []byte, "ell" as []byte), "contains")
+}
+
+fn test_strconv() {
+    [v1, e1] = strconv.atoi(" 12x")
+    testing.expect(e1 != nil, "atoi rejects bad input")
+    [v2, e2] = strconv.atoi("-42")
+    ck(e2, "atoi")
+    testing.expect(v2 == -42, "atoi value")
+    [v3, e3] = strconv.parseint("ff", 16)
+    ck(e3, "parseint")
+    testing.expect(v3 == 255, "parseint 0xff")
+    [v4, e4] = strconv.parseint("z!", 36)
+    testing.expect(e4 != nil, "parseint rejects")
+    [f5, e5] = strconv.parsefloat("-1.5e2")
+    ck(e5, "parsefloat")
+    testing.expect(f5 == -150.0, "parsefloat value")
+    [_, e6] = strconv.parsefloat("1.2.3")
+    testing.expect(e6 != nil, "parsefloat rejects")
+    testing.expect_streq(strconv.itoa(-42), "-42", "itoa")
+    testing.expect_streq(strconv.formatfloat(1.5), "1.5", "formatfloat")
+}
+
+fn test_fmt() {
+    args := push(mkslice(str, 0), "k")
+    args = push(args, "v")
+    [s, e1] = fmt.sprintf("%s=%s%%", args)
+    ck(e1, "sprintf")
+    testing.expect_streq(s, "k=v%", "sprintf")
+    one := push(mkslice(str, 0), "only")
+    [_, e2] = fmt.sprintf("%s %s", one)
+    testing.expect(e2 != nil, "sprintf arg under-supply")
+    extra := push(mkslice(str, 0), "a")
+    extra = push(extra, "b")
+    [_, e3] = fmt.sprintf("%s", extra)
+    testing.expect(e3 != nil, "sprintf arg over-supply")
+    testing.expect_streq(fmt.sprinti(7), "7", "sprinti")
+}
+
+fn test_errs() {
+    testing.expect(io.eof() == io.eof(), "eof interned")
+    e := errors.new("EOF")
+    testing.expect(e == io.eof(), "interned across callsites")
+    testing.expect_streq(errors.msg(e), "EOF", "err msg")
+    testing.expect_streq(errors.msg(nil), "", "msg(nil)")
+    testing.expect_streq(errors.msg(errors.new("boom")), "boom", "new msg")
+}
+
+fn test_stdstreams() {
+    testing.expect(os.stdin().fd == 0, "stdin fd")
+    testing.expect(os.stdout().fd == 1, "stdout fd")
+    testing.expect(os.stderr().fd == 2, "stderr fd")
+}
+
+fn test_io_files() {
+    p := "oxl-iotest-" + itoa(time.unix_ms()) + ".txt"
+    p2 := "oxl-iotest2-" + itoa(time.unix_ms()) + ".txt"
+    run_lines(p)
+    run_copy(p)
+    run_limitreadall(p)
+    run_bufio_through_copy(p, p2)
+    ck(os.remove(p), "cleanup p")
+    ck(os.remove(p2), "cleanup p2")
+}
+
+fn main() {}

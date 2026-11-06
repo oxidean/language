@@ -1,0 +1,26 @@
+package errors
+
+// std/errors — message-carrying err values. `err` stays an int64 code
+// (the [v, err] ABI is unchanged); payloads live in an interned
+// registry so a sentinel is stable: errors.new("EOF") called anywhere
+// returns the same code and `e == io.eof()` is a plain int compare.
+// Registry entries are never freed — one per distinct message text.
+extern fn rt_err_new(msg: str) -> err
+
+extern fn rt_err_msg(code: err) -> str
+
+/// new returns a messaged err. Interned by text: identical messages
+/// share one code, which is what makes sentinels comparable.
+fn new(msg: str) -> err {
+    return rt_err_new(msg)
+}
+
+/// msg returns the registered message; "" for nil and foreign codes.
+fn msg(e: err) -> str {
+    return rt_err_msg(e)
+}
+
+/// code returns the raw int64 code.
+fn code(e: err) -> int {
+    return e
+}
