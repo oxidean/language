@@ -7,6 +7,10 @@ alwaysApply: true
 
 Never add AI or tooling attribution to **commits, commit messages, PR titles, PR bodies, or PR descriptions**. `scripts/commit-check.sh` enforces this unconditionally on every checked surface (hook, CI `commit-lint`); it has no user-request exception, so even an explicitly requested attribution cannot land through a commit or PR — decline such requests rather than bypassing the gate.
 
+## Scope
+
+The ban applies to surfaces a human or agent authors. Machine-generated platform boilerplate is exempt because no authorial surface exists: PR bodies authored by bot accounts (GitHub `user.type == "Bot"` — dependabot, renovate, and similar) are generated wholesale by the platform, which injects zero-width bytes into `@`-mentions for anti-ping that this rule would otherwise flag. The exemption covers **PR bodies only**: commit messages and PR titles are scanned on every PR regardless of author type, and a bot body's content is still bound by the forbidden list when a human quotes or copies it into an authored surface.
+
 ## Forbidden (case-insensitive)
 
 - AI `Co-Authored-By:` / `Co-authored-by:` trailers (Claude, Cursor, Copilot, ChatGPT, Codex, Gemini, or any AI/bot/`noreply` vendor address)
