@@ -34,10 +34,18 @@
 
 ## Phase 2: Post-v0.2
 
-- GUI: portable UI layer in the language (charter path), plus optional
-  platform-toolkit bindings
-- Web compilation target (JS/HTML/CSS) — parked, guardrail in
-  `items/parked-web.md`
-- Package registry / module versioning
-- LLVM backend (behind the `interfaces.md` codegen seam)
-- Full self-hosting (compiler compiles itself end-to-end)
+Milestone map: [docs/specs/2026-11-07-phase-2-plan/](../specs/2026-11-07-phase-2-plan/shape.md)
+
+- **T — toolchain-in-oxl**: port the seed driver (CLI, module
+  resolution, git fetch, fmt, doc, LSP, test runner) to `.oxl`;
+  cargo leaves the build path
+- **G — portable GUI layer** in the language (charter path), plus
+  optional platform-toolkit bindings
+- **R — package registry** / `oxl publish` against a central index
+- **P — polish**: small tracked debt as GitHub issues
+- Parked on triggers: LLVM backend (behind the `interfaces.md`
+  codegen seam), web compilation target (JS/HTML/CSS — guardrail in
+  `docs/specs/2026-11-04-0132-v0-2-forward/items/parked-web.md`), D4 shape-generics, parked-stdlib list
+
+(The compiler already compiles itself — see `docs/self-hosting.md`;
+"T" retires the Rust seed driver, not the compiler.)

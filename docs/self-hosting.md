@@ -1,6 +1,10 @@
-# Self-hosting readiness
+# The compiler bootstrap (self-hosted compiler)
 
-The goal: the compiler, written in the language, compiled by itself.
+The goal, achieved: the compiler, written in the language, compiled by
+itself. This document covers the **compiler** bootstrap chain only.
+Porting the *toolchain driver* (CLI, module resolution, fetch, fmt,
+doc, LSP) is a separate Phase-2 milestone — **toolchain-in-oxl**
+(`docs/specs/2026-11-07-phase-2-plan/`).
 
 **Done so far — the entire frontend is self-hosted:**
 
