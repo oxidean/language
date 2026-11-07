@@ -1,17 +1,17 @@
 package utf8
 
 // std/unicode/utf8 — rune decoding over oxl's byte-string `str`,
-// Go's unicode/utf8 semantics: runes are int code points, RuneError
+// UTF-8 semantics: runes are int code points, RuneError
 // is 0xFFFD, and every malformed/truncated sequence decodes as
 // (RuneError, 1) — never more.
 
 /// runeerror is the value decode yields for malformed input —
-/// Go's utf8.RuneError, U+FFFD.
+/// runeerror is the replacement rune, U+FFFD.
 fn runeerror() -> int {
     return 65533
 }
 
-// accept ranges per leading byte, Go's table: lo/hi bounds on the
+// accept ranges per leading byte: lo/hi bounds on the
 // SECOND byte are what reject overlongs, surrogates and >U+10FFFF.
 fn b2lo(b1: int) -> int {
     if b1 == 224 {
@@ -68,7 +68,7 @@ fn seqlen(b1: int) -> int {
 struct Dec { r: int, n: int }
 
 /// decode returns the (rune, size) pair for the sequence at s[i] —
-/// Go's DecodeRuneInString: (RuneError, 0) at end of input,
+/// decoderune: (RuneError, 0) at end of input,
 /// (RuneError, 1) for every malformed or truncated sequence.
 fn decode(s: str, i: int) -> Dec {
     if i >= len(s) {
@@ -111,7 +111,7 @@ fn decode(s: str, i: int) -> Dec {
     return Dec{r: r, n: n}
 }
 
-/// runelen returns the rune count — Go's RuneCountInString: each
+/// runelen returns the rune count: each
 /// decode step counts one rune, malformed bytes one each. (Named
 /// runelen, not len: a package `len` would shadow the builtin and
 /// the loop bound below would recurse.)
@@ -129,7 +129,7 @@ fn runelen(s: str) -> int {
     return n
 }
 
-/// valid reports whether s is well-formed UTF-8 — Go's ValidString.
+/// valid reports whether s is well-formed UTF-8.
 fn valid(s: str) -> bool {
     i := 0
     for i < len(s) {
@@ -143,7 +143,8 @@ fn valid(s: str) -> bool {
 }
 
 /// fullrune reports whether s[i:] begins a complete sequence —
-/// Go's FullRuneInString (truncation is not malformation).
+/// fullrune reports whether s begins with a complete rune (truncation
+/// is not malformation).
 fn fullrune(s: str) -> bool {
     if len(s) == 0 {
         return true
@@ -152,8 +153,7 @@ fn fullrune(s: str) -> bool {
     return n > 0 && n <= len(s)
 }
 
-/// encode returns the UTF-8 bytes for rune r — Go's
-/// EncodeRune semantics: out-of-range encodes U+FFFD.
+/// encode returns the UTF-8 bytes for rune r: out-of-range encodes U+FFFD.
 fn encode(r: int) -> str {
     if r < 0 || r > 1114111 || r >= 55296 && r <= 57343 {
         r = 65533

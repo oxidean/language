@@ -2,7 +2,7 @@ package main
 
 // S2 acceptance: io interfaces over os.File, bufio buffering, []byte
 // round-trips, strconv both directions, err sentinels, fmt, and the
-// mut-borrow `as*` boxing idiom (Go's &buf — shared writes through the
+// mut-borrow `as*` boxing idiom (`&buf` — shared writes through the
 // iface while the caller keeps concrete access).
 import "std/io"
 
@@ -244,7 +244,7 @@ fn test_flush_keeps_unwritten() {
 }
 
 // Zilch always returns 0,nil — fill must bail after bounded retries
-// (Go's ErrNoProgress) instead of spinning forever.
+// (a no-progress error) instead of spinning forever.
 struct Zilch {}
 
 fn (z mut Zilch) read(b: []byte) -> [int, err] {

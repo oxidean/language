@@ -1,6 +1,6 @@
 package sort
 
-// std/sort — Go's sort package: ascending sort for ordered types
+// std/sort — ascending sort for ordered types
 // and a comparator-based sort for anything else. Heapsort under
 // both — O(n·log n) worst case, in place, iterative sift-down.
 import "std/cmp"
@@ -27,8 +27,8 @@ fn sift[T any](v: []T, lt: fn(T, T) -> bool, r: int, n: int) {
     }
 }
 
-/// sortfn sorts v in place so lt(v[i], v[i+1]) holds pairwise —
-/// Go's sort.Slice with the comparator spelled `lt` like sort.SliceIsSorted's.
+/// sortfn sorts v in place by comparator: lt(v[i], v[j]) reports
+/// whether element i orders before element j.
 fn sortfn[T any](v: []T, lt: fn(T, T) -> bool) {
     n := len(v)
     // heapify: last parent down
@@ -71,7 +71,7 @@ fn sifto[T cmp.Ordered](v: []T, r: int, n: int) {
     }
 }
 
-/// sort sorts v ascending — Go's sort.Ints/Strings generically.
+/// sort sorts v ascending — works for any ordered element type.
 fn sort[T cmp.Ordered](v: []T) {
     n := len(v)
     i := n / 2 - 1
@@ -89,7 +89,7 @@ fn sort[T cmp.Ordered](v: []T) {
     }
 }
 
-/// is_sorted reports whether v is non-decreasing — Go's
+/// is_sorted reports whether v is non-decreasing —
 /// sort.IsSorted / IntsAreSorted.
 fn is_sorted[T cmp.Ordered](v: []T) -> bool {
     i := 1

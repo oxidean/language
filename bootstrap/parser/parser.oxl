@@ -573,7 +573,7 @@ fn p_select(c: mut PCur) -> own Node {
     return b(Node.Select{arms: nrev(arms)})
 }
 
-// arm body: `{...}` block or a single stmt (wrapped in a List, like Rust)
+// arm body: `{...}` block or a single stmt (wrapped in a List, like the seed)
 fn p_arm_body(c: mut PCur) -> own Node {
     if !eat(c, "=") {
         return b(Node.List{items: nil})
@@ -966,7 +966,7 @@ fn p_ty(c: mut PCur) -> own Node {
                 s = s + ", "
             }
             first = false
-            // optional param name — `fn(a: int)` documents like Rust's
+            // optional param name — `fn(a: int)` documents like the seed's
             // parser does; the name is not part of the type
             if pkind(c) == lexlib.k_ident() && c.t.next != nil && c.t.next.text == ":" {
                 next(c)
@@ -989,7 +989,7 @@ fn p_ty(c: mut PCur) -> own Node {
     // own/ref/mut [own/ref/mut] dotted.name
     if txt == "own" || txt == "ref" || txt == "mut" {
         next(c)
-        // bare `own`/`ref`/`mut` = pointer to void (Rust parity: inner is
+        // bare `own`/`ref`/`mut` = pointer to void (seed parity: inner is
         // parsed only when the next token starts a type)
         inner := "void"
         if pkind(c) == 1 || at(c, "[") || at(c, "own") || at(c, "ref") || at(c, "mut") || at(c, "chan") {
@@ -1068,7 +1068,7 @@ fn p_fn(c: mut PCur, ex: bool) -> own Node {
             if pkind(c) == 1 {
                 ct = peek(c)
                 next(c)
-                // `pkg.Constraint` — dotted decl path (Rust: same loop)
+                // `pkg.Constraint` — dotted decl path (seed: same loop)
                 for at(c, ".") {
                     next(c)
                     ct = ct + "." + peek(c)
@@ -1226,7 +1226,7 @@ fn parse(toks: own lexlib.Tok) -> own Node {
         return nil
     }
     // the package clause is the mandatory first item of every file —
-    // the Rust parser emits `expected package clause` when it's absent
+    // the seed parser emits `expected package clause` when it's absent
     if !eat(c, "package") {
         println("parse: expected package clause")
         return nil

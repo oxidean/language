@@ -1,7 +1,7 @@
 package base64
 
 // std/encoding/base64 — RFC 4648 §4 (std alphabet, padded) plus the
-// raw (unpadded) and URL-safe (-_) variants Go ships. Decoders
+// raw (unpadded) and URL-safe (-_) variants. Decoders
 // reject non-alphabet bytes, bad padding, and truncated groups.
 import "std/errors"
 

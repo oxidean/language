@@ -1,6 +1,6 @@
 package math
 
-// std/math — Go's math package: libm-backed externs plus the
+// std/math — libm-backed externs plus the
 // constants. The rt_m_ prefix is what makes the driver link -lm
 // only when these are referenced.
 extern fn rt_m_sqrt(x: float) -> float
@@ -53,27 +53,27 @@ extern fn rt_m_isinf(x: float) -> int
 
 extern fn rt_m_signbit(x: float) -> int
 
-/// pi — Go's math.Pi.
+/// pi
 fn pi() -> float {
     return 3.141592653589793
 }
 
-/// e — Go's math.E.
+/// e
 fn e() -> float {
     return 2.718281828459045
 }
 
-/// sqrt2 — Go's math.Sqrt2.
+/// sqrt2
 fn sqrt2() -> float {
     return 1.4142135623730951
 }
 
-/// ln2 — Go's math.Ln2.
+/// ln2
 fn ln2() -> float {
     return 0.6931471805599453
 }
 
-/// ln10 — Go's math.Ln10.
+/// ln10
 fn ln10() -> float {
     return 2.302585092994046
 }
@@ -133,7 +133,7 @@ fn fmod(x: float, y: float) -> float {
     return rt_m_fmod(x, y)
 }
 
-/// abs returns |x| — Go's math.Abs.
+/// abs returns |x|
 fn abs(x: float) -> float {
     return rt_m_fabs(x)
 }

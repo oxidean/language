@@ -83,8 +83,8 @@ struct ModCtx {
     modcache: PathBuf,
     /// oxl.sum beside oxl.mod — every cache-resolved module verifies
     /// against it on load (replaces bypass by design). Empty when the
-    /// file is absent; a missing line then fails like Go's
-    /// "missing go.sum entry".
+    /// file is absent; a missing line then fails with the
+    /// "missing oxl.sum entry" diagnostic.
     sums: Vec<modcache::SumLine>,
     /// MVS build list: each required module path at its selected
     /// (max) version — resolution reads dirs at THESE versions, not
@@ -121,7 +121,7 @@ fn modcache_dir() -> PathBuf {
 /// `oxl.mod:<line>: <msg>` — display stays hermetic (the manifest is
 /// manifest comment rule: `//` opens a comment only at line start or
 /// after whitespace — a `//` glued inside a token (`file://`, `https://`)
-/// is part of the path, same constraint Go's modfile lexer applies
+/// is part of the path, the same constraint the modfile lexer applies
 /// implicitly. Returns the line up to the first real comment.
 fn strip_comment(raw: &str) -> &str {
     let b = raw.as_bytes();
@@ -314,7 +314,7 @@ enum Resolve {
     /// carries the `path@ver` the diagnostic names
     Missing(String),
     /// cache copy failed oxl.sum verification — carries the
-    /// Go-worded mismatch text for the diagnostic
+    /// Mismatch text for the diagnostic
     Tampered(String),
     NotFound,
 }
@@ -322,7 +322,7 @@ enum Resolve {
 /// the directory a required module version occupies: the matching
 /// replace RHS (version-specific replaces beat blanket ones) or the
 /// module-cache `path@ver` slot. None = not fetched. A cache hit is
-/// verified against oxl.sum before use — Err carries the Go-worded
+/// verified against oxl.sum before use — Err carries the familiar
 /// mismatch text for the caller's diagnostic.
 fn module_dir(ctx: &ModCtx, mp: &str, ver: &str) -> Result<Option<PathBuf>, String> {
     let mut blanket: Option<&PathBuf> = None;
@@ -349,7 +349,7 @@ fn module_dir(ctx: &ModCtx, mp: &str, ver: &str) -> Result<Option<PathBuf>, Stri
 
 /// minimal version selection: BFS the requirement graph from the main
 /// module's requires; every (module, version) node's own manifest
-/// contributes edges; per path keep the MAX version seen — Go's MVS,
+/// contributes edges; per path keep the MAX version seen — MVS,
 /// deterministic with no backtracking. Unfetched nodes still count
 /// toward selection; their edges just can't be read.
 fn build_list(ctx: &ModCtx) -> Vec<(String, String)> {
@@ -524,7 +524,7 @@ fn pkg_dir_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 /// a package's sources: a directory scan or an explicit file list
-/// (command-line file mode — Go's `go run a.go b.go`)
+/// (command-line file mode — the `a.oxl b.oxl` file list)
 enum PkgSrc {
     Dir(PathBuf),
     Files(Vec<PathBuf>),
@@ -858,7 +858,7 @@ fn fname(p: &Path) -> String {
 }
 
 /// load a package — every `.oxl` of `src` shares one clause and one decl
-/// namespace (file-scope imports like Go). Decls qualify as `pkg.name`
+/// namespace (file-scope imports). Decls qualify as `pkg.name`
 /// for imported packages, bare for the root (`is_root`). The returned
 /// Vec<PathBuf> is item-parallel: the file each item's spans index into.
 fn load_pkg(
@@ -877,7 +877,7 @@ fn load_pkg(
     // dir packages: canonical key drives both finished-load dedup
     // (`seen`/`pkg_names`) and in-flight cycle detection (`loading`).
     // A finished package dedups to its cached clause; an in-flight one
-    // is an import cycle — Go-forbidden, reported as a resolved-path
+    // is an import cycle — forbidden, reported as a resolved-path
     // chain. Quiet mode keeps the old bind-what's-there behavior so the
     // LSP survives cycles in incomplete code.
     if let PkgSrc::Dir(d) = src {
@@ -991,7 +991,7 @@ fn load_pkg_inner(
             return None;
         }
     }
-    // Files-mode file lists must share one directory (Go's file-list rule)
+    // Files-mode file lists must share one directory (the file-list rule)
     if let PkgSrc::Files(fs) = src {
         let d0 = fs[0].parent().map(Path::to_path_buf);
         for f in &fs[1..] {
@@ -1050,7 +1050,7 @@ fn load_pkg_inner(
         let mut used = Used::default();
         let mut binds: Vec<(String, String, Vec<String>)> = Vec::new();
         // every local name an import introduces — a second binding of
-        // the same name is an error (Go: redeclared in this block)
+        // the same name is an error (redeclared in this block)
         let mut bound_names: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         // pass 1: resolve this file's imports first so its decls see the
@@ -1331,7 +1331,7 @@ fn qualify_item(
 }
 
 /// positional args naming sources: a leading directory, or consecutive
-/// `.oxl` files (Go's `go run a.go b.go` file-list rule). Returns the
+/// `.oxl` files (the file-list rule). Returns the
 /// source args and the index where program args begin (after `--`).
 fn pkg_args(args: &[String], start: usize) -> (Vec<String>, usize) {
     let mut fs = Vec::new();
@@ -1604,7 +1604,7 @@ fn emit_and_cc(c_src: &str, out: &Path) -> bool {
 }
 
 /// `oxl list -m all` — the resolved build list: main module then every
-/// selected requirement at its winning version (Go's `go list -m all`).
+/// selected requirement at its winning version (`oxl list -m all`).
 fn cmd_list(args: &[String]) {
     let mflag = args.iter().any(|a| a == "-m" || a.starts_with("-m="));
     let all = args.iter().any(|a| a == "all");
@@ -1755,8 +1755,8 @@ fn cmd_fmt(args: &[String]) {
 /// the require line is upserted in oxl.mod, both h1 lines in oxl.sum.
 /// `git` does the transport (bare clone -> `git archive` of the resolved
 /// rev); extraction is canonical tar bytes, never a checkout. A present
-/// slot is reused — re-get only re-pins the sums, matching Go's
-/// idempotent `go get` on a cached module.
+/// slot is reused — re-get only re-pins the sums; re-fetching a cached
+/// module is idempotent.
 fn cmd_get(args: &[String]) {
     if args.len() != 3 {
         eprintln!("usage: oxl get <path>@<query>");
@@ -1832,7 +1832,7 @@ fn cmd_get(args: &[String]) {
     }
 }
 
-/// fetch + the self-declared-path check (Go refuses modules whose
+/// fetch + the self-declared-path check (refuse modules whose
 /// oxl.mod names a different path than the one they were fetched as —
 /// mis-pinned forks have to be replaced explicitly)
 fn fetch_mod(mp: &str, query: &str) -> Result<fetch::Fetched, String> {
@@ -2041,7 +2041,7 @@ fn cmd_mod(args: &[String]) {
 }
 
 /// `oxl mod init <path>` — skeleton manifest in cwd; refuses to
-/// overwrite (Go's `go mod init` semantics)
+/// overwrite (init semantics)
 fn mod_init(args: &[String], cwd: &Path) {
     if args.len() != 1 || args[0].starts_with('-') {
         eprintln!("usage: oxl mod init <module path>");
@@ -2111,7 +2111,7 @@ fn replace_covers(ctx: &ModCtx, mp: &str, mv: &str) -> bool {
 }
 
 /// `oxl mod verify` — every required module's selected cache slot
-/// re-hashes against oxl.sum (Go's `go mod verify`)
+/// re-hashes against oxl.sum (verify semantics)
 fn mod_verify(args: &[String], cwd: &Path) {
     if !args.is_empty() {
         eprintln!("usage: oxl mod verify");
@@ -2174,7 +2174,7 @@ fn mod_list(args: &[String], cwd: &Path) {
 
 /// recursive `.oxl` walk of the main module — skips nested module
 /// roots (dirs holding their own oxl.mod), dot/underscore dirs, and
-/// `testdata`, matching Go's package-enumeration rules
+/// `testdata`, matching the package-enumeration rules
 fn main_mod_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -2368,7 +2368,7 @@ fn tidy_satisfy(
         }
     }
     // standalone replace coverage: replace LHS covers imp and its dir
-    // holds the package — the import works once a require exists (Go's
+    // holds the package — the import works once a require exists (
     // local-replace placeholder version)
     let mut best_rep: Option<&(String, Option<String>, PathBuf)> = None;
     for r in &ctx.replaces {
@@ -2388,7 +2388,8 @@ fn tidy_satisfy(
         }
     }
     // restore: a require already covers imp but its selected version's
-    // slot is absent — fetch THAT version (Go re-downloads the pinned
+    // slot is absent — fetch THAT version (the pinned version is
+    // re-fetched —
     // one, never @latest), verify it against the sums, and keep the
     // floor. The probe below runs only when the restored tree lacks
     // the package.
@@ -2441,7 +2442,7 @@ fn tidy_satisfy(
     }
     // generic probe: try each prefix of the import path as a module,
     // longest first — a required module that lacks the package gets
-    // re-probed at @latest (Go's upgrade path); a deeper path may be
+    // re-probed at @latest (the upgrade path); a deeper path may be
     // its own nested module
     let segs: Vec<&str> = imp.split('/').collect();
     for n in (1..=segs.len()).rev() {
@@ -2749,7 +2750,7 @@ fn mod_tidy(args: &[String], cwd: &Path) {
     // needed module whose selection a dropped raiser held up falls
     // back to its floor, unchecked and possibly never fetched. Any
     // module the rewrite lowers gets its floor moved to the version
-    // the walk actually checked (Go pins the raiser as // indirect;
+    // the walk actually checked (the raiser is pinned // indirect;
     // moving the kept module's floor selects the same version without
     // retaining a dead module name). Raising one floor can itself
     // remove an edge that held another needed selection up, so the

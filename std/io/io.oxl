@@ -1,6 +1,6 @@
 package io
 
-// std/io — the byte-stream interfaces everything hangs off, Go-shaped.
+// std/io — the byte-stream interfaces everything hangs off.
 // Reader contract: n>0 with e==nil may co-occur; e==io.eof() marks a
 // clean end (not an error); any other e is a real failure. Writers
 // must return e!=nil on failure — a 0/nil write is no progress.

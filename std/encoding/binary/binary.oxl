@@ -1,8 +1,8 @@
 package binary
 
 // std/encoding/binary — fixed-width big/little-endian reads and
-// writes over []byte. Go-shaped helpers: reads assert the width
-// (callers bounds-check, same contract as Go's panics) and returns
+// writes over []byte. Reads assert the width
+// (callers bounds-check — a contract violation is fatal) and returns
 // fit in int since oxl ints are 64-bit.
 fn need(b: []byte, off: int, n: int) {
     if off < 0 || len(b) - off < n {

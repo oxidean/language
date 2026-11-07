@@ -1,6 +1,6 @@
 package rand
 
-// std/math/rand — Go's math/rand surface over a process-global
+// std/math/rand — a math/rand surface over a process-global
 // generator. The language has no shift operators, so the PRNG is
 // drand48's LCG — state = (a·state + c) mod 2^48 — the documented
 // C/POSIX generator, respectable distribution, and multiplication/
@@ -14,7 +14,7 @@ let mul_a: int = 25214903917
 
 let add_c: int = 11
 
-// process-global state — auto-seeded from wall time like Go's
+// process-global state — auto-seeded from wall time
 // post-1.20 global source; `seed` makes runs reproducible. (now_ms
 // is a builtin — importing time here would needlessly couple the
 // packages.)
@@ -53,31 +53,30 @@ fn pow2(n: int) -> int {
     return r
 }
 
-/// int31 returns a non-negative 31-bit pseudo-random int — Go's
-/// Int31.
+/// int31 returns a non-negative 31-bit pseudo-random int.
 fn int31() -> int {
     return top(31)
 }
 
-/// intn returns a uniform value in [0, n) — Go's Intn. Draws the
+/// intn returns a uniform value in [0, n). Draws the
 /// top 31 bits like drand48; the modulo bias is the same one
-// drand48 documents. Panics (fatal err) on n <= 0, like Go.
+// drand48 documents. A fatal err on n <= 0.
 fn intn(n: int) -> int {
     if n <= 0 {
-        exit(1) // Go panics; oxl's process-fatal is exit
+        exit(1) // process-fatal is exit
     }
     return top(31) % n
 }
 
 // (No `int` fn — a package member named `int` shadows the builtin
-// type inside this file; int31 covers Go's Int.)
+// type inside this file; int31 covers the Int case.)
 
-/// float64 returns a uniform value in [0.0, 1.0) — Go's Float64.
+/// float64 returns a uniform value in [0.0, 1.0).
 fn float64() -> float {
     return itof(advance()) / itof(modulus)
 }
 
-/// perm returns a random permutation of [0, n) — Go's Perm,
+/// perm returns a random permutation of [0, n),
 /// Fisher-Yates inside-out.
 fn perm(n: int) -> own []int {
     v := new(mkslice(int, n))
@@ -104,7 +103,7 @@ fn perm(n: int) -> own []int {
 }
 
 /// shufflen shuffles an int slice in place — the concrete-shape
-/// Shuffle; slices are already mutable views so no `mut` marker is
+/// variant; slices are already mutable views so no `mut` marker is
 /// needed. Generic callers use shuffleg.
 fn shufflen(v: []int) {
     i := len(v) - 1
@@ -117,7 +116,7 @@ fn shufflen(v: []int) {
     }
 }
 
-/// shuffle shuffles any slice — Go's rand.Shuffle shape takes a swap
+/// shuffle shuffles any slice — takes a swap
 /// fn; generics let the element type stay abstract.
 fn shuffleg[T any](n: int, swap: fn(int, int)) {
     i := n - 1

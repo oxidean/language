@@ -1,6 +1,6 @@
 package filepath
 
-// std/path/filepath — OS-aware paths, Go's path/filepath. Both `/`
+// std/path/filepath — OS-aware paths. Both `/`
 // and `\` are separators on Windows; `/` alone on POSIX. oxl-canonical
 // paths are `/`-separated — that's what rt_fullpath and every fs
 // builtin produce — so `abs` and `clean` output `/` form everywhere;
@@ -98,7 +98,7 @@ fn clean(p: str) -> str {
         }
         if s == ".." {
             // ".." cancels a normal segment only — a retained leading
-            // ".." must stay (Go: clean("../..") == "../..")
+            // ".." must stay (clean("../..") == "../..")
             if depth > 0 && stack.v != ".." {
                 stack = stack.next
                 depth = depth - 1

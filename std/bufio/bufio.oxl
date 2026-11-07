@@ -2,13 +2,13 @@ package bufio
 
 // std/bufio — buffered io.Reader/io.Writer. The buffer is a plain
 // []byte window: ri reads, wi writes, fill() compacts and pulls more.
-// Reader.readline is the common path — scans for '\n' Go-style.
+// Reader.readline is the common path — scans for '\n'.
 import "std/io"
 
 import "std/errors"
 
 /// Reader buffers an io.Reader. `stuck` latches the first underlying
-/// error — Go's bufio semantics: once the source fails, reads drain
+/// error — buffered-reader semantics: once the source fails, reads drain
 /// the window then keep returning that error instead of re-reading.
 struct Reader { r: io.Reader, buf: []byte, ri: int, wi: int, stuck: err }
 
@@ -42,7 +42,7 @@ fn (b mut Reader) fill() -> err {
     if b.wi >= len(b.buf) {
         return errors.new("bufio: buffer full")
     }
-    // pull until data, error, or 100 consecutive empty reads — Go's
+    // pull until data, error, or 100 consecutive empty reads — the
     // maxConsecutiveEmptyReads. A reader answering 0,nil forever would
     // otherwise spin peek/readline with no way out.
     i := 0
@@ -95,7 +95,7 @@ fn (b mut Reader) read(p: []byte) -> [int, err] {
 }
 
 /// readline reads through the next '\n' (inclusive); the trailing
-/// newline rides along Go-style — callers trim. On eof mid-line the
+/// newline rides along — callers trim. On eof mid-line the
 /// partial line returns with eof.
 fn (b mut Reader) readline() -> [str, err] {
     out := "" as []byte
@@ -163,7 +163,7 @@ fn (b mut Reader) peek(n: int) -> [str, err] {
 }
 
 /// asreader boxes a borrow of this Reader as an io.Reader — reads
-/// through the box drain the caller's buffered window (Go's `&br`).
+/// through the box drain the caller's buffered window (`&br`).
 fn (b mut Reader) asreader() -> io.Reader {
     return b
 }
@@ -225,7 +225,7 @@ fn (b mut Writer) flush() -> err {
 
 /// aswriter boxes a borrow of this Writer as an io.Writer — writes
 /// through the box buffer into the caller's value, so flush() still
-/// drains them (Go's `&bw`).
+/// drains them (`&bw`).
 fn (b mut Writer) aswriter() -> io.Writer {
     return b
 }

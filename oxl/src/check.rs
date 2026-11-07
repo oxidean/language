@@ -1587,7 +1587,7 @@ impl<'a> Checker<'a> {
                             self.assignable(&Ty::Float, &lt, l.span);
                             self.assignable(&Ty::Float, &rt, r.span);
                         } else if lt == Ty::Str && rt == Ty::Str {
-                            // Go parity: str < str is byte-lex — codegen
+                            // str < str is byte-lex — codegen
                             // emits rt_str_cmp; == keeps the eq path
                         } else {
                             self.assignable(&Ty::Int, &lt, l.span);

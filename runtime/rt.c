@@ -211,7 +211,7 @@ struct RtTask {
     int waitkind;             /* WK_* below */
     struct RtSel *sel;        /* live select wait, if any */
     int sel_arm;              /* winning select arm */
-    /* wake-vs-park protocol (goready/Gopark): ONSTACK while poll runs;
+    /* wake-vs-park protocol: ONSTACK while poll runs;
      * a waker swaps PARKED->WAKE_REQ or plants WAKE_REQ for the driver
      * to self-enqueue when it actually leaves the C stack */
     volatile int wstate;
@@ -2170,7 +2170,7 @@ int64_t rt_htonl(int64_t v) { return htonl((uint32_t)v); }
 
 /* ---------------- file io + process ---------------- */
 
-/* env probe for the module system — "" when unset (matches Rust's
+/* env probe for the module system — "" when unset (matches the seed's
  * Option env semantics at the call sites that use it) */
 OxlStr rt_getenv(OxlStr name) {
     char *cp = rt_alloc(name.n + 1);
@@ -2264,7 +2264,7 @@ int64_t rt_isdir(OxlStr path) {
 }
 
 /* regular-file probe — lstat-style: a symlink is NOT a regular file,
- * so module-cache hashing skips links exactly like Rust's
+ * so module-cache hashing skips links exactly like the seed's
  * DirEntry::file_type().is_file() */
 int64_t rt_isfile(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
@@ -2327,7 +2327,7 @@ int64_t rt_open_write(OxlStr path) {
 }
 
 /* the read window is the slice's LEN — `b[:n]` sub-slices keep the
- * parent's cap, and Go's Read(p) contract is len(p) bytes max */
+ * parent's cap, and the Read contract is len(p) bytes max */
 int64_t rt_fd_read(int64_t fd, RtSlice b) {
 #ifdef _WIN32
     int n = _read((int)fd, b.ptr, (unsigned)b.len);
@@ -2929,7 +2929,7 @@ void rt_sqlite_close(void *db) { sqlite3_close((sqlite3 *)db); }
 
 /* ---------------- S3: str ordering, platform probe, clock, libm ---- */
 
-/* byte-wise lexicographic order — Go's str < str semantics: the shared
+/* byte-wise lexicographic order — the shared str < str semantics:
  * prefix decides, then length breaks the tie ("a" < "ab") */
 int64_t rt_str_cmp(OxlStr a, OxlStr b) {
     size_t n = a.n < b.n ? (size_t)a.n : (size_t)b.n;

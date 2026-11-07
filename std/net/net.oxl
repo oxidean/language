@@ -1,9 +1,9 @@
 package net
 
-// std/net — TCP sockets behind Go-shaped Conn/Listener types. Conn
+// std/net — TCP sockets behind Conn/Listener types. Conn
 // implements io.Reader/Writer/Closer (S2's interfaces); Listener wraps
 // the accept socket. Hosts are dotted IPv4 literals — name resolution
-// stays parked (Go parity for numeric hosts covers loopback and every
+// stays parked (numeric hosts cover loopback and every
 // internal service).
 import "std/io"
 
@@ -102,7 +102,7 @@ fn parse_ipv4(host: str) -> [int, err] {
 }
 
 /// dial opens a TCP connection to host:port — host must be a dotted
-/// IPv4 literal ("127.0.0.1"), connect bounded at 30s (Go's default
+/// IPv4 literal ("127.0.0.1"), connect bounded at 30s (the usual
 /// transport timeout). Returns [conn, nil] or an error.
 fn dial(host: str, port: int) -> [Conn, err] {
     return dial_timeout(host, port, 30000)

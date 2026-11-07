@@ -1,6 +1,6 @@
 package hex
 
-// std/encoding/hex — RFC 4648 §8 lower-case hex. Go's shape:
+// std/encoding/hex — RFC 4648 §8 lower-case hex.
 // encode/decode over []byte<->str; decode rejects odd lengths and
 // non-hex bytes.
 import "std/errors"
@@ -35,7 +35,7 @@ fn nib(c: int) -> int {
 }
 
 /// decode parses hex s — odd length and non-hex bytes are errors
-/// (Go's ErrLength/InvalidByteError semantics, one err string).
+/// (length/invalid-byte failures come back as one err string).
 fn decode(s: str) -> [own []byte, err] {
     if len(s) % 2 != 0 {
         return nil, errors.new("hex: odd length string")

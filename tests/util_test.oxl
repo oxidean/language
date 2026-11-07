@@ -1,6 +1,6 @@
 package main
 
-// S3 acceptance: the Go-parity util surface — path/filepath string
+// S3 acceptance: the util surface — path/filepath string
 // ops, generic cmp/sort/slices over the widened Ordered constraint
 // (float + str now satisfy it), concrete maps over collections.Map,
 // math wrappers, drand48 rand determinism, and utf8 edge cases.
@@ -53,7 +53,7 @@ fn test_path() {
     testing.expect(!path.matches("*.txt", "a.png"), "match neg")
     testing.expect(!path.matches("a", "ab"), "match len")
     // a ".." cancels a normal segment only — retained leading ".."
-    // must survive (Go: clean("../..") == "../..")
+    // must survive (clean("../..") == "../..")
     testing.expect_streq(path.clean("../.."), "../..", "clean keeps leading ..")
     testing.expect_streq(path.clean("../../b"), "../../b", "clean keeps leading ..x2")
     testing.expect_streq(path.clean("../a/../.."), "../..", "clean .. cancels seg")

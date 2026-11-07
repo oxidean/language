@@ -1,6 +1,6 @@
 package csv
 
-// std/encoding/csv — RFC 4180 reader/writer, Go's semantics by
+// std/encoding/csv — RFC 4180 reader/writer, the established semantics by
 // default: quoted fields, "" escapes, embedded commas/newlines/CR,
 // a bare quote mid-field is an error (no LazyQuotes). Records end on
 // \n or \r\n; \r alone inside quotes is kept.
@@ -51,7 +51,7 @@ fn scan_one(s: str, pos: int) -> [Scan, err] {
             }
         } else if c == 34 {
             if started {
-                // bare quote inside an unquoted field — Go's
+                // bare quote inside an unquoted field — the
                 // default rejects these (LazyQuotes off)
                 return Scan{fields: nil, next: i}, errors.new("csv: bare \" in unquoted field")
             }
@@ -73,8 +73,8 @@ fn scan_one(s: str, pos: int) -> [Scan, err] {
                 return Scan{fields: fields, next: i + 2}, nil
             }
             // bare CR ends the record too (RFC treats lone \r
-            // leniently; Go eats it as data — kept as data here:
-            // simpler and matches Go's field content)
+            // leniently; this reader eats it as data — kept as
+            // data here: simpler and matches field content)
             field = field + "\r"
             i = i + 1
         } else {
@@ -106,7 +106,7 @@ fn read_all(s: str) -> [own [][]str, err] {
 }
 
 /// format_record renders one record — fields quoting only when they
-/// contain a comma, quote, \n or \r (Go's minimal-quoting rule).
+/// contain a comma, quote, \n or \r (the minimal-quoting rule).
 fn format_record(fields: []str) -> str {
     out := mkslice(byte, 0)
     i := 0

@@ -1,11 +1,11 @@
 package hash
 
-// std/hash — Go's hash surface: a Hash interface every algorithm
+// std/hash — a Hash interface every algorithm
 // implements (io.Writer + sum/reset/blocksize) plus one-shot helpers.
 // All pure .oxl — fnv/adler32/crc32 are short enough that porting C
 // would cost more than it buys.
 /// Hash is an incremental digest — write bytes in, sum appends the
-/// running digest to b and returns the grown slice (Go's Sum shape:
+/// running digest to b and returns the grown slice (the Sum shape:
 /// `sum(nil)` yields just the digest). reset returns to initial.
 /// blocksize is the algorithm's chunk size (hmac keys off it).
 /// The write contract is io.Writer's.
@@ -38,7 +38,7 @@ fn (f mut Fnv32) write(b: []byte) -> [int, err] {
 }
 
 fn (f mut Fnv32) sum(b: []byte) -> own []byte {
-    // append the 4 big-endian digest bytes — Go's Sum shape
+    // append the 4 big-endian digest bytes — the Sum shape
     r := mkslice(byte, 4)
     r[0] = f.h / 16777216 % 256
     r[1] = f.h / 65536 % 256
@@ -47,7 +47,7 @@ fn (f mut Fnv32) sum(b: []byte) -> own []byte {
     return concat(b, r)
 }
 
-/// sum32 is the int read-out — Go's Sum32.
+/// sum32 is the int read-out.
 fn (f ref Fnv32) sum32() -> int {
     return f.h
 }
@@ -79,7 +79,7 @@ fn (f mut Fnv64) sum(b: []byte) -> own []byte {
     return concat(b, r)
 }
 
-/// sum64 is the int read-out — Go's Sum64.
+/// sum64 is the int read-out.
 fn (f ref Fnv64) sum64() -> int {
     return f.h
 }

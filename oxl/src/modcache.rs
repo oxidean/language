@@ -1,11 +1,12 @@
 //! V2: module cache layout, content hashing, `oxl.sum` integrity and
-//! safe archive extraction. Mirrors cmd/go's modfetch + dirhash on a
+//! safe archive extraction. Mirrors the established module-fetch +
+//! dirhash design on a
 //! smaller grammar — no crates, everything self-contained so the
 //! self-hosted checker can port the same procedures.
 
 use std::path::{Path, PathBuf};
 
-/// Go's module.EscapePath: every uppercase letter becomes `!` +
+/// Path escaping: every uppercase letter becomes `!` +
 /// lowercase, so case-insensitive filesystems can't collide slots.
 /// Applied to module paths and versions alike.
 pub fn escape_path(s: &str) -> String {
@@ -131,7 +132,7 @@ pub fn b64(b: &[u8]) -> String {
     out
 }
 
-// ---------- h1 dirhash (Go's dirhash.Hash1 shape) ------------------
+// ---------- h1 dirhash (the dirhash.Hash1 shape) ------------------
 
 /// hash1 over (relpath, content-hex) entries: sort by name, hash the
 /// concatenated "<hex>  <name>\n" lines, base64 the digest.
@@ -179,7 +180,7 @@ fn walk(base: &Path, dir: &Path, entries: &mut Vec<(String, String)>) -> Result<
 }
 
 /// hash of a fetched manifest, recorded as `<esc-path>@<ver>.mod` —
-/// Go's HashMod shape (single synthetic entry)
+/// HashMod shape (single synthetic entry)
 pub fn mod_h1(path: &str, ver: &str, bytes: &[u8]) -> String {
     let name = format!("{}@{}.mod", escape_path(path), escape_path(ver));
     hash1(&mut vec![(name, hex(&sha256(bytes)))])
@@ -237,7 +238,7 @@ pub fn sums_text(sums: &[SumLine]) -> String {
 }
 
 /// verify a cached slot against the sums: both the tree line and the
-/// /mod line must exist and match — Go's two-entry rule.
+/// /mod line must exist and match — the two-entry rule.
 pub fn verify_slot(dir: &Path, path: &str, ver: &str, sums: &[SumLine]) -> Result<(), String> {
     let tree = sum_for(sums, path, ver, false)
         .ok_or_else(|| format!("missing oxl.sum entry for module {path}"))?;
@@ -394,7 +395,7 @@ pub fn untar(bytes: &[u8], dest: &Path) -> Result<u64, String> {
 }
 
 /// strip write permission everywhere below `dir` — a cache slot is
-/// immutable once sealed (Go learned this the hard way)
+/// immutable once sealed (corruption-by-edit is a real failure mode)
 pub fn seal(dir: &Path) -> Result<(), String> {
     fn ro(p: &Path) -> Result<(), String> {
         let mut perm = std::fs::metadata(p).map_err(|e| e.to_string())?.permissions();

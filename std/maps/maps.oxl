@@ -1,13 +1,13 @@
 package maps
 
-// std/maps — Go's maps package over the collections map. The
+// std/maps — map helpers over the collections map. The
 // language's map is concrete (str keys, int values — the bootstrap
 // checker's shape), so these helpers are concrete too; the generic
 // signatures land when the map type does.
 import "std/collections"
 
-/// keys returns every key in m — Go's maps.Keys collected. Order is
-/// bucket order, not sorted (Go makes no order promise either).
+/// keys returns every key in m. Order is
+/// bucket order, not sorted (no order promise).
 fn keys(m: ref collections.Map) -> own []str {
     out := new(mkslice(str, collections.map_len(m)))
     n := 0
@@ -24,7 +24,7 @@ fn keys(m: ref collections.Map) -> own []str {
     return out
 }
 
-/// values returns every value in m — Go's maps.Values collected.
+/// values returns every value in m.
 fn values(m: ref collections.Map) -> own []int {
     out := new(mkslice(int, collections.map_len(m)))
     n := 0
@@ -41,7 +41,7 @@ fn values(m: ref collections.Map) -> own []int {
     return out
 }
 
-/// copy inserts every entry of src into dst — Go's maps.Copy.
+/// copy inserts every entry of src into dst.
 fn copy(dst: mut collections.Map, src: ref collections.Map) {
     i := 0
     for i < len(src.bs) {
@@ -55,7 +55,7 @@ fn copy(dst: mut collections.Map, src: ref collections.Map) {
 }
 
 /// equal reports whether a and b have the same keys with equal
-/// values — Go's maps.Equal.
+/// values — maps.Equal.
 fn equal(a: ref collections.Map, b: ref collections.Map) -> bool {
     if collections.map_len(a) != collections.map_len(b) {
         return false

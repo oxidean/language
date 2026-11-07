@@ -213,7 +213,7 @@ fn (s mut Sha) write(b: []byte) -> [int, err] {
 }
 
 fn (s mut Sha) sum(b: []byte) -> own []byte {
-    // snapshot — Sum must not disturb the running state (Go contract)
+    // snapshot — Sum must not disturb the running state
     st := mkslice(int, 8)
     i := 0
     for i < 8 {

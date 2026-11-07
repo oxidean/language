@@ -1,7 +1,7 @@
 package log
 
-// std/log — leveled timestamped logger, the small end of Go's log +
-// slog surface. Lines go to stderr in a fixed shape so callers can
+// std/log — leveled timestamped logger. Lines go to stderr in a fixed
+// shape so callers can
 // assert it:
 //
 //     2026-11-06 20:01:02 INFO starting up
@@ -13,7 +13,7 @@ import "std/os"
 extern fn rt_timestr() -> str
 
 // Level thresholds — package `let`s aren't importable, so each is a
-// one-line fn instead of a Go-style exported constant.
+// one-line fn instead of an exported constant.
 let g_debug: int = 0
 
 let g_info: int = 1
@@ -101,7 +101,7 @@ fn error(msg: str) {
     emit(g_error, "ERROR", msg)
 }
 
-/// fatal logs at ERROR and exits nonzero — Go's log.Fatal shape.
+/// fatal logs at ERROR and exits nonzero.
 fn fatal(msg: str) {
     f := os.stderr()
     [_, e] = f.write(line("FATAL", msg) as []byte)
