@@ -2,8 +2,8 @@
 
 Stage boundaries so parallel worktrees can build independently. Each
 stage consumes the previous stage's output; shapes below are the
-contract. Implementation language: **Rust** (design doc: "Zig preferred,
-Rust acceptable" — Zig absent on the dev machine, Rust 1.100 present).
+contract. Seed implementation language: **Rust** (the self-hosted
+components under `bootstrap/` implement the same contracts).
 
 ## Pipeline
 
@@ -64,7 +64,7 @@ not yet emitted by the checker:
 
 ## Codegen (interim backend)
 
-Target: **C99 → cc → native binary**. Chosen as the bootstrap backend:
+Target: **C11 → cc → native binary**. Chosen as the bootstrap backend:
 LLVM bindings would gate the skeleton on an external dependency; C emit
 exercises the full pipeline today and keeps the backend swappable
 (`codegen/` is the only cc-aware module; an LLVM backend drops in behind

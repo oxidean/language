@@ -8,11 +8,12 @@
 - Compiler skeleton: lexer/parser → AST → typechecker → native codegen
 - Minimal runtime: scope arenas, ownership metadata + checks,
   scope-contained traps
-- Go-style `[v, err]` errors with must-use checking; C FFI
+- `[v, err]` error returns with must-use checking; C FFI
 - Integrated toolchain binary: build, run, test, fmt, doc, LSP
 - Concurrency runtime: single-thread executor, scopes, channels,
   multithread work-stealing pool
-- Service-shaped stdlib subset; generics (Go-style type parameters)
+- Service-shaped stdlib subset; generics (type parameters with
+  constraint interfaces)
 - Pilot apps under `examples/`: CLI; HTTP CRUD server + SQLite
 - Open-source plumbing: MIT license, CI, release builds, docs
 

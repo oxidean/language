@@ -2,10 +2,10 @@
 
 ## Intent and the why
 
-A new general-purpose programming language. Primary driver: keep Go's
-developer experience — small spec, obvious code, instant builds — while
-removing the two things that cost Go its footprint: the tracing GC and
-the heavyweight runtime. First users are **internal projects and
+A new general-purpose programming language. Primary driver: keep
+scripting-class developer experience — small spec, obvious code,
+instant builds — on a lean native footprint: no tracing GC, no
+heavyweight runtime. First users are **internal projects and
 services**; the language will be **open-sourced early**, so tooling,
 docs, and error quality are first-class requirements, not afterthoughts.
 
@@ -13,26 +13,29 @@ docs, and error quality are first-class requirements, not afterthoughts.
 
 - Lean memory profile: no tracing GC, small binaries, small resident
   footprint.
-- Fast builds in the Go/Zig class; fast runtime in the native class
-  (AOT, no JIT).
-- Go-shaped DX: explicit over clever, one obvious way, productive
-  compiler errors, integrated tooling.
+- Fast builds in the near-instant class; fast runtime in the native
+  class (AOT, no JIT).
+- DX: explicit over clever, one obvious way, productive compiler
+  errors, integrated tooling.
 - Targets: native CLI and long-running services in v0.0.1; GUI and web
   (JS/HTML/CSS) in charter, deferred.
 - C FFI from day one.
-- Single toolchain binary: build, run, test, fmt, doc, LSP.
+- Single toolchain binary: build, run, test, fmt, doc, mod, LSP.
 
 ## Non-goals (v0.0.1)
 
 - No GUI toolkit, no web backend (both chartered for later — see below).
 - No macros, no free-form compile-time metaprogramming, no exceptions.
 - No package ecosystem/registry beyond a minimal module story.
+  *(Superseded: a full module system — manifests, versioned deps over
+  git, a content-addressed cache — shipped in the package-system spec.)*
 
 ## Anti-goals (failure even if it "works")
 
-- A borrow checker users fight (Rust-class DX friction).
-- Runtime weight approaching Go's (GC + scheduler + big binaries).
-- Build times approaching Rust/Swift's (rich-type-system compile cost).
+- A borrow checker users fight (static-ownership-class DX friction).
+- Runtime weight approaching a managed runtime's (GC + scheduler + big
+  binaries).
+- Build times approaching a rich-type-system language's.
 - Function-colored async syntax as the only concurrency surface.
 
 ## Approaches — the decisions
@@ -47,7 +50,8 @@ static with boundary annotations.
 
 **Picked: static types, explicit at boundaries, inferred inside bodies.**
 Signatures, fields, and exported API require annotations; inside function
-bodies, `:=`/`let`-style local inference (Go/Rust flavor). Rationale:
+bodies, `:=`/`let`-style local inference (familiar brace-family flavor).
+Rationale:
 known interfaces make per-module parallel and incremental compilation
 cheap, LSP features become lookups instead of analysis, and static types
 enable monomorphized unboxed values (which serves the memory goal).
@@ -56,14 +60,14 @@ The type system is deliberately *shallow* — strict but boring.
 ### 2. Memory management — DECIDED (direction)
 
 Options: tracing GC (fails lean goal), static ownership/borrow checker
-(fails DX goal), refcounting (Swift model), manual + arenas (Zig/Odin),
-dynamic ownership enforcement.
+(fails DX goal), refcounting, manual + arenas, dynamic ownership
+enforcement.
 
 **Picked: dynamic ownership + borrow checking.** Borrow/ownership rules
-are enforced at runtime; violations trap deterministically (Go-style
-failure model — same shape as nil-deref or out-of-bounds panics).
-Precedents: Rust's `RefCell` (runtime borrow rules), Swift's dynamic
-exclusivity enforcement, Vale's generational references. The compiler
+are enforced at runtime; violations trap deterministically — the same
+failure shape as a nil-deref or out-of-bounds fault.
+Precedents: interior-mutability runtime borrow rules, dynamic
+exclusivity enforcement, generational references. The compiler
 elides checks it can prove statically — the borrow checker acts as
 optimizer, not gatekeeper. Metadata cost: a few bytes per heap object +
 a branch-predictable flag check per borrow/deref. Cross-thread shared
@@ -89,9 +93,9 @@ would be the cheap half of the product.
 **Trap semantics: scope-contained.** A violation inside a scoped task
 kills that task, cancels its siblings, unwinds the scope (arena frees in
 bulk — no walk of half-valid objects), and propagates failure to the
-parent scope, which handles it or dies itself. Go's panic is the wrong
-model for services; this is supervision built into the concurrency
-model. Process-kill (`abort`) remains for traps outside any scope or
+parent scope, which handles it or dies itself. An unwinding panic is
+the wrong model for services; this is supervision built into the
+concurrency model. Process-kill (`abort`) remains for traps outside any scope or
 corruption a scope cannot safely unwind. Requires unwind/teardown
 machinery and a defined "poisoned" state for shared data held by the
 dying task — runtime work, listed here so nobody is surprised.
@@ -102,10 +106,11 @@ up as a semantics annex to this doc.
 
 ### 3. Concurrency — DECIDED (direction)
 
-Surface: Go-shaped — `go`/`spawn` inside a `scope` block (structured
+Surface: `go`/`spawn` inside a `scope` block (structured
 concurrency; scope end joins/cancels children), first-class channels
 that **transfer ownership** on send. Shared state only via `Shared<T>`
-with dynamic checks. Fixes Go's goroutine-leak/cancellation gaps.
+with dynamic checks — no leaked tasks and no orphaned cancellation
+gaps.
 
 Implementation: **stackless coroutines + executor-as-library.**
 Suspendable functions compile to state machines; task frames are
@@ -114,7 +119,7 @@ A sequential CLI pays nothing — no mandatory runtime. Single-threaded
 executor (a queue + a loop) is near-free and doubles as the future
 GUI main-thread story; a work-stealing multithread pool is opt-in for
 services. Task frames live in the spawning scope's arena and free in
-one shot when the scope closes. Colorless-ish surface (Zig-style):
+one shot when the scope closes. Colorless-ish surface:
 blocking-looking code, no mandatory `async`/`await` ceremony.
 
 The suspend-capable set is determined by compiler reachability analysis
@@ -130,29 +135,30 @@ committed.
 Known costs the builder must design for: the state-machine transform is
 the hardest compiler feature in this spec; debugging through suspended
 tasks needs tooling attention; blocking C FFI/syscalls can't suspend —
-a blocking-thread escape hatch is required (Go solves the same problem).
+a blocking-thread escape hatch is required.
 `select`-style multi-channel wait: defined in
 `docs/semantics/concurrency.md`.
 
 ### 4. Error handling — DECIDED
 
-Options: Go multiple returns, Rust `Result`+`?`, Zig error unions + `try`,
+Options: multiple returns, `Result`+`?` unions, error unions + `try`,
 exceptions (rejected — invisible control flow, unwind machinery).
 
-**Picked: Go-style `[value, err]` multiple returns** with `if err != nil`
-idiom. Errors are values carrying context (Go `error` semantics, not
-Zig name-only sets). Two-tier model: expected failure = error values;
+**Picked: `[value, err]` multiple returns** with `if err != nil`
+idiom. Errors are values carrying context (typed error values, not
+name-only error sets). Two-tier model: expected failure = error values;
 bugs/contract violations = traps (from §2).
 
-One departure from Go, by design: **silently dropping an error is a
-compile error** (`v, _ := f()` losing `err` is flagged). Keeps Go's
-ergonomics, removes its most-patched footgun.
+One deliberate tightening over the classic multiple-return idiom:
+**silently dropping an error is a compile error** (`v, _ := f()` losing
+`err` is flagged). Keeps the ergonomics of checked error values,
+removes their most-patched footgun.
 
 ### 5. Generics & compile-time code — DECIDED
 
-**Picked: Go-style type parameters with constraint interfaces.**
+**Picked: type parameters with constraint interfaces.**
 Implementation preference: shape-based instantiation sharing
-(Go's gcshape stenciling — monomorphize per memory layout, not per
+(gcshape stenciling — monomorphize per memory layout, not per
 type) to bound compile time and binary size; full monomorphization is
 an acceptable v1 simplification. Compile-time evaluation allowed for
 constants only (array sizes, lookup tables). **Anti-goal: macros and
@@ -180,9 +186,9 @@ arbitrary compile-time code.**
 
 - One binary: build, run, test, fmt, doc, LSP. Non-negotiable.
 - C FFI from day one (ecosystem bridge).
-- Compiler implementation language: Zig preferred (lean ethos, trivial
-  C interop, LLVM or self-hosted codegen), Rust acceptable. Builder
-  settles this; self-hosting is a much-later milestone.
+- Seed implementation language: **Rust** — settled; a lean
+  C-interop language was the alternative weighed. Self-hosting was a
+  later milestone and has since landed (`bootstrap/`).
 - Developed in the open per "open-sourced almost instantly": license
   (my call: MIT), CI/release plumbing, and contribution docs land in
   early milestones rather than pre-release scramble.
@@ -225,5 +231,5 @@ with docs and a toolchain a stranger can install; builds fast enough
 that users don't think about builds.
 
 **Failure looks like:** users fighting ownership rules the way they
-fight Rust's borrow checker; binaries with a runtime story like Go's;
-a compile step anyone describes as slow.
+fight a static borrow checker; binaries with a managed-runtime
+footprint; a compile step anyone describes as slow.

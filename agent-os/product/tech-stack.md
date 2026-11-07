@@ -8,13 +8,12 @@ and a Qt/GTK FFI bridge. Web target (JS/HTML/CSS) parked.
 
 ## Backend
 
-Compiler implementation: Rust (`oxl/`). Codegen: C emission compiled
-through the system `cc` (`LANG_CC`/`LANG_LDFLAGS`/`LANG_SQLITE_SRC`
-knobs). The Rust compiler remains the reference toolchain; the
-`bootstrap/` components self-compile and run correctly — lexer/parser/
-check/codegen all four emit identical output under self-compilation
-(codegen's documented gap: interface-typed values need RtIface
-emission). "Self-hosted" now describes the chain state.
+Seed compiler implementation: Rust (`oxl/`). Codegen: C emission
+compiled through the system `cc` (`LANG_CC`/`LANG_LDFLAGS`/
+`LANG_SQLITE_SRC` knobs). The seed compiler remains the reference
+toolchain; the `bootstrap/` components self-compile and run correctly
+— lexer/parser/check/codegen all four emit identical output under
+self-compilation. "Self-hosted" describes the chain state.
 Runtime: C-compatible (`runtime/rt.c`), arena-based, no tracing GC.
 LLVM remains a possible future backend once codegen size justifies it.
 

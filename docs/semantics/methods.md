@@ -1,8 +1,8 @@
 # Methods and interface dispatch (D3)
 
 Methods are fns declared on a named type; interface-typed values are
-fat `{data, vtable}` pairs dispatched Go-style. Deliberately shallow —
-structural satisfaction, no trait solving, no inheritance.
+fat `{data, vtable}` pairs dispatched through the vtable. Deliberately
+shallow — structural satisfaction, no trait solving, no inheritance.
 
 ```oxl
 struct Point { x: int, y: int }
@@ -31,8 +31,8 @@ The method's *declared name* is `T.name` after module qualification —
 two types may share a method name, and `norm(p)` (receiver in arg
 position) calls the same fn as `p.norm()`.
 
-Receiver adaptation mirrors Go: `p.shift(..)` on a value `p` passes
-`&p` (requires an lvalue — `f().shift(..)` is an error, bind first);
+Receiver adaptation: `p.shift(..)` on a value `p` passes `&p`
+(requires an lvalue — `f().shift(..)` is an error, bind first);
 `p.norm()` on a pointer `p` dereferences for a value receiver — there is
 no unary `&` expression in the syntax, the adaptation is compiler-side.
 
@@ -91,4 +91,4 @@ structs are not generic.
   the field.
 - The bootstrap codegen (`bootstrap/codegen.oxl`) does not lower
   method dispatch — parser and checker handle `fn (r T) m` receivers
-  and interface sigs; lowering stays on the Rust pipeline.
+  and interface sigs; lowering stays on the seed pipeline.
