@@ -1,0 +1,11 @@
+name: normal
+version: 1
+stages:
+  - discovery
+  - brainstorming
+  - specification
+  - planning
+  - implementation
+  - verification
+  - shipping
+  - retrospective

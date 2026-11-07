@@ -31,7 +31,9 @@ so have Python 3 on `PATH` before running the suite.
 - `docs/semantics/` — the contracts everything is built against
 - `tests/diag/` — diagnostic fixtures; both checkers must emit identical
   diagnostics for every one
-- `agent-os/` — product + spec docs (Agent OS planning artifacts)
+- `docs/` — product docs, standards, semantics, and the spec archive
+- `.ox-agent/` — ox-agent work items, skills, workflows, and pipelines
+  (materialized assets — add extension skills as new dirs, never edit in place)
 
 ## Keeping the two implementations in parity
 

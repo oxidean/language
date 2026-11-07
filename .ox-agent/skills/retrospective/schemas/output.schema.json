@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "invocation_id",
+    "skill",
+    "status",
+    "verdict",
+    "summary",
+    "artifacts",
+    "findings",
+    "next_action"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "invocation_id": {
+      "type": "string"
+    },
+    "skill": {
+      "const": "ox-agent/retrospective"
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "blocked",
+        "failed"
+      ]
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "pass_with_notes",
+        "needs_rework",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "artifacts": {
+      "type": "array"
+    },
+    "findings": {
+      "type": "array"
+    },
+    "next_action": {
+      "type": "object",
+      "required": [
+        "type",
+        "reason"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "advance_stage",
+            "retry",
+            "escalate",
+            "await_input",
+            "complete"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 2,
+          "description": "answer choices for an await_input decision request"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

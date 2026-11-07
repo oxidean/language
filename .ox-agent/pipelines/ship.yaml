@@ -1,0 +1,10 @@
+name: ship
+version: 1
+steps:
+  - id: verify
+    skill: verify
+    stage: verification
+  - id: ship
+    skill: shipping
+    stage: shipping
+    depends_on: [verify]

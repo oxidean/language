@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ox-agent.dev/schemas/run.schema.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "work_item_id",
+    "skill",
+    "stage",
+    "adapter",
+    "status",
+    "packet_path",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_"
+    },
+    "work_item_id": {
+      "type": "string",
+      "pattern": "^WI-[0-9]{4,}$"
+    },
+    "skill": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stage": {
+      "type": "string",
+      "minLength": 1
+    },
+    "adapter": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "spawn-cli",
+        "webhook",
+        "api"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "collected",
+        "retry",
+        "failed"
+      ]
+    },
+    "packet_path": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "collected_at": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
+    },
+    "awaiting_input": {
+      "type": "string",
+      "pattern": "^IN-[0-9]+$",
+      "description": "input request the run is parked on (next_action await_input)"
+    }
+  },
+  "additionalProperties": true
+}

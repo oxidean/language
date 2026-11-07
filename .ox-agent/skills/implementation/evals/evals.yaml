@@ -1,0 +1,27 @@
+schema_version: 1
+skill: ox-agent/implementation
+cases:
+  - id: bounded-change
+    prompt: >-
+      Implement the approved stage inside constraints.allowed_paths and
+      list every changed file as a changed_paths artifact.
+    expected:
+      output_schema_valid: true
+      within_allowed_paths: true
+      changes_listed: true
+  - id: failure-edges
+    prompt: >-
+      Note the change's failure modes and edge cases in findings.
+    expected:
+      output_schema_valid: true
+      edge_cases_noted: true
+  - id: respects-scope
+    prompt: >-
+      Execute the skill using only the supplied work-item context and
+      constraints.
+    expected:
+      output_schema_valid: true
+      preserves_scope: true
+thresholds:
+  schema_pass_rate: 1.0
+  quality_pass_rate: 0.9

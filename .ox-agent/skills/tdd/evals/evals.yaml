@@ -1,0 +1,27 @@
+schema_version: 1
+skill: ox-agent/tdd
+cases:
+  - id: red-first
+    prompt: >-
+      Drive the change test-first using context.project.test_command and
+      record red-to-green evidence in findings.
+    expected:
+      output_schema_valid: true
+      red_first: true
+      evidence_recorded: true
+  - id: bounded-paths
+    prompt: >-
+      Keep tests and implementation inside constraints.allowed_paths.
+    expected:
+      output_schema_valid: true
+      within_allowed_paths: true
+  - id: respects-scope
+    prompt: >-
+      Execute the skill using only the supplied work-item context and
+      constraints.
+    expected:
+      output_schema_valid: true
+      preserves_scope: true
+thresholds:
+  schema_pass_rate: 1.0
+  quality_pass_rate: 0.9

@@ -1,0 +1,42 @@
+schema_version: 1
+states:
+  - intake
+  - discovering
+  - brainstorming
+  - specifying
+  - planning
+  - implementing
+  - verifying
+  - shipping
+  - shipped
+  - retrospecting
+  - blocked
+  - archived
+transitions:
+  - from: intake
+    to: discovering
+  - from: discovering
+    to: brainstorming
+  - from: brainstorming
+    to: specifying
+  - from: specifying
+    to: planning
+  - from: planning
+    to: implementing
+  - from: implementing
+    to: verifying
+  - from: verifying
+    to: shipping
+  - from: verifying
+    to: implementing
+  - from: shipping
+    to: shipped
+    gate: human
+  - from: shipped
+    to: retrospecting
+  - from: "*"
+    to: blocked
+  - from: blocked
+    to: "*"
+  - from: "*"
+    to: archived

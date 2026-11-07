@@ -1,0 +1,18 @@
+schema_version: 1
+name: ox-agent/verify
+version: 0.1.0
+kind: core
+category: verification
+description: >-
+  Verify tests, traceability, policy compliance, rollback readiness, and
+  operational requirements before shipping.
+compatibility:
+  skill_api: 1
+  ox_agent: '>=0.1.0-0 <0.2.0'
+inputs:
+  schema: schemas/input.schema.json
+outputs:
+  schema: schemas/output.schema.json
+evaluation:
+  suite: evals/evals.yaml
+  minimum_pass_rate: 0.9

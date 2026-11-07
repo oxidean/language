@@ -1,0 +1,28 @@
+schema_version: 1
+skill: ox-agent/verify
+cases:
+  - id: run-checks
+    prompt: >-
+      Run context.project.test_command and record command, outcome, and
+      evidence for each spec acceptance criterion.
+    expected:
+      output_schema_valid: true
+      command_run: true
+      evidence_in_findings: true
+      criteria_checked: true
+  - id: verdict-from-evidence
+    prompt: >-
+      Return pass or needs_rework strictly from the recorded evidence.
+    expected:
+      output_schema_valid: true
+      criteria_checked: true
+  - id: respects-scope
+    prompt: >-
+      Execute the skill using only the supplied work-item context and
+      constraints.
+    expected:
+      output_schema_valid: true
+      preserves_scope: true
+thresholds:
+  schema_pass_rate: 1.0
+  quality_pass_rate: 0.9

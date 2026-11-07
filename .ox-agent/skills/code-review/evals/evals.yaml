@@ -1,0 +1,28 @@
+schema_version: 1
+skill: ox-agent/code-review
+cases:
+  - id: review-implementation
+    prompt: >-
+      Review the implementation run's changed_paths against the spec and
+      project standards.
+    expected:
+      output_schema_valid: true
+      reviewed_changed_paths: true
+  - id: cite-and-rank
+    prompt: >-
+      Produce severity-ranked review comments citing file:line for every
+      finding so the verify stage can gate on them.
+    expected:
+      output_schema_valid: true
+      findings_cited: true
+      severity_ranked: true
+  - id: respects-scope
+    prompt: >-
+      Execute the skill using only the supplied work-item context and
+      constraints.
+    expected:
+      output_schema_valid: true
+      preserves_scope: true
+thresholds:
+  schema_pass_rate: 1.0
+  quality_pass_rate: 0.9

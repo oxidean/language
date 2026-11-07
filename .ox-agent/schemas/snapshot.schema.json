@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ox-agent.dev/schemas/snapshot.schema.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "work_item_id",
+    "generated_at",
+    "state",
+    "current_stage",
+    "events",
+    "history"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "work_item_id": {
+      "type": "string"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "current_stage": {
+      "type": "string"
+    },
+    "events": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_event_id": {
+      "type": "string"
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": true
+}

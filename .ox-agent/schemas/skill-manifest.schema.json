@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ox-agent.dev/schemas/skill-manifest.schema.json",
+  "type": "object",
+  "required": ["schema_version", "name", "version", "kind", "category", "description", "compatibility", "inputs", "outputs", "evaluation"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)?$" },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+" },
+    "kind": { "enum": ["core", "extension"] },
+    "category": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 20 },
+    "compatibility": { "type": "object", "required": ["skill_api", "ox_agent"], "properties": { "skill_api": { "const": 1 }, "ox_agent": { "type": "string" } }, "additionalProperties": true },
+    "inputs": { "type": "object", "required": ["schema"], "properties": { "schema": { "type": "string" } }, "additionalProperties": true },
+    "outputs": { "type": "object", "required": ["schema"], "properties": { "schema": { "type": "string" } }, "additionalProperties": true },
+    "evaluation": { "type": "object", "required": ["suite", "minimum_pass_rate"], "properties": { "suite": { "type": "string" }, "minimum_pass_rate": { "type": "number", "minimum": 0, "maximum": 1 } }, "additionalProperties": true }
+  },
+  "additionalProperties": true
+}

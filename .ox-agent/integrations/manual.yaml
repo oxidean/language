@@ -1,0 +1,8 @@
+schema_version: 1
+name: manual
+adapter: manual
+description: >-
+  Writes the compiled packet to the run directory and prints instructions.
+  The operator hands the packet and SKILL.md to any agent, writes the skill
+  output JSON to output.json, then collects it with `ox-agent run collect`.
+default: true

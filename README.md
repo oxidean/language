@@ -25,11 +25,11 @@ emitter are written in oxl and compile themselves (see
 
 ## Design
 
-- `docs/superpowers/specs/2026-11-03-language-design.md` — approved
-  design (the spec everything traces to)
+- `docs/specs/2026-11-03-language-design.md` — approved design
+  (the spec everything traces to)
 - `docs/semantics/` — ownership, concurrency, and compiler-interface
   contracts
-- `agent-os/specs/` — milestone plans and per-task status
+- `docs/specs/` — milestone plans and per-task status
 - `docs/prototype/report.md` — de-risking benchmarks (state-machine
   frames ~96 B/task; ownership checks ≈ free)
 
@@ -228,9 +228,11 @@ examples/      pilot programs (see above)
 tests/         tests/run.sh end-to-end suite + tests/diag/ checker-diagnostic corpus (runs in CI)
 scripts/       commit-check.sh — commit grammar + no-AI-attribution gate
 prototype/     de-risking benchmarks
-agent-os/      product docs, standards, and the milestone plan
-.agents/skills project skills (agentcanon layout — see AGENTS.md)
+docs/          product docs, standards, semantics, and the spec archive
+.ox-agent/     ox-agent runtime — work items, skills, workflows, pipelines
+.agents/skills materialized agent skills (agentcanon layout — see AGENTS.md)
 ```
 
-Planning flows through Agent OS (`agent-os/`); design exploration
-happened via the brainstorming skill → `agent-os-planning` handoff.
+Planning flows through ox-agent work items (`ox-agent start`); design
+exploration runs through the staged skills (brainstorm → specify →
+multi-stage-plan → implementation → verify → ship).

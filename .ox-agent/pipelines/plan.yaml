@@ -1,0 +1,17 @@
+name: plan
+version: 1
+steps:
+  - id: discover
+    skill: discover-context
+    stage: discovery
+  - id: brainstorm
+    skill: brainstorm
+    stage: brainstorming
+  - id: specify
+    skill: specify
+    stage: specification
+    depends_on: [discover, brainstorm]
+  - id: validate
+    skill: verify
+    stage: verification
+    depends_on: [specify]
