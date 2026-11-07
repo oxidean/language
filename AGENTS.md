@@ -20,7 +20,8 @@ This file is the single source of truth for agent instructions in this repo.
   agent identity.
 - No AI attribution on commits or PRs: no `Co-authored-by` /
   `Generated with` / `Made-with` trailers or bot signatures for any AI
-  or tool, and no invisible markers — `.cursor/rules/no-ai-attribution.mdc`.
+  or tool, and no invisible markers — `.cursor/rules/no-ai-attribution.mdc`
+  (bot-authored PR boilerplate is exempt per the rule's scope note).
 - Commit subjects are SemVer-prefixed `type(scope): subject` and PR
   titles the same — enforced by `scripts/commit-check.sh`
   (`.githooks/commit-msg` locally, CI `commit-lint` on every PR).
