@@ -14,7 +14,12 @@ import "std/strings"
 struct App { name: str }
 
 fn greet(path: str) -> str {
-    who := substr(path, len("/hello/"), len(path))
+    end := len(path)
+    q := find(path, "?")
+    if q >= 0 {
+        end = q
+    }
+    who := substr(path, len("/hello/"), end)
     who = strings.trim(who)
     if who == "" {
         who = "world"
@@ -33,6 +38,5 @@ fn (a App) route(method: str, path: str, body: str) -> http.Resp {
 }
 
 fn main() {
-    println("listening on :8080")
     http.serve(8080, App{name: "oxl"})
 }
