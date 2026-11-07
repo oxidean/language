@@ -58,19 +58,25 @@ fn int31() -> int {
     return top(31)
 }
 
-/// intn returns a uniform value in [0, n). Draws the full
-/// 48-bit state and rejects draws at or above the largest
-/// multiple of n below 2^48, so every outcome is equally likely.
+/// intn returns a uniform value in [0, n). Draws only the high
+/// bits needed to cover n — an LCG's low bits have short periods —
+/// and rejects draws at or above the largest multiple of n below
+/// the drawn span, so every outcome is equally likely.
 /// n must be in [1, 2^48] — the generator's draw range; anything
 /// outside it is a fatal err.
 fn intn(n: int) -> int {
     if n <= 0 || n > modulus {
         exit(1) // process-fatal is exit
     }
-    lim := modulus - modulus % n
-    v := top(48)
+    bits := 1
+    for pow2(bits) < n {
+        bits = bits + 1
+    }
+    span := pow2(bits)
+    lim := span - span % n
+    v := top(bits)
     for v >= lim {
-        v = top(48)
+        v = top(bits)
     }
     return v % n
 }
