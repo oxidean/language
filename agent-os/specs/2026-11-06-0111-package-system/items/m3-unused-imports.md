@@ -4,7 +4,7 @@
 
 Today an import that's never referenced is silent dead weight — and
 under the new model it also means a `require` that shouldn't exist.
-Go's answer is the right one: `imported and not used`, per file, no
+The answer: `imported and not used`, per file, no
 warnings. This is the user's primary "no bloat by neglect" guarantee.
 
 ## Design sketch
@@ -19,7 +19,7 @@ warnings. This is the user's primary "no bloat by neglect" guarantee.
   exempt, currently a no-op (no `init()` in oxl; accepted for parity
   so generated/future code can express intent).
 - Usage test = any reference in the file's decls (fn bodies, types,
-  globals) — Go counts the file, not the decl.
+  globals) — the unit of usage is the file, not the decl.
 - Port to `check.oxl`; new `tests/diag/` fixtures: unused import,
   unused selective name, `as _` exempt, same-import-used (negative).
 - Companion behavior lives in `oxl mod tidy` (V3): it fixes the
@@ -28,7 +28,7 @@ warnings. This is the user's primary "no bloat by neglect" guarantee.
 
 ## Acceptance
 
-- Diag corpus covers all four cases; Rust + self-hosted checker agree
+- Diag corpus covers all four cases; seed + self-hosted checker agree
 - The v0.2 migration commit compiles clean — i.e. the repo itself has
   no unused imports after M1 lands (check before committing)
 - `as _` survives the corpus without error

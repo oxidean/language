@@ -1,6 +1,6 @@
 package path
 
-// std/path — slash-separated path manipulation, Go's path package.
+// std/path — slash-separated path manipulation.
 // Lexical only: no filesystem access, no symlink resolution.
 // `\` is never a separator here (that's std/path/filepath's job).
 import "std/strings"
@@ -12,7 +12,7 @@ fn spush(h: own Seg, v: str) -> own Seg {
     return new(Seg{v: v, next: h})
 }
 
-// clean returns the shortest equivalent path, Go's path.Clean:
+// clean returns the shortest equivalent path:
 // collapse `//`, resolve `.`, resolve `..` against prior segments
 // (kept for a relative path's leading `..`, dropped at root).
 fn clean(p: str) -> str {
@@ -31,7 +31,7 @@ fn clean(p: str) -> str {
         }
         if s == ".." {
             // ".." cancels a normal segment only — a retained leading
-            // ".." must stay (Go: clean("../..") == "../..")
+            // ".." must stay (clean("../..") == "../..")
             if depth > 0 && stack.v != ".." {
                 stack = stack.next
                 depth = depth - 1
@@ -69,7 +69,7 @@ fn clean(p: str) -> str {
     return out
 }
 
-// dir returns all but the last element — Go's path.Dir.
+// dir returns all but the last element.
 fn dir(p: str) -> str {
     d := clean(p)
     i := len(d) - 1
@@ -85,7 +85,7 @@ fn dir(p: str) -> str {
     return clean(substr(d, 0, i))
 }
 
-// base returns the last element — Go's path.Base: ""->".",
+// base returns the last element: ""->".",
 // "/"->"/", trailing slashes strip first.
 fn base(p: str) -> str {
     if len(p) == 0 {
@@ -106,7 +106,7 @@ fn base(p: str) -> str {
 }
 
 // ext returns the suffix from the last `.` in the final element —
-// Go's path.Ext: no dot -> "".
+// ext returns the suffix from the last dot: no dot -> "".
 fn ext(p: str) -> str {
     b := base(p)
     i := len(b) - 1
@@ -122,12 +122,12 @@ fn ext(p: str) -> str {
     return ""
 }
 
-// isabs reports whether p starts with `/` — Go's path.IsAbs.
+// isabs reports whether p starts with `/`.
 fn isabs(p: str) -> bool {
     return len(p) > 0 && byteat(p, 0) == 47
 }
 
-// join concatenates elems with `/` and cleans — Go's path.Join.
+// join concatenates elems with `/` and cleans.
 // `join(a)` callers pass a StrList; scalar convenience is join2.
 fn join(parts: own strings.StrList) -> str {
     out := ""
@@ -152,8 +152,8 @@ fn join2(a: str, b: str) -> str {
     return clean(a + "/" + b)
 }
 
-// matches reports whether name matches the glob pattern — Go's
-// path.Match subset: `*` (any seq), `?` (one char), `[a-z]`/`[^a-z]`
+// matches reports whether name matches the glob pattern —
+// the glob subset: `*` (any seq), `?` (one char), `[a-z]`/`[^a-z]`
 // classes. Neither `*` nor `?` crosses `/`. (`match` is a keyword here.)
 fn matches(pat: str, name: str) -> bool {
     return m_at(pat, 0, name, 0)

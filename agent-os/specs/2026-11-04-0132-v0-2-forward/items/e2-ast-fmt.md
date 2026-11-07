@@ -6,7 +6,7 @@
 it can't canonicalize expression layout (extra parens, operator
 spacing), can't wrap long lines, and doesn't reorder anything.
 `gofmt`-class formatting is table stakes for adoption ("no arguments
-about style" is a Go lesson worth copying).
+about style" is a lesson worth copying).
 
 ## Design sketch
 
@@ -19,8 +19,8 @@ about style" is a Go lesson worth copying).
 - `-w` rewrite, `--check` exits nonzero on diff (CI-friendly)
 - The self-hosted parser's AST is a candidate emitter source —
   writing `bootstrap/fmt.oxl` in `.oxl` once C1 lands is the
-  self-host-friendly path; a Rust-side printer over `ast.rs` is the
-  faster path. **Decide at implementation** — spec recommends Rust-
+  self-host-friendly path; a seed-side printer over `ast.rs` is the
+  faster path. **Decide at implementation** — spec recommends seed-
   side first (the self-hosted AST is JSON-shaped until B1/B2 land).
 
 ## Acceptance
@@ -31,7 +31,7 @@ about style" is a Go lesson worth copying).
 
 ## Depends on
 
-- Nothing hard; easier with the merged-crate AST the checker already
+- Nothing hard; easier with the merged AST the checker already
   produces. If deferred past B1/B2, doing it in `.oxl` becomes the
   better path (self-host dogfooding).
 

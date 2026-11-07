@@ -444,8 +444,8 @@ done
 
 echo "== differential diagnostics (c1) =="
 # tests/diag/ holds files that parse cleanly in both pipelines but fail
-# checking — the Rust checker's diagnostics must equal the self-hosted
-# one's, line for line and in order. The Rust driver prefixes each diag
+# checking — the seed checker's diagnostics must equal the self-hosted
+# one's, line for line and in order. The seed driver prefixes each diag
 # `file:line:col:` (stripped here); check.oxl reports {kind,msg} only.
 # Out of corpus scope by design: parse/lex failures (the [parse]/[lex]
 # kinds don't surface through check.oxl's diag list) and cases neither
@@ -459,20 +459,20 @@ for f in tests/diag/*.oxl; do
     # both checkers must reject every fixture (pipefail carries the
     # build's nonzero status through the sed) — and their diagnostics
     # must be identical. A fixture either side accepts is a test bug.
-    if rust=$("$OXL" build "$f" -o "$scratch/diagbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //'); then
-        echo "FAIL diag parity $f: rust checker accepted"; exit 1
+    if seed=$("$OXL" build "$f" -o "$scratch/diagbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //'); then
+        echo "FAIL diag parity $f: seed checker accepted"; exit 1
     fi
     if self=$("$scratch/selfcheck$EXE" "$f" 2>&1); then
         echo "FAIL diag parity $f: self checker accepted"; exit 1
     fi
-    if [ "$rust" != "$self" ]; then
+    if [ "$seed" != "$self" ]; then
         echo "FAIL diag parity $f"
-        echo "-- rust --"; printf '%s\n' "$rust"
+        echo "-- seed --"; printf '%s\n' "$seed"
         echo "-- self --"; printf '%s\n' "$self"
         exit 1
     fi
     # a corpus file neither side diagnoses is a test bug, not parity
-    if [ -z "$rust" ] || [ "$self" = "ok" ]; then
+    if [ -z "$seed" ] || [ "$self" = "ok" ]; then
         echo "FAIL diag corpus $f: no diagnostics from either checker"; exit 1
     fi
 done
@@ -480,7 +480,7 @@ done
 echo "== module resolution (m2) =="
 # tests/mod/ holds self-contained module trees; each carries its own
 # oxl.mod so root discovery never escapes into the repo's module.
-# `expected` marks the outcome — `ok` fixtures must build in Rust and
+# `expected` marks the outcome — `ok` fixtures must build in the seed toolchain and
 # print `ok` in the self-hosted checker; error fixtures must be
 # rejected by both checkers with byte-identical diagnostics. The
 # module cache is pointed at an empty dir so `missing module` is
@@ -490,29 +490,29 @@ mkdir -p "$scratch/oxlmodcache"
 export OXLMODCACHE="$scratch/oxlmodcache"
 for f in tests/mod/*/; do
     case "$f" in tests/mod/widget/|tests/mod/intmod/) continue ;; esac
-    rust_out=$("$OXL" build "$f" -o "$scratch/modbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //') && rust_rc=0 || rust_rc=1
+    seed_out=$("$OXL" build "$f" -o "$scratch/modbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //') && seed_rc=0 || seed_rc=1
     self_out=$("$scratch/selfcheck$EXE" "$f" 2>&1) && self_rc=0 || self_rc=1
     if [ "$(cat "$f/expected")" = ok ]; then
-        if [ "$rust_rc" != 0 ]; then
-            echo "FAIL module $f: rust checker rejected"; printf '%s\n' "$rust_out"; exit 1
+        if [ "$seed_rc" != 0 ]; then
+            echo "FAIL module $f: seed checker rejected"; printf '%s\n' "$seed_out"; exit 1
         fi
         if [ "$self_rc" != 0 ] || [ "$self_out" != ok ]; then
             echo "FAIL module $f: self checker rejected"; printf '%s\n' "$self_out"; exit 1
         fi
     else
-        if [ "$rust_rc" = 0 ]; then
-            echo "FAIL module $f: rust checker accepted"; exit 1
+        if [ "$seed_rc" = 0 ]; then
+            echo "FAIL module $f: seed checker accepted"; exit 1
         fi
         if [ "$self_rc" = 0 ]; then
             echo "FAIL module $f: self checker accepted"; exit 1
         fi
-        if [ "$rust_out" != "$self_out" ]; then
+        if [ "$seed_out" != "$self_out" ]; then
             echo "FAIL module parity $f"
-            echo "-- rust --"; printf '%s\n' "$rust_out"
+            echo "-- seed --"; printf '%s\n' "$seed_out"
             echo "-- self --"; printf '%s\n' "$self_out"
             exit 1
         fi
-        if [ -z "$rust_out" ]; then
+        if [ -z "$seed_out" ]; then
             echo "FAIL module corpus $f: no diagnostics from either checker"; exit 1
         fi
     fi
@@ -521,11 +521,11 @@ done
 # the local import must fail identically on both checkers.
 mkdir -p "$scratch/modoff"
 printf 'package main\n\nimport "localpkg"\n\nfn main() {}\n' > "$scratch/modoff/main.oxl"
-rust_out=$("$OXL" build "$scratch/modoff" -o "$scratch/modbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //') && rust_rc=0 || rust_rc=1
+seed_out=$("$OXL" build "$scratch/modoff" -o "$scratch/modbin" 2>&1 | sed 's/^[^:]*:[0-9][0-9]*:[0-9][0-9]*: //') && seed_rc=0 || seed_rc=1
 self_out=$("$scratch/selfcheck$EXE" "$scratch/modoff" 2>&1) && self_rc=0 || self_rc=1
-if [ "$rust_rc" = 0 ] || [ "$self_rc" = 0 ] || [ "$rust_out" != "$self_out" ]; then
+if [ "$seed_rc" = 0 ] || [ "$self_rc" = 0 ] || [ "$seed_out" != "$self_out" ]; then
     echo "FAIL module-off parity"
-    echo "-- rust --"; printf '%s\n' "$rust_out"
+    echo "-- seed --"; printf '%s\n' "$seed_out"
     echo "-- self --"; printf '%s\n' "$self_out"
     exit 1
 fi
@@ -579,10 +579,10 @@ mv "$getwork/dep-gone" "$getwork/dep"
 depf=$(find "$getwork/cache" -name u.oxl -path '*/util/*')
 [ -n "$depf" ] || { echo "FAIL cached source missing"; exit 1; }
 chmod u+w "$depf" && printf '// tampered\n' >> "$depf" && chmod a-w "$depf"
-( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" build app -o /dev/null ) > "$getwork/tamp.rust" 2>&1 && { echo "FAIL tamper accepted (rust)"; exit 1; }
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" build app -o /dev/null ) > "$getwork/tamp.seed" 2>&1 && { echo "FAIL tamper accepted (seed)"; exit 1; }
 ( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$scratch/selfcheck$EXE" app ) > "$getwork/tamp.self" 2>&1 && { echo "FAIL tamper accepted (self)"; exit 1; }
-grep -q 'checksum mismatch' "$getwork/tamp.rust" || { echo "FAIL tamper text"; cat "$getwork/tamp.rust"; exit 1; }
-diff "$getwork/tamp.rust" "$getwork/tamp.self" >/dev/null || { echo "FAIL tamper parity"; cat "$getwork/tamp.rust" "$getwork/tamp.self"; exit 1; }
+grep -q 'checksum mismatch' "$getwork/tamp.seed" || { echo "FAIL tamper text"; cat "$getwork/tamp.seed"; exit 1; }
+diff "$getwork/tamp.seed" "$getwork/tamp.self" >/dev/null || { echo "FAIL tamper parity"; cat "$getwork/tamp.seed" "$getwork/tamp.self"; exit 1; }
 # restore: re-get into a fresh cache, then @latest upgrade bumps require+sum
 chmod -R u+w "$getwork/cache" 2>/dev/null; rm -rf "$getwork/cache" && mkdir -p "$getwork/cache"
 ( cd "$getwork/dep" && printf 'package util\nfn answer() -> int { return 43 }\n' > util/u.oxl && git add -A && git commit -qm bump && git tag v1.1.0 )
@@ -596,12 +596,12 @@ grep -q "require file://$getwork/dep v1.1.0" "$getwork/app/oxl.mod" || { echo "F
 # the archive and reported unchanged
 ( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" get "file://$getwork/dep@v1.1.0" ) > "$getwork/get3" 2>&1 || { echo "FAIL reget rc"; cat "$getwork/get3"; exit 1; }
 grep -q 'unchanged file://' "$getwork/get3" || { echo "FAIL reget report"; cat "$getwork/get3"; exit 1; }
-# missing oxl.sum -> missing-entry error (Go wording), byte-identical
+# missing oxl.sum -> missing-entry error, byte-identical
 rm "$getwork/app/oxl.sum"
-( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" build app -o /dev/null ) > "$getwork/nosum.rust" 2>&1 && { echo "FAIL missing-sum accepted (rust)"; exit 1; }
+( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$OXL" build app -o /dev/null ) > "$getwork/nosum.seed" 2>&1 && { echo "FAIL missing-sum accepted (seed)"; exit 1; }
 ( cd "$getwork/app" && OXLMODCACHE="$getwork/cache" "$scratch/selfcheck$EXE" app ) > "$getwork/nosum.self" 2>&1 && { echo "FAIL missing-sum accepted (self)"; exit 1; }
-grep -q 'missing oxl.sum entry for module' "$getwork/nosum.rust" || { echo "FAIL missing-sum text"; cat "$getwork/nosum.rust"; exit 1; }
-diff "$getwork/nosum.rust" "$getwork/nosum.self" >/dev/null || { echo "FAIL missing-sum parity"; cat "$getwork/nosum.rust" "$getwork/nosum.self"; exit 1; }
+grep -q 'missing oxl.sum entry for module' "$getwork/nosum.seed" || { echo "FAIL missing-sum text"; cat "$getwork/nosum.seed"; exit 1; }
+diff "$getwork/nosum.seed" "$getwork/nosum.self" >/dev/null || { echo "FAIL missing-sum parity"; cat "$getwork/nosum.seed" "$getwork/nosum.self"; exit 1; }
 
 echo "== v3 oxl mod commands =="
 # tidy syncs the manifest with what the source imports — an
@@ -643,7 +643,7 @@ grep -q 'dropped file://' "$tv/tidy2" || { echo "FAIL tidy drop"; cat "$tv/tidy2
 cp "$tv/app/oxl.mod" "$tv/m.save" && cp "$tv/app/oxl.sum" "$tv/s.save"
 ( cd "$tv/app" && OXLMODCACHE="$tv/cache" "$OXL" mod tidy ) >/dev/null 2>&1 || { echo "FAIL tidy3 rc"; exit 1; }
 diff "$tv/m.save" "$tv/app/oxl.mod" >/dev/null || { echo "FAIL tidy idempotent"; diff "$tv/m.save" "$tv/app/oxl.mod"; exit 1; }
-# replace-only coverage: require is added at Go's placeholder version
+# replace-only coverage: require is added at the placeholder version
 printf 'module file://%s/app\noxl 0.3\n\nreplace file://%s/locdep => ../locdep\n' "$tv" "$tv" > "$tv/app/oxl.mod"
 rm -f "$tv/app/oxl.sum"
 printf 'package main\nimport "file://%s/locdep/thing"\n\nfn main() { println("thing=" + itoa(thing.val())) }\n' "$tv" > "$tv/app/app/main.oxl"
@@ -878,7 +878,7 @@ assert len(d["items"])==7 and not any("skip" in i for i in d["items"]), d' || { 
 out=$("$cgen_dir/self_check$EXE" examples/features.oxl)
 [ "$out" = "ok" ] || { echo "FAIL self check: $out"; exit 1; }
 # deeper chain: the self-compiled checker's diagnostics must equal the
-# `oxl run` interpretation's on a corpus file — transitively Rust's
+# `oxl run` interpretation's on a corpus file — transitively the seed's
 out=$("$cgen_dir/self_check$EXE" tests/diag/own_use_moved.oxl || true)
 want=$("$OXL" run bootstrap/cmd/check -- tests/diag/own_use_moved.oxl || true)
 [ "$out" = "$want" ] || { echo "FAIL self check diag: $out vs $want"; exit 1; }

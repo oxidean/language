@@ -1,0 +1,66 @@
+name: Bug report
+description: Something is not working in the oxl toolchain or standard library.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For security issues, do not file a public issue; see [SECURITY.md](https://github.com/oxidean/oxl/blob/main/SECURITY.md).
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: The smallest program or command sequence that triggers the problem. A minimal `.oxl` file is ideal.
+      placeholder: |
+        // repro.oxl
+        package main
+        fn main() {
+            // ...
+        }
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Checker / diagnostics
+        - Code generator / emitted C
+        - Runtime
+        - Standard library
+        - Module system (oxl.mod, oxl get, module cache)
+        - Self-hosted bootstrap components
+        - LSP server
+        - Documentation
+        - Other
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Release tag or `git rev-parse HEAD` for local builds.
+      placeholder: e.g. v0.2.0 or a commit SHA
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, architecture, and C compiler (`cc --version`).
+      placeholder: e.g. Ubuntu 24.04 x86_64, cc 13.3
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Diagnostics and output
+      description: Compiler diagnostics, trap output, or test-suite failures. Redact anything sensitive before pasting.
+      render: shell

@@ -109,7 +109,7 @@ fn rev_parse(repo: &Path, r: &str) -> Result<String, String> {
     git(repo, &["rev-parse", "--verify", &format!("{r}^{{commit}}")]).map(|s| s.trim().to_string())
 }
 
-/// Go's pseudo-version: the commit's nearest semver tag ancestor bumps
+/// Pseudo-version shape: the commit's nearest semver tag ancestor bumps
 /// its patch and gains `-0.<yyyymmddhhmmss>-<sha12>`; no ancestor tag
 /// at all starts from v0.0.0
 fn pseudo(repo: &Path, sha: &str) -> Result<String, String> {

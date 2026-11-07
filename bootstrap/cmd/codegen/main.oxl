@@ -9,7 +9,7 @@ package main
 //   cc -O2 -pthread -Iruntime out.c runtime/rt.c -lsqlite3 -o out
 //
 // Full surface: methods + interfaces emit as RtIface/vtab pairs and
-// generic fns mono-instantiate per call binding (Rust insts).
+// generic fns mono-instantiate per call binding (seed insts).
 import "oxl/bootstrap/check"
 
 import "std/collections"
@@ -42,7 +42,7 @@ fn wjoin(parts: []str) -> str {
 
 // ---------- generator state ----------
 
-// where a suspend point's result lands (Rust FDest)
+// where a suspend point's result lands (seed FDest)
 struct GDest { k: int, a: str, b: str } // 0 void, 1 field, 2 assign, 3 pair
 
 // one (name, init-expr, ty) decode from a match pattern
@@ -60,14 +60,14 @@ fn gbnd(n: str, ce: str, t: int, next: own GBnd) -> own GBnd {
 // match arm decode: has=0 → unconditional (else), has=1 → `if (cond)`
 struct GArm { has: int, cond: str, binds: own GBnd }
 
-// enum variant lookup result (Rust Option<(en, v, i)>)
+// enum variant lookup result (seed Option<(en, v, i)>)
 struct GEV { ok: bool, en: str, vn: str, i: int }
 
 // (continue, break) label pair per enclosing loop in a frame body
 struct GLab { c: str, b: str, d: int }
 
 // buffer-length snapshot before one decl's emission — every line an
-// emit appends to a buffer lands in that decl's unit (Rust drain())
+// emit appends to a buffer lands in that decl's unit (seed drain())
 struct GSnp {
     h: int,
     tp: int,
@@ -83,7 +83,7 @@ struct GSnp {
 // one reachability unit — the emitted C owned by a single decl (or a
 // synthesized helper: instantiation, vtab pair, fn-value wrap) split
 // across the output bands, the C symbols it defines, and oxl_main
-// init lines for globals (Rust Unit). A token in live text spelling
+// init lines for globals (seed Unit). A token in live text spelling
 // one of defs is a use edge.
 struct GUnit {
     hd: []str,
@@ -113,7 +113,7 @@ fn nput(b: mut GBuf, s: own parser.Node) {
     }
 }
 
-// one queued monomorphized instantiation (Rust insts entry)
+// one queued monomorphized instantiation (seed insts entry)
 struct GInst {
     q: str,
     mangled: str,
@@ -124,7 +124,7 @@ struct GInst {
 // one materialized (iface, impl) vtab pair — newest first
 struct GVU { w: str, impl: str, next: own GVU }
 
-// how a resolved call emits (Rust CallPlan): k 0 = not a call target,
+// how a resolved call emits (seed CallPlan): k 0 = not a call target,
 // 1 = oxl fn (dotted=1 -> the receiver expr precedes args),
 // 2 = iface vtab slot
 struct GCP {
@@ -223,7 +223,7 @@ fn wpop(g: mut G) {
     g.wst = g.wst.next
 }
 
-// ---------- G1 reachability (Rust Unit/drain/scan_refs) ----------
+// ---------- G1 reachability (seed Unit/drain/scan_refs) ----------
 fn gusnap(g: ref G) -> GSnp {
     return GSnp{h: len(g.head), tp: len(g.tramp), fd: len(g.fhead), cp: len(g.clpro), vt: len(g.vout), fb: len(g.fbody), ob: len(g.w), cb: len(g.clbod), gi: len(g.ginit)}
 }
@@ -286,7 +286,7 @@ fn gudrain(g: mut G, u: int, s: GSnp) {
 
 // init-phase drain: eval stmts appended to g.w join the global's init
 // band ahead of the assign line — they compute the init value, so
-// they belong inside oxl_main's prologue (Rust u.init)
+// they belong inside oxl_main's prologue (seed u.init)
 fn gudrain_init(g: mut G, u: int, s: GSnp) {
     i := s.ob
     for i < len(g.w) {
@@ -315,7 +315,7 @@ fn gdef(g: mut G, u: int, sym: str) {
 // every identifier token in `text` that some unit defines is a use
 // edge — the emitted C names exactly the symbols it links against, so
 // scanning it yields the resolved call/type/vtab edges directly
-// (Rust scan_refs). Claimant unit indices append to g.uhits.
+// (seed scan_refs). Claimant unit indices append to g.uhits.
 fn gscan(g: mut G, text: str) {
     n := len(text)
     i := 0
@@ -502,7 +502,7 @@ fn tyi(g: ref G, t: int) -> int {
     return g.ck.tyv[t].i
 }
 
-// ty -> C type (Rust cty)
+// ty -> C type (seed cty)
 fn gcty(g: mut G, t: int) -> str {
     t = gsub(g, t)
     k := tyk(g, t)
@@ -565,7 +565,7 @@ fn gcty(g: mut G, t: int) -> str {
     return "int64_t"
 }
 
-// `E.V` -> enum/variant/index (Rust enum_variant)
+// `E.V` -> enum/variant/index (seed enum_variant)
 fn gev(g: mut G, path: str) -> GEV {
     r := GEV{ok: false, en: "", vn: "", i: -1}
     ld := check.last_dot(path)
@@ -612,7 +612,7 @@ fn genv_get(e: ref check.Env, n: str) -> int {
     return -1
 }
 
-// Rust lookup(): bind env (match arms), then locals, then globals
+// seed lookup(): bind env (match arms), then locals, then globals
 fn gx_lookup(g: mut G, n: str) -> int {
     t := genv_get(g.benv, n)
     if t >= 0 {
@@ -670,7 +670,7 @@ fn gfn_item(g: mut G, qn: str) -> int {
 
 // @PART2
 
-// ---------- xty: the emitter's lightweight inference (Rust expr_ty) ----------
+// ---------- xty: the emitter's lightweight inference (seed expr_ty) ----------
 
 // callee resolves to a `fn(...)` value type — fn-typed var or expr
 fn xfnval_ty(g: mut G, f: ref parser.Node) -> int {
@@ -957,7 +957,7 @@ fn xty_name(g: mut G, n: str) -> int {
     if fi >= 0 {
         sig := g.ck.fnsv[fi]
         if sig.typarams != nil {
-            // generic fns can't be fn values (Rust: ty_params guard)
+            // generic fns can't be fn values (seed: ty_params guard)
             return check.t_unk(g.ck)
         }
         r1 := sig.ret1
@@ -1002,7 +1002,7 @@ fn xty_call(g: mut G, f: ref parser.Node, args: ref parser.NList) -> int {
             }
         }
     }
-    // method/vtab/generic call result ty (Rust expr_ty call path)
+    // method/vtab/generic call result ty (seed expr_ty call path)
     cp := gcall_plan(g, f, args)
     if cp.k == 2 {
         if cp.rk == 0 {
@@ -1262,10 +1262,10 @@ fn xty_un(g: mut G, op: str, e: ref parser.Node) -> int {
 // ---------- emission internals ----------
 // `gx` emits a susp-free C fragment. In frame context (`inframe`) a nested
 // susp call parks inline: its suspend code lands in g.w before the fragment
-// is consumed, and the call reads back as `fr->vN` — the same shape Rust's
+// is consumed, and the call reads back as `fr->vN` — the same shape the seed's
 // AST hoist produces, without rebuilding the tree.
 
-// deref own/ref/mut to the pointee handle (Rust dt)
+// deref own/ref/mut to the pointee handle (seed dt)
 fn gdt(g: mut G, t: int) -> int {
     for tyk(g, t) == check.k_own() || tyk(g, t) == check.k_ref() || tyk(g, t) == check.k_mut() {
         t = tyi(g, t)
@@ -1273,9 +1273,9 @@ fn gdt(g: mut G, t: int) -> int {
     return t
 }
 
-// ---------- generics + iface machinery (Rust insts/conv/vtabs) ----------
+// ---------- generics + iface machinery (seed insts/conv/vtabs) ----------
 
-// subst a declared ty through the active inst bind (Rust dt)
+// subst a declared ty through the active inst bind (seed dt)
 fn gsub(g: mut G, t: int) -> int {
     if t < 0 || g.subst == nil {
         return t
@@ -1283,7 +1283,7 @@ fn gsub(g: mut G, t: int) -> int {
     return check.subst_ty(g.ck, t, g.subst)
 }
 
-// ty -> C-identifier fragment for inst names (Rust mangle_ty)
+// ty -> C-identifier fragment for inst names (seed mangle_ty)
 fn gmangle(g: mut G, t: int) -> str {
     n := check.ty_name(g.ck, t)
     out := ""
@@ -1302,7 +1302,7 @@ fn gmangle(g: mut G, t: int) -> str {
 }
 
 // inst name for a generic callee — `q__<ty>__<ty>` in typarams order
-// (Rust inst_name); unbound params default to int
+// (seed inst_name); unbound params default to int
 fn ginst_name(g: mut G, q: str, tpl: ref check.TPList, bind: ref collections.Map) -> str {
     n := q
     tp := tpl
@@ -1320,7 +1320,7 @@ fn ginst_name(g: mut G, q: str, tpl: ref check.TPList, bind: ref collections.Map
     return n
 }
 
-// queue a generic instantiation for emission (Rust insts push);
+// queue a generic instantiation for emission (seed insts push);
 // dedup is by mangled name — returns the callee name either way.
 // The proto + pair-ret decl are emitted here so uses always see them.
 fn ginst_queue(g: mut G, q: str, tpl: ref check.TPList, bind: own collections.Map) -> str {
@@ -1388,7 +1388,7 @@ fn ginst_head(g: mut G, q: str, m: str, bind: ref collections.Map) {
 }
 
 // bind declared sig params (incl. the receiver slot when `recv` is
-// set) against effective arg types (Rust call_bindings) — nil for
+// set) against effective arg types (seed call_bindings) — nil for
 // non-generic sigs
 fn gcall_bind(g: mut G, fi: int, recv: ref parser.Node, args: ref parser.NList) -> own collections.Map {
     sig := g.ck.fnsv[fi]
@@ -1433,7 +1433,7 @@ fn gcall_bindf(g: mut G, fi: int, f: ref parser.Node, args: ref parser.NList, do
     return gcall_bind(g, fi, nil, args)
 }
 
-// base struct/enum name behind own/ref/mut — impl keys (Rust ty_base)
+// base struct/enum name behind own/ref/mut — impl keys (seed ty_base)
 fn gty_base(g: mut G, t: int) -> str {
     t = gsub(g, t)
     k := tyk(g, t)
@@ -1464,7 +1464,7 @@ fn gimidx(g: mut G, w: str, m: str) -> int {
     return -1
 }
 
-// record an (iface, impl) pair for vtab emission (Rust vtab_uses)
+// record an (iface, impl) pair for vtab emission (seed vtab_uses)
 fn gvtab_use(g: mut G, w: str, implkey: str) {
     k := w + "|" + implkey
     if collections.map_has(g.vtab_set, k) {
@@ -1488,7 +1488,7 @@ fn gvtkey(implkey: str) -> str {
 }
 
 // `{data, o_vt_W_I}` — pointer impls hand over directly, values box so
-// the data outlives the stack slot (Rust iface_wrap)
+// the data outlives the stack slot (seed iface_wrap)
 fn giface_wrap_v(g: mut G, e: ref parser.Node, v: str, w: str, implkey: str) -> str {
     gvtab_use(g, w, implkey)
     got := gsub(g, xty(g, e))
@@ -1506,12 +1506,12 @@ fn giface_wrap_v(g: mut G, e: ref parser.Node, v: str, w: str, implkey: str) -> 
 
 // emit `v` (the already-emitted `e`) coerced to `want` — only iface
 // conversions do anything: nil -> the empty pair, same iface passes
-// through, other iface rewraps, concrete impls box (Rust conv)
+// through, other iface rewraps, concrete impls box (seed conv)
 fn gconv_v(g: mut G, e: ref parser.Node, v: str, want: int) -> str {
     w := gsub(g, want)
     got := gsub(g, xty(g, e))
     // nil (err-typed) into a slice slot: the zero RtSlice — bare `0`
-    // isn't a valid struct initializer (Rust conv_v mirrors)
+    // isn't a valid struct initializer (seed conv_v mirrors)
     if got >= 0 && tyk(g, got) == check.k_err() && w >= 0 && tyk(g, w) == check.k_slice() {
         return "(RtSlice){ 0, 0, 0, 0 }"
     }
@@ -1550,7 +1550,7 @@ fn gconv(g: mut G, e: ref parser.Node, want: int) -> str {
     return gconv_v(g, e, gx(g, e), want)
 }
 
-// receiver arg adapted to the method's receiver ty (Rust adapt_recv):
+// receiver arg adapted to the method's receiver ty (seed adapt_recv):
 // value wants deref pointers, pointer wants ref values
 fn gadapt_v(g: mut G, e: ref parser.Node, ev: str, want: int) -> str {
     got := gsub(g, xty(g, e))
@@ -1566,7 +1566,7 @@ fn gadapt_v(g: mut G, e: ref parser.Node, ev: str, want: int) -> str {
     return ev
 }
 
-// resolve a call target the way the checker did (Rust call_plan):
+// resolve a call target the way the checker did (seed call_plan):
 // plain fn, `x.m` -> `T.m` or an iface vtab slot, bare `m(x, ..)` ->
 // `T.m` with args[0] already the receiver
 fn gcall_plan(g: mut G, f: ref parser.Node, args: ref parser.NList) -> own GCP {
@@ -1723,7 +1723,7 @@ fn gref(g: mut G, n: str) -> str {
     return n
 }
 
-// register a frame field for an oxl local (Rust fslot)
+// register a frame field for an oxl local (seed fslot)
 fn gfslot(g: mut G, name: str, ct: str) -> str {
     i := len(g.fdecls)
     g.fdecls = push(g.fdecls, ct + " v" + itoa(i) + ";")
@@ -1743,7 +1743,7 @@ fn gdefers(g: mut G) {
 
 // susp callee name: bare leaf builtin or qualified oxl fn ("" = not susp)
 // does this call park? returns the EMIT name — builtin leaf, oxl fn
-// base, or the mangled inst for generic susp callees (Rust call_is_susp)
+// base, or the mangled inst for generic susp callees (seed call_is_susp)
 fn g_call_susp(g: mut G, e: ref parser.Node) -> str {
     if e == nil || check.nk(e) != 8 {
         return ""
@@ -1775,7 +1775,7 @@ fn g_call_susp(g: mut G, e: ref parser.Node) -> str {
     return ""
 }
 
-// pattern -> (cond, binds) over scrutinee accessor `acc` (Rust arm_cond)
+// pattern -> (cond, binds) over scrutinee accessor `acc` (seed arm_cond)
 fn garm(g: mut G, pat: ref parser.Node, acc: str, st: int) -> GArm {
     r := GArm{has: -1, cond: "", binds: nil}
     if pat == nil {
@@ -1876,7 +1876,7 @@ fn garm(g: mut G, pat: ref parser.Node, acc: str, st: int) -> GArm {
     return r
 }
 
-// `match` -> C statement-expression (Rust match_expr). Block arms emit
+// `match` -> C statement-expression (seed match_expr). Block arms emit
 // through the stmt path via a buffer swap.
 fn gmatch(g: mut G, scrut: ref parser.Node, arms: ref parser.NList) -> str {
     st := xty(g, scrut)
@@ -1954,7 +1954,7 @@ fn gmatch(g: mut G, scrut: ref parser.Node, arms: ref parser.NList) -> str {
     return o + "})"
 }
 
-// builtins that expand to an rt_* call (Rust builtin_emit)
+// builtins that expand to an rt_* call (seed builtin_emit)
 fn gbuiltin(name: str, argvs: ref GAv) -> str {
     a0 := ""
     if argvs != nil {
@@ -2009,7 +2009,7 @@ fn gbuiltin(name: str, argvs: ref GAv) -> str {
     return ""
 }
 
-// ---------- expr emission (Rust expr) ----------
+// ---------- expr emission (seed expr) ----------
 
 // expr-position susp call inside a frame: park inline, land in a fresh slot
 fn gxsusp(g: mut G, e: ref parser.Node, sn: str) -> str {
@@ -2057,7 +2057,7 @@ fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node, e: ref parse
     // byte arithmetic wraps mod 256 — C would promote to int and
     // carry bits the oxl type says don't exist. Wrap iff the result
     // ty is byte (byte op byte): byte op int widens per check, so
-    // `b[i] * 65536` must not truncate (Rust gxbin mirrors).
+    // `b[i] * 65536` must not truncate (seed gxbin mirrors).
     ltk := tyk(g, gdt(g, gsub(g, lt)))
     if tyk(g, gdt(g, gsub(g, xty(g, e)))) == check.k_byte() && (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^") {
         return "((uint8_t)(" + lv + " " + op + " " + rv + "))"
@@ -2075,7 +2075,7 @@ fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node, e: ref parse
     if (op == "<" || op == "<=" || op == ">" || op == ">=") && ltk == check.k_str() {
         return "(rt_str_cmp(" + lv + ", " + rv + ") " + op + " 0)"
     }
-    // iface eq/ne compares the erased data ptr (Rust binary op)
+    // iface eq/ne compares the erased data ptr (seed binary op)
     if op == "==" || op == "!=" {
         lt2 := gsub(g, lt)
         rt2 := gsub(g, xty(g, r))
@@ -2094,13 +2094,13 @@ fn gxbin(g: mut G, op: str, l: ref parser.Node, r: ref parser.Node, e: ref parse
     if op == "*" && ltk == check.k_int() {
         // signed int64 overflow is UB in C — int mul wraps in the
         // language, so go through unsigned where -O2 can't exploit
-        // it (stdlib fnv relies on the wrap; Rust gxbin mirrors)
+        // it (stdlib fnv relies on the wrap; seed gxbin mirrors)
         return "((int64_t)((uint64_t)(" + lv + ") * (uint64_t)(" + rv + ")))"
     }
     return "(" + lv + " " + op + " " + rv + ")"
 }
 
-// slice expr as a C value — own/ref/mut headers dereference (Rust slice_val)
+// slice expr as a C value — own/ref/mut headers dereference (seed slice_val)
 fn gslice_val(g: mut G, obj: ref parser.Node) -> str {
     ov := gx(g, obj)
     ot := gdt(g, xty(g, obj))
@@ -2194,7 +2194,7 @@ fn gxlit(g: mut G, obj: ref parser.Node, fields: ref parser.NList) -> str {
 
 fn gxas(g: mut G, inner: ref parser.Node, ty: ref parser.Node) -> str {
     // `as` conversions — str<->[]byte and int<->byte; `own T` unwraps
-    // like Rust's `base`
+    // like the seed's `base`
     ot := xty(g, inner)
     deref := false
     bt := ot
@@ -2239,7 +2239,7 @@ fn gxas(g: mut G, inner: ref parser.Node, ty: ref parser.Node) -> str {
     return "({ struct o_en_" + ec + " _ev = (" + e + "); if (_ev.tag != " + itoa(ev.i) + ") rt_trap(9); _ev.u.v" + itoa(ev.i) + "; })"
 }
 
-// named fn as a value — zero-env fat pair (Rust Ident fnval branch)
+// named fn as a value — zero-env fat pair (seed Ident fnval branch)
 fn gxfnv(g: mut G, n: str) -> str {
     qn := check.resolve_named(g.ck, n)
     if !collections.map_has(g.ck.fns, qn) {
@@ -2371,7 +2371,7 @@ fn gxslice(g: mut G, obj: ref parser.Node, lo: ref parser.Node, hi: ref parser.N
     return "({ RtSlice _ms = " + sv + "; int64_t _ma = " + av + "; int64_t _mb = " + bv + "; if (_ma < 0 || _mb < _ma || _mb > _ms.len) rt_trap(10); (RtSlice){ (" + ect + "*)_ms.ptr + _ma, _mb - _ma, _ms.cap - _ma, _ms.heap }; })"
 }
 
-// ---------- call emission (Rust call) ----------
+// ---------- call emission (seed call) ----------
 fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
     argvs := gav(g, args)
     // indirect call through a fn value — bind once, jump through fp
@@ -2387,7 +2387,7 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
             il = il.next
         }
         // conv each arg to the declared fn param ty — raw argvs skip
-        // nil->slice / own->slice coercion (Rust fn-value path same)
+        // nil->slice / own->slice coercion (seed fn-value path same)
         argl := ""
         il2 := g.ck.tyv[ft].args
         al2 := args
@@ -2488,7 +2488,7 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
             }
         }
         // new(slice) — deep-copy header+backing to heap so the own
-        // slice can outlive the scope arena (Rust emit mirrors)
+        // slice can outlive the scope arena (seed emit mirrors)
         st2 := xty(g, args.v)
         if tyk(g, st2) == check.k_slice() {
             return "rt_slice_own(" + argvs.v + ", sizeof(" + gcty(g, tyi(g, st2)) + "))"
@@ -2554,7 +2554,7 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
     if len(b) > 0 {
         return b
     }
-    // method + iface dispatch (D3) and monomorphized generics (Rust
+    // method + iface dispatch (D3) and monomorphized generics (seed
     // call_plan / insts): `x.m(..)` -> `T.m(x, ..)`, `w.m(..)` -> a
     // vtab slot call, bare `m(x, ..)` -> `T.m(x, ..)`
     cp := gcall_plan(g, f, args)
@@ -2625,7 +2625,7 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
         }
     }
     // str -> cstr coercion + own-arg borrows around the call; iface
-    // args wrap through conv (Rust conv call sites)
+    // args wrap through conv (seed conv call sites)
     pre := ""
     post := ""
     il := sig.params
@@ -2633,7 +2633,7 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
     let ctail: own GAv = nil
     if cp.k == 1 && cp.dotted == 1 && il != nil {
         // `x.m(..)` — the receiver is an implicit first arg adapted to
-        // the declared receiver ty, never conv'd (Rust adapt_recv)
+        // the declared receiver ty, never conv'd (seed adapt_recv)
         pt := il.v
         if bind != nil {
             pt = check.subst_ty(g.ck, pt, bind)
@@ -2699,7 +2699,7 @@ fn gcall(g: mut G, f: ref parser.Node, args: ref parser.NList) -> str {
     return "({ struct " + retag + " __rc; " + pre + "__rc = " + inner + "; " + post + "__rc; })"
 }
 
-// ---------- spawn (Rust spawn) ----------
+// ---------- spawn (seed spawn) ----------
 // arg vector coerced to declared sig params (subst'd when generic) —
 // `recv` prepends as an adapted first arg for dotted method calls
 fn gav_decl(g: mut G, args: ref parser.NList, fi: int, bind: ref collections.Map, recv: ref parser.Node) -> own GAv {
@@ -2803,7 +2803,7 @@ fn gspawn(g: mut G, e: ref parser.Node, blocking: bool) {
                 return
             }
             // dotted `x.m` spawns resolve to `T.m` with a receiver slot;
-            // generic callees queue an inst (Rust call_plan/inst_name)
+            // generic callees queue an inst (seed call_plan/inst_name)
             cp := gcall_plan(g, f, args)
             base := check.resolve_named(g.ck, name)
             fi2 := -1
@@ -2991,7 +2991,7 @@ fn gspawn_args(g: mut G, qn: str, dst: str, argvs: ref GAv) {
     }
 }
 
-// ---------- closures (Rust closure_expr + BodyScan) ----------
+// ---------- closures (seed closure_expr + BodyScan) ----------
 struct GS { l: own check.SList }
 
 fn gsc_add(s: mut GS, n: str) {
@@ -3307,7 +3307,7 @@ fn gclosure(g: mut G, params: ref parser.NList, body: ref parser.Node) -> str {
     return "({ struct o_env_" + sid + " *_e = rt_alloc_own(sizeof(struct o_env_" + sid + "));" + inits + " (RtFnv){ _e, (void*)o_cl_" + sid + " }; })"
 }
 
-// ---------- stmt emission (Rust stmt, non-frame path) ----------
+// ---------- stmt emission (seed stmt, non-frame path) ----------
 fn gblk(g: mut G, body: ref parser.Node) {
     if body == nil || check.nk(body) != 23 {
         return
@@ -3325,7 +3325,7 @@ fn gblk(g: mut G, body: ref parser.Node) {
     }
 }
 
-// `[a, err] = call` — pair-return destructure (Rust Stmt::Let2)
+// `[a, err] = call` — pair-return destructure (seed Stmt::Let2)
 fn glet2(g: mut G, names: str, call: ref parser.Node) {
     cn := ""
     match call {
@@ -3417,7 +3417,7 @@ fn gs(g: mut G, s: ref parser.Node) {
                 wln(g, "    return (struct o_ret_" + cname(g.cur) + "){ " + v + ", " + e2 + " };")
             } else if g.retk == 2 {
                 // `return paircall()` forwards — rewrap when the
-                // callee's pair tag differs (Rust o_vret_ -> o_ret_)
+                // callee's pair tag differs (seed o_vret_ -> o_ret_)
                 v := gx(g, vals.v)
                 tag := gpairsig(g, vals.v)
                 cur := "o_ret_" + cname(g.cur)
@@ -3504,7 +3504,7 @@ fn gs(g: mut G, s: ref parser.Node) {
     }
 }
 
-// ---------- suspension state machine (Rust fsusp_*/fstmt/func_frame) ----------
+// ---------- suspension state machine (seed fsusp_*/fstmt/func_frame) ----------
 
 // `fr->cur_scope = tls_scope; tls_scope = saved; return <code>;`
 fn gsusp_ret(g: mut G, code: str) {
@@ -3512,7 +3512,7 @@ fn gsusp_ret(g: mut G, code: str) {
 }
 
 // suspend point for an oxl-fn call: alloc child frame, poll it, propagate
-// PENDING/CANCEL, bind the result on READY (Rust fsusp_call)
+// PENDING/CANCEL, bind the result on READY (seed fsusp_call)
 // dk: 0 void, 1 frame-field(da), 2 assign-target(da), 3 pair(da,db; ""=blank)
 fn gfsusp_call(g: mut G, call: ref parser.Node, name: str, dk: int, da: str, db: str) {
     cn := cname(name)
@@ -3650,7 +3650,7 @@ fn gfblk(g: mut G, body: ref parser.Node) {
 }
 
 // statement-level match inside a frame — real if-chain so block arms can
-// suspend; payload binds live in frame slots (Rust fstmt_match)
+// suspend; payload binds live in frame slots (seed fstmt_match)
 fn gfmatch(g: mut G, scrut: ref parser.Node, arms: ref parser.NList) {
     st := xty(g, scrut)
     sct := gcty(g, st)
@@ -3854,7 +3854,7 @@ fn gfselect(g: mut G, arms: ref parser.NList) {
     wln(g, "    " + lend + ": ;")
 }
 
-// stmt inside a suspendable fn (Rust fstmt)
+// stmt inside a suspendable fn (seed fstmt)
 fn gfstmt(g: mut G, s: ref parser.Node) {
     if s == nil {
         return
@@ -4184,7 +4184,7 @@ fn gpop_sopen(g: mut G) {
     g.sopen = ys
 }
 
-// ---------- fn emission (Rust func/func_frame/generate) ----------
+// ---------- fn emission (seed func/func_frame/generate) ----------
 
 // ret kind of a Fn.ret node: 0 void / 1 single / 2 pair
 fn gretdk(g: mut G, ret: ref parser.Node) -> int {
@@ -4216,7 +4216,7 @@ fn gret1(g: mut G, ret: ref parser.Node) -> int {
     return gty(g, ret)
 }
 
-// C return type text (Rust ret_decl — externs degrade pairs to int64_t)
+// C return type text (seed ret_decl — externs degrade pairs to int64_t)
 fn gret_c(g: mut G, ret: ref parser.Node, name: str, is_oxl: bool) -> str {
     k := gretdk(g, ret)
     if k == 0 {
@@ -4254,7 +4254,7 @@ fn gparams(g: mut G, params: ref parser.NList) -> str {
 }
 
 // declared param list with an optional receiver prepended — method
-// sigs carry the receiver slot first (Rust func param emission)
+// sigs carry the receiver slot first (seed func param emission)
 fn gparams2(g: mut G, recv: ref parser.Node, params: ref parser.NList) -> str {
     rp := ""
     if recv != nil {
@@ -4286,7 +4286,7 @@ fn gparams2(g: mut G, recv: ref parser.Node, params: ref parser.NList) -> str {
     return rp
 }
 
-// frame path for a susp fn (Rust func_frame): struct o_frm_ + o_poll_ driver
+// frame path for a susp fn (seed func_frame): struct o_frm_ + o_poll_ driver
 fn gframe(g: mut G, qn: str, recv: ref parser.Node, params: ref parser.NList, ret: ref parser.Node, body: ref parser.Node) {
     g.inframe = 1
     g.fsl = check.env_new()
@@ -4436,7 +4436,7 @@ fn gemit_named_fn(g: mut G, i: int, qn: str, base: str) {
 }
 
 // mono-instantiated generic fn — the body re-emits under the mangled
-// name with `ibind` resolving its ty params (Rust func_inst)
+// name with `ibind` resolving its ty params (seed func_inst)
 fn gfunc_inst(g: mut G, iq: str, im: str, ibind: own collections.Map) {
     fi := gfn_item(g, iq)
     if fi < 0 {
@@ -4465,7 +4465,7 @@ fn gfunc_inst(g: mut G, iq: str, im: str, ibind: own collections.Map) {
     g.ck.cur_ty_params = nil
 }
 
-// enum decl: payload structs + the tagged union (Rust generate pass 1)
+// enum decl: payload structs + the tagged union (seed generate pass 1)
 fn gemit_enum(g: mut G, i: int) {
     if check.nk(g.its[i].node) != 29 {
         return
@@ -4590,7 +4590,7 @@ fn gemit_proto(g: mut G, i: int) {
     match g.its[i].node {
         parser.Node.Fn{ex, name, recv, typarams, params, ret} => {
             if !ex && typarams != nil {
-                // generic fns only exist as instantiations (Rust: no proto)
+                // generic fns only exist as instantiations (seed: no proto)
                 return
             }
             g.ck.cur_mod = g.its[i].mod
@@ -4606,7 +4606,7 @@ fn gemit_proto(g: mut G, i: int) {
     }
 }
 
-// `o_fnv_wrap_<qn>` — zero-env wrapper over a named fn (Rust fnv_wraps pass)
+// `o_fnv_wrap_<qn>` — zero-env wrapper over a named fn (seed fnv_wraps pass)
 fn gemit_fnv_one(g: mut G, n: str) {
     [fi, err] = collections.map_get(g.ck.fns, n)
     if err == nil {
@@ -4641,7 +4641,7 @@ fn gemit_fnv_one(g: mut G, n: str) {
 }
 
 // bind a generic impl method's ty params from the iface-declared
-// method params (Rust vtab_bind) — nil when the impl isn't generic
+// method params (seed vtab_bind) — nil when the impl isn't generic
 fn gvtab_bind(g: mut G, fi: int, m: ref check.IMethod) -> own collections.Map {
     sig := g.ck.fnsv[fi]
     if sig.typarams == nil {
@@ -4662,7 +4662,7 @@ fn gvtab_bind(g: mut G, fi: int, m: ref check.IMethod) -> own collections.Map {
 }
 
 // queue insts for generic impl methods the recorded vtab pairs pin —
-// returns nonzero when new work appeared (Rust seed_vtab_insts)
+// returns nonzero when new work appeared (seed seed_vtab_insts)
 fn gseed_vtab_insts(g: mut G) -> int {
     progress := 0
     vu := g.vtabs
@@ -4697,7 +4697,7 @@ fn gseed_vtab_insts(g: mut G) -> int {
 }
 
 // concrete vtabs + receiver-normalizing thunks for every (iface, impl)
-// pair a conversion site produced (Rust emit_vtabs)
+// pair a conversion site produced (seed emit_vtabs)
 fn gemvtab_one(g: mut G, vu: ref GVU) {
     w := vu.w
     impl := vu.impl
@@ -4729,7 +4729,7 @@ fn gemvtab_one(g: mut G, vu: ref GVU) {
             g.vout = push(g.vout, "static " + ret_c + " " + tname + "(void* _d" + psig + ") {")
             if len(impl) > 6 && substr(impl, 0, 6) == "iface:" {
                 // iface->iface rewrap: forward through the source
-                // pair's vtab (Rust same-impl arm)
+                // pair's vtab (seed same-impl arm)
                 w2 := substr(impl, 6, len(impl))
                 j := gimidx(g, w2, m.n)
                 vsig := "void*"
@@ -4813,7 +4813,7 @@ fn genall(g: mut G) -> str {
     // are pulled by whatever `o_s_*`/`o_en_*`/`o_ret_*`/`o_vret_*`
     // name a live unit needs spelled — param/ret/field types survive
     // transitively for free since they are spelled in the live text
-    // that needs them. (Rust generate_mode.)
+    // that needs them. (seed generate_mode.)
     g.units = mkslice(GUnit, 0)
     g.dpos = collections.map_new()
     g.dchain = mkslice(int, 0)
@@ -4995,7 +4995,7 @@ fn genall(g: mut G) -> str {
     }
     // mono instantiations + vtab-seeded method insts — a co-fixpoint:
     // bodies create conv sites (vtab uses), vtab pairs pin generic
-    // method insts, insts create more conv sites (Rust insts loop)
+    // method insts, insts create more conv sites (seed insts loop)
     progress := true
     for progress {
         progress = false

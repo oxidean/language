@@ -23,7 +23,7 @@ select {
 }
 ```
 
-Semantics (Go-shaped, deliberately):
+Semantics (deliberately familiar):
 
 - Arms are `recv` channel ops in v0.2 (send arms are future work — see
   the exclusion note below); exactly one fires; uniform random pick when
@@ -45,7 +45,7 @@ Semantics (Go-shaped, deliberately):
   and task ref alive until the deadline would have fired.
 
 Not in v0.2: `send` arms inside `select` on unbuffered channels
-(pick a winner or wait — same semantics as Go; just flag complexity in
+(pick a winner or wait — the standard select semantics; just flag complexity in
 the implementation note if the runtime can't express it yet).
 
 ## Acceptance
@@ -64,7 +64,7 @@ the implementation note if the runtime can't express it yet).
 
 ## Risks
 
-- Fairness/priority questions (Go chose uniform-random; mirroring is
+- Fairness/priority questions (uniform-random is the established choice; mirroring is
   the safe call).
 - `send` arms on unbuffered channels — may need a two-phase ready
   handshake in `RtChan`; cut from v0.2 if it churns the channel

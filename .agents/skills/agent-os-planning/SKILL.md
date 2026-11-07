@@ -16,9 +16,12 @@ routes what happens after one is approved.
 
 1. Generate `agent-os/product/` docs from the design doc if missing.
 2. Capture conventions as `agent-os/standards/` entries.
-3. Create a spec folder under `agent-os/specs/` with plan, shape,
+3. Discuss the open design decisions before writing the spec — present
+   them as a short numbered list with a recommendation per item; write
+   the spec only once the user locks the choices.
+4. Create a spec folder under `agent-os/specs/` with plan, shape,
    standards, and references files.
-4. Present the plan for approval before any implementation.
+5. Present the plan for approval before any implementation.
 
 Begin with step 1 immediately.
 
@@ -55,8 +58,20 @@ Create `agent-os/specs/YYYY-MM-DD-HHMM-<feature-slug>/` containing:
   applies to this work.
 - `references.md` — paths to the design doc and any reference
   implementations studied.
+- `items/<track>.md` — one file per work item or track: its scope, the
+  decisions that apply, and an acceptance bar.
+- `impl-<item>.md` — the detailed implementation plan, written when the
+  item is picked up: file-level changes, ordering, verification steps.
 
 Keep it lightweight — enough for a fresh agent to execute, not an essay.
+
+## Execution notes
+
+- Keep `plan.md` task markers (`[done]`, `[in progress]`) current as items
+  ship — they are how a later session sees what remains.
+- Before implementing an item, check open PRs and worktrees — a parallel
+  implementation of the same item may already exist; compare approaches
+  and converge on one rather than landing a second version.
 
 ## Handoff
 

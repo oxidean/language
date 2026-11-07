@@ -16,7 +16,7 @@ struct Hmac {
     bs: int,
 }
 
-/// new builds an HMAC keyed hasher — Go's hmac.New(h, key): `hf` is a
+/// new builds an HMAC keyed hasher: `hf` is a
 /// hash factory (sha256.new, md5.new), `key` the raw key bytes.
 fn new(hf: fn() -> hash.Hash, key: []byte) -> hash.Hash {
     inner := hf()
@@ -65,7 +65,7 @@ fn (h mut Hmac) write(b: []byte) -> [int, err] {
 }
 
 fn (h mut Hmac) sum(b: []byte) -> own []byte {
-    // Go's Sum: append inner's digest to b, then outer(opad|that)
+    // Sum shape: append inner's digest to b, then outer(opad|that)
     d := h.inner.sum(b)
     h.outer.reset()
     [w1, e1] = h.outer.write(h.opad)

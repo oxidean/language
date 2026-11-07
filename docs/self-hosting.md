@@ -13,7 +13,7 @@ The goal: the compiler, written in the language, compiled by itself.
   variants with `match` (B2), including `match` itself in the
   grammar. **It parses itself with zero skipped tokens** — full
   round-trip.
-- `bootstrap/check/check.oxl` — a port of the Rust typechecker, written in
+- `bootstrap/check/check.oxl` — a port of the seed typechecker, written in
   `.oxl`: interned integer type handles, scope-slice environments,
   `std/collections` tables, registration + checking passes over the
   parser's AST (fns, structs, enums, globals, imports, bodies,
@@ -24,10 +24,8 @@ The goal: the compiler, written in the language, compiled by itself.
   receivers — and the checker consumes them: ty-param registration,
   interface tables, structural method coverage, and `own` move
   tracking (D2) are all ported. Remaining subset: float-typed AST
-  distinctions beyond literals, and `codegen.oxl` does not yet lower
-  generics/interfaces/methods — those still emit through the Rust
-  pipeline.
-- `bootstrap/cmd/codegen` — a port of the Rust C emitter, written in
+  distinctions beyond literals.
+- `bootstrap/cmd/codegen` — a port of the seed C emitter, written in
   `.oxl`, consuming the checker's tables over the parser's AST:
   `oxl run bootstrap/cmd/codegen -- file.oxl > out.c`, then
   `cc -O2 -pthread -Iruntime out.c runtime/rt.c -o out`. When `out.c`
@@ -36,13 +34,12 @@ The goal: the compiler, written in the language, compiled by itself.
   detects the same condition and adds both only then, since `-l`
   must trail the objects that reference it under `--as-needed`.
   Suspension lowers to the same `o_frm_*`/`o_poll_*` state machines the
-  Rust emitter produces; `--test` mirrors `oxl test`'s scope-wrapped
+  seed emitter produces; `--test` mirrors `oxl test`'s scope-wrapped
   runner. **It compiles itself** — the emitted binary regenerates
   byte-identical C, closing the classic bootstrap chain.
 
-All five bootstrap components are compiled by the Rust bootstrap
-compiler and run in CI (`tests/run.sh`), so the self-host claim can't
-rot.
+All five bootstrap components are compiled by the seed compiler and
+run in CI (`tests/run.sh`), so the self-host claim can't rot.
 
 ## What the language already has (sufficient for frontend)
 
@@ -78,9 +75,9 @@ Ordered by what the checker/codegen port actually needs:
 5. ~~**Methods / `interface` dispatch**~~ — **done (D3).** `fn (r T) m`
    receivers, structural `interface` types as `{data, vtab}` pairs,
    `w.m()` vtab dispatch, method-constraint generics — see
-   `docs/semantics/methods.md`. The bootstrap codegen remains a
-   documented subset: it doesn't lower method dispatch (same as
-   generics) — parser and checker handle the syntax.
+   `docs/semantics/methods.md`. The bootstrap codegen lowers method
+   dispatch too — vtab pairs and generic instantiations emit through
+   `codegen.oxl` the same as the seed pipeline.
 6. ~~**Maps/sets in stdlib**~~ — **done (B6).** `std/collections`:
    FNV-1a `map`/`set` over `[]Bucket` power-of-2 tables, `int` payloads
    (word-sized, covers env ids and counts). Needed `&`/`|`/`^` infix
@@ -97,14 +94,13 @@ bootstrap/check/       (done — typechecks .oxl, self-checks clean)
 bootstrap/cmd/codegen  (done — emits C, self-compiles byte-identical)
 ```
 
-`oxl` (Rust) is needed to *first-compile* the self-hosted compiler —
-the classic bootstrap chain is closed for the bootstrap subset.
-Programs using generics, interfaces, or methods still emit through
-the Rust pipeline (`codegen.oxl` does not lower them yet — no
-`RtIface`/vtable or instantiation machinery is ported), so
-`examples/http-crud-sqlite` (`Handler` iface param) and
-`tests/methods.oxl` stay on the Rust backend; the interim C backend
-stays the codegen target.
+The shipped `oxl` toolchain is the seed implementation — it
+*first-compiles* the self-hosted compiler, closing the classic
+bootstrap chain. `codegen.oxl` now lowers the full language surface,
+including `RtIface`/vtable pairs for interface values and
+monomorphized generic instantiations; emitted programs using generics,
+interfaces, or methods compile through either pipeline. The interim C
+backend stays the codegen target.
 
 ## Keeping the claim honest
 
@@ -118,10 +114,10 @@ byte-identical C for `hello.oxl`.
 
 Two more gates keep the claim honest:
 
-- **Differential diagnostics** — the `tests/diag/` corpus (39 programs
-  that parse in both pipelines but fail checking) asserts the Rust
+- **Differential diagnostics** — the `tests/diag/` corpus (programs
+  that parse in both pipelines but fail checking) asserts the seed
   checker's diagnostics equal `check.oxl`'s line-for-line and in
-  order, after stripping the Rust `file:line:col:` prefix.
+  order, after stripping the `file:line:col:` prefix.
 - **All-four self-compile** — each bootstrap component compiled by
   `codegen.oxl` must produce identical output to `oxl run` (lexer and
   parser output compared in full, checker diagnostics on a corpus

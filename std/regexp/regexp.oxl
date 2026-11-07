@@ -1,7 +1,7 @@
 package regexp
 
-// std/regexp — Go's regexp shaped for oxl: an RE2-subset parser
-// compiling to a Thompson NFA, executed as a Pike VM with ordered
+// std/regexp — a linear-time NFA engine: the regexp grammar parses
+// to a Thompson NFA, executed as a Pike VM with ordered
 // thread lists. Matching is O(len(pattern) x len(input)) — no
 // backtracking, so the exponential-blowup class of regexps doesn't
 // exist here. Runes throughout (utf8), ASCII-word \b.
@@ -128,7 +128,7 @@ fn pmalformed(s: str, i: int) -> bool {
     return byteat(s, i) >= 128 && d.r == 65533 && d.n == 1
 }
 
-// --- builtin range tables (code points, ASCII where Go says ASCII) ---
+// --- builtin range tables (code points; ASCII class tables) ---
 
 // addr appends a [lo,hi] range through the out-param slices. Slices
 // share backing so element writes stick; push is caller-side — this
@@ -177,7 +177,7 @@ fn add_nword(r: mut Ranges) {
     addr(r, 123, 1114111)
 }
 
-// posix class table — Go's ASCII-only [[:name:]] sets.
+// posix class table — ASCII-only [[:name:]] sets.
 fn posix_ranges(name: str, r: mut Ranges) -> err {
     if name == "alnum" {
         addr(r, 48, 57)
@@ -356,7 +356,7 @@ fn hexval(c: int) -> int {
 }
 
 // phex parses `\x` — either exactly two hex digits or \x{h..h}.
-// Errors match Go's "invalid escape sequence" umbrella.
+// Errors use the "invalid escape sequence" umbrella.
 fn phex(p: mut Par) -> [int, err] {
     if p.pos >= len(p.s) {
         return 0, perr("invalid escape sequence: `\\x`")
@@ -394,9 +394,9 @@ fn phex(p: mut Par) -> [int, err] {
     return h1 * 16 + h2, nil
 }
 
-// poctal parses 0ddd|dd|ddd after a `\`. Go requires a leading 0 or
+// poctal parses 0ddd|dd|ddd after a `\`. A leading 0 or
 // at least two digits for nonzero starts (\1 alone is an error —
-// that shape is reserved for backrefs RE2 doesn't have).
+// that shape is reserved for backrefs this engine doesn't have).
 fn poctal(p: mut Par) -> [int, err] {
     nd := 0
     v := 0
@@ -472,7 +472,7 @@ fn esc_literal(c: int) -> int {
 // classes. Result: kind 0 = literal rune in `out`, kind 1 = a class
 // escape merged into `rg`, kind 2 = an assertion node kind (>0).
 // `\b` is a word-boundary assertion OUTSIDE classes and an error
-// inside (Go rejects `[\b]`); inclass selects.
+// inside (`[\b]` is rejected); inclass selects.
 struct Esc { kind: int, out: int, nod: int }
 
 fn pesc(p: mut Par, rg: mut Ranges, inclass: int) -> [Esc, err] {
@@ -703,7 +703,7 @@ fn rep_at(s: str, i: int) -> RepScan {
     return RepScan{ok: 1, lo: lo, hi: hi, end: j + 1}
 }
 
-// is_word_name is Go's named-group charset [A-Za-z0-9_].
+// is_word_name is the named-group charset [A-Za-z0-9_].
 fn is_word_name(c: int) -> bool {
     return c >= 97 && c <= 122 || c >= 65 && c <= 90 || c >= 48 && c <= 57 || c == 95
 }
@@ -774,7 +774,7 @@ fn pa_group(p: mut Par) -> [int, err] {
 
 // pa_quoted consumes runes after \Q until \E or end. The cat of
 // all literals but the last is returned; the last literal index
-// goes to p.qtail so a following quantifier binds it alone — Go's
+// goes to p.qtail so a following quantifier binds it alone — the
 // \Qab\E+ is ab+, not (ab)+. An empty \Q\E returns -1 with
 // qtail -1: transparent, so a following quantifier reaches the
 // preceding operand (pa_cat applies it via the pending rep).
@@ -872,7 +872,7 @@ fn pa_atom(p: mut Par) -> [int, err] {
 }
 
 // pa_rep parses atom + postfix quantifiers. A second quantifier
-// right after one is Go's "invalid nested repetition" error; `?`
+// right after one is an "invalid nested repetition" error; `?`
 // directly on a quantifier is the lazy marker instead.
 fn pa_rep(p: mut Par) -> [int, err] {
     [ni, e] = pa_atom(p)
@@ -977,7 +977,7 @@ fn pa_cat(p: mut Par) -> [int, err] {
         }
         if p.prep_lo >= 0 {
             // rep deferred by a transparent \Q\E — binds the
-            // previous operand; with none it is the same error Go
+            // previous operand; with none it is the same error
             // gives a leading `*`/`+`/`?`/`{m,n}`.
             if cur < 0 {
                 return 0, perr("missing argument to repetition operator")
@@ -1218,8 +1218,7 @@ fn emit_rep(pg: mut Pg, ns: []Node, n: Node) -> err {
     return nil
 }
 
-/// compile parses pat and lowers it to an NFA program — Go's
-/// regexp.Compile shape: [Re, err].
+/// compile parses pat and lowers it to an NFA program: [Re, err].
 fn compile(pat: str) -> [Re, err] {
     p := new(Par{s: pat, pos: 0, nodes: mkslice(Node, 0), cls: mkslice(Cls, 0), depth: 0, qtail: -1, prep_lo: -1, prep_hi: 0, prep_lazy: 0})
     [root, e] = pa_alt(p)
@@ -1390,7 +1389,7 @@ fn step(r: mut Run, c: int, sp: int, ru: int, npos: int) {
 // prevrune returns the rune that ends at byte pos, or -1 at the
 // start — what \b needs on the left edge. Continuation bytes walk
 // back to the lead, and malformed input yields RuneError (a
-// non-word rune, matching Go's treatment).
+// non-word rune).
 fn prevrune(s: str, pos: int) -> int {
     if pos <= 0 {
         return -1
@@ -1404,7 +1403,7 @@ fn prevrune(s: str, pos: int) -> int {
 
 // findat is the leftmost-first search of s from byte k: a
 // low-priority seed thread enters at every rune boundary, so the
-// earliest start always wins (RE2's trick — dedupe by pc keeps the
+// earliest start always wins (dedupe by pc keeps the
 // earlier of two threads at the same pc).
 fn findat(re: ref Re, s: str, k: int) -> Span {
     r := run_new(re, s)
@@ -1449,12 +1448,12 @@ fn findat(re: ref Re, s: str, k: int) -> Span {
 
 // ---- API ----
 
-/// matchstr reports whether s contains a match — Go's MatchString.
+/// matchstr reports whether s contains a match.
 fn (r ref Re) matchstr(s: str) -> bool {
     return findat(r, s, 0).s >= 0
 }
 
-/// find returns the leftmost match text, or "" — Go's FindString.
+/// find returns the leftmost match text, or "".
 fn (r ref Re) find(s: str) -> str {
     sp := findat(r, s, 0)
     if sp.s < 0 {
@@ -1464,13 +1463,13 @@ fn (r ref Re) find(s: str) -> str {
 }
 
 /// findidx returns the leftmost match's byte span; s is -1 when
-/// there is no match — Go's FindStringIndex as a struct pair.
+/// there is no match, as a struct pair.
 fn (r ref Re) findidx(s: str) -> Span {
     return findat(r, s, 0)
 }
 
-/// findall returns successive non-overlapping matches — Go's
-/// FindAllString. n<0 is all, n>=0 caps the count, n==0 is empty.
+/// findall returns successive non-overlapping matches:
+/// n<0 is all, n>=0 caps the count, n==0 is empty.
 /// Empty matches abutting the previous match's end are skipped and
 /// an accepted empty match advances the scan one rune.
 fn (r ref Re) findall(s: str, n: int) -> own []str {
@@ -1513,7 +1512,7 @@ fn (r ref Re) findall(s: str, n: int) -> own []str {
     return new(out)
 }
 
-/// replaceall substitutes literal repl for every match — Go's
+/// replaceall substitutes literal repl for every match —
 /// ReplaceAllLiteralString semantics (no $ expansion, there are
 // no capture spans in v1).
 fn (r ref Re) replaceall(s: str, repl: str) -> str {
@@ -1557,7 +1556,7 @@ fn (r ref Re) replaceall(s: str, repl: str) -> str {
     return s
 }
 
-/// split cuts s around each match — Go's Split: n<0 is all, n==0
+/// split cuts s around each match: n<0 is all, n==0
 /// an empty result, n>0 caps the piece count; a match ending at
 /// byte 0 doesn't emit a leading piece, and a trailing piece is
 /// only emitted when the last match doesn't reach end of input.

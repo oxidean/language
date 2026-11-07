@@ -98,7 +98,7 @@ fn lex(src: str) -> own Tok {
                 i = i + 1
             }
             // unterminated comments end the scan without walking past
-            // the source — same clamp as the Rust lexer — but surface
+            // the source — same clamp as the seed lexer — but surface
             // as an err token so the parser/checker fail instead of
             // silently parsing a truncated stream
             if i + 1 >= len(src) {

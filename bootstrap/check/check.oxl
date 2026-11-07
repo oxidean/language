@@ -2,7 +2,7 @@ package check
 
 // bootstrap/check.oxl — the typechecker, written in .oxl.
 // Third self-host component: ports oxl/src/check.rs over the bootstrap
-// parser's `Node` AST. Types are interned ints into a pool (rustc-style
+// parser's `Node` AST. Types are interned ints into a pool (seed-style
 // Ty handles); scopes are a Vec of std/collections maps.
 //
 //   oxl run bootstrap/check.oxl -- file.oxl      prints diags or "ok"
@@ -18,7 +18,7 @@ import "std/collections"
 
 import "std/strings"
 
-// package loading needs portable dir probes (Rust resolve_pkg mirrors)
+// package loading needs portable dir probes (seed resolve_pkg mirrors)
 extern fn rt_lsdir(path: str) -> str
 
 extern fn rt_isdir(path: str) -> int
@@ -399,7 +399,7 @@ struct Ck {
     loaded: own SList, // resolved package dirs
     loaded_names: own ModEnt, // resolved dir -> package clause cache
     loading: own ModEnt, // in-flight pkg dir -> written imp (cycle detect)
-    load_fail: int, // a load-time diag fired — unwind like Rust's None path
+    load_fail: int, // a load-time diag fired — unwind like the seed's None path
     mod_on: int, // an oxl.mod was found (module mode); 0 = std-only
     mod_path: str, // declared module path
     mod_root: str, // dir holding oxl.mod
@@ -410,7 +410,7 @@ struct Ck {
     modcache: str, // module cache root
     mod_sums: own SumEnt, // oxl.sum lines — cache lookups verify against them
     entry_dir: str, // root package dir — anchors the source-tree std walk
-    root_pkg: str, // root package clause — Rust fires builtin-redefine only on main's bare decls
+    root_pkg: str, // root package clause — the seed fires builtin-redefine only on main's bare decls
     fnvals: own SList, // named fns used as values
     cur_fn: str,
     cur_mod: str, // package clause while checking
@@ -1741,7 +1741,7 @@ fn alias_stem(ck: ref Ck, q: str) -> str {
     for l != nil {
         if l.alias == q {
             // M3: every matching bind marks — same-qualified imports of
-            // one package share the mark like Rust's used.quals set
+            // one package share the mark like the seed's used.quals set
             b := ck.file_aliases[fi].binds
             for b != nil {
                 if b.qual == q {
@@ -1779,7 +1779,7 @@ fn selective_name(ck: ref Ck, n: str) -> str {
     return ""
 }
 
-// the Rust driver qualifies decls `mod.name` at load; lookups here try
+// the seed driver qualifies decls `mod.name` at load; lookups here try
 // `cur_mod.head` first for bare and dotted names alike. Import aliases
 // rewrite the head of dotted names; selective imports rewrite bare ones.
 fn resolve_named(ck: ref Ck, s: str) -> str {
@@ -2262,7 +2262,7 @@ fn reg_fn(ck: mut Ck, mod: str, ex: bool, name: str, recv: ref parser.Node, typa
     ps = irev(ps)
     cr := ret_sig(ck, ret)
     ck.ty_scope = nil
-    // Rust qualifies every non-main package — its BUILTINS probe only
+    // the seed qualifies every non-main package — its BUILTINS probe only
     // ever sees bare names for `package main` decls. Root items stay
     // unqualified here (mod == ""), so gate on the root clause.
     if !ex && len(mod) == 0 && ck.root_pkg == "main" && is_builtin(name) {
@@ -2304,7 +2304,7 @@ fn reg_global(ck: mut Ck, name: str, ty: ref parser.Node, init: ref parser.Node)
         t = want
     }
     // package-qualified key — two packages can share a global name
-    // (crypto/{md5,sha256} both keep P2/KT); Rust qualifies the decl
+    // (crypto/{md5,sha256} both keep P2/KT); the seed qualifies the decl
     // itself in qualify_item
     collections.map_set(ck.globals, qname(ck.cur_mod, name), t)
 }
@@ -2593,7 +2593,7 @@ fn as_expr(ck: mut Ck, inner: ref parser.Node, ty: ref parser.Node, env: mut Env
     }
     wk := ck.tyv[wt].k
     // conversions — `as` also casts, not just extracts; `own T` unwraps
-    // to its payload kind (Rust's `base`)
+    // to its payload kind (the seed's `base`)
     bt := ot
     if ok == k_own() && ck.tyv[ot].i >= 0 {
         bt = ck.tyv[ot].i
@@ -2718,7 +2718,7 @@ fn bin_expr(ck: mut Ck, op: str, l: ref parser.Node, r: ref parser.Node, env: mu
             assignable(ck, tk(ck, k_float()), lt)
             assignable(ck, tk(ck, k_float()), rt)
         } else if lk == k_str() && rk == k_str() {
-            // Go parity: str < str is byte-lex — codegen emits rt_str_cmp
+            // str < str is byte-lex — codegen emits rt_str_cmp
         } else {
             assignable(ck, t_int(ck), lt)
             assignable(ck, t_int(ck), rt)
@@ -4964,10 +4964,10 @@ fn clause_of(ck: ref Ck, dir: str) -> str {
     return ""
 }
 
-// ---------- module system (mirrors the Rust mod_ctx/resolve_pkg) ----------
+// ---------- module system (mirrors the seed mod_ctx/resolve_pkg) ----------
 
 // language version this self-hosted toolchain implements — kept in
-// lock-step with the Rust OXL_VERSION (Cargo.toml major.minor)
+// lock-step with the seed OXL_VERSION (Cargo.toml major.minor)
 fn tool_ver() -> str {
     return "0.3"
 }
@@ -5038,7 +5038,7 @@ fn mod_ver_ok(v: str) -> bool {
 struct SVer { ok: int, maj: int, min: int, pat: int, pre: str }
 
 fn num_field(s: str) -> int {
-    // digits only, no leading zeros (mirrors Rust num_field); -1 bad
+    // digits only, no leading zeros (mirrors seed num_field); -1 bad
     if len(s) == 0 || all_digits(s) == false {
         return -1
     }
@@ -5065,7 +5065,7 @@ fn ident_ok(s: str) -> bool {
 
 fn pre_idents(s: str) -> int {
     // every dot-separated prerelease ident well-formed; numeric ones
-    // carry no leading zeros — mirrors Rust pre_idents
+    // carry no leading zeros — mirrors seed pre_idents
     parts := strings.split(s, ".")
     for parts != nil {
         i := parts.v
@@ -5081,7 +5081,7 @@ fn pre_idents(s: str) -> int {
 }
 
 // `vX.Y.Z[-pre][+build]`; leading v and full triplet required — the
-// require/replace version shape (mirrors Rust semver::parse)
+// require/replace version shape (mirrors seed semver::parse)
 fn sver_parse(v: str) -> SVer {
     r := SVer{ok: 0, maj: 0, min: 0, pat: 0, pre: ""}
     if strings.startswith(v, "v") == false {
@@ -5176,7 +5176,7 @@ fn ident_num(s: str) -> int {
 
 // prerelease precedence: no pre > any pre; per-ident numeric<alpha,
 // numeric numerically, alpha lexically; prefix sorts shorter.
-// returns -1/0/1 (mirrors Rust cmp_pre)
+// returns -1/0/1 (mirrors seed cmp_pre)
 fn pre_cmp(a: str, b: str) -> int {
     if len(a) == 0 && len(b) == 0 {
         return 0
@@ -5231,7 +5231,7 @@ fn pre_cmp(a: str, b: str) -> int {
     return 0
 }
 
-// -1/0/1 — mirrors Rust semver::compare (build metadata ignored)
+// -1/0/1 — mirrors seed semver::compare (build metadata ignored)
 fn sver_cmp(a: SVer, b: SVer) -> int {
     if a.maj != b.maj {
         if a.maj < b.maj {
@@ -5267,8 +5267,8 @@ fn path_major(path: str) -> int {
     return n
 }
 
-// Go's require rule — the version's major must match the path's /vN
-// suffix; "" = ok (mirrors Rust semver::require_ok)
+// the require rule — the version's major must match the path's /vN
+// suffix; "" = ok (mirrors seed semver::require_ok)
 fn require_ok_s(path: str, raw: str, maj: int) -> str {
     pm := path_major(path)
     if pm > 0 {
@@ -5382,7 +5382,7 @@ fn norm_path(p: str) -> str {
 }
 
 // canonical absolute path or the input when it doesn't resolve —
-// mirrors the Rust canonicalize-fallback
+// mirrors the seed canonicalize-fallback
 fn canon_or(p: str) -> str {
     c := rt_fullpath(p)
     if len(c) == 0 {
@@ -5394,7 +5394,7 @@ fn canon_or(p: str) -> str {
 // nearest ancestor dir holding oxl.mod — "" when none (module-off)
 fn find_root(d: str) -> str {
     // canonicalize the start: a lexical walk stalls at "."/"" and never
-    // reaches the cwd's real ancestors (mirrors the Rust find_root)
+    // reaches the cwd's real ancestors (mirrors the seed find_root)
     c := canon_or(d)
     if len(c) == 0 {
         c = canon_or(".")
@@ -5595,7 +5595,7 @@ fn parse_manifest(ck: mut Ck, text: str) -> int {
 // manifest error (diags emitted), 1 ok including module-off (no
 // oxl.mod anywhere: mod_on stays 0 and only `std/` imports resolve)
 // a dep manifest's require edges — silent strict scan; nil on ANY
-// malformed directive (mirrors Rust build_list's parse_manifest gate:
+// malformed directive (mirrors seed build_list's parse_manifest gate:
 // a bad dep manifest contributes no edges)
 // returns a fresh unlinked ModEnt for a require; nil for a valid
 // replace; err on any malformed line — the caller dup-checks + links
@@ -5711,7 +5711,7 @@ fn dep_manifest_reqs(text: str) -> own ModEnt {
 
 // the dir a required module version occupies: version-specific
 // replace beats a blanket one, else the `path@ver` cache slot —
-// "" = not fetched (mirrors Rust module_dir)
+// "" = not fetched (mirrors seed module_dir)
 fn module_dir(ck: ref Ck, mp: str, ver: str) -> DirRes {
     blanket := ""
     rl := ck.mod_reps
@@ -5743,7 +5743,7 @@ fn module_dir(ck: ref Ck, mp: str, ver: str) -> DirRes {
 
 // minimal version selection: BFS the requirement graph from the main
 // module's requires; each (module, version) node's manifest adds
-// edges; per path keep the MAX version seen — Go's MVS, mirrored
+// edges; per path keep the MAX version seen — MVS, mirrored
 // from build_list. Fills ck.mod_sel.
 fn mod_build_list(ck: mut Ck) {
     seen := collections.map_new()
@@ -5808,7 +5808,7 @@ fn mod_build_list(ck: mut Ck) {
 
 // the version selection assigns to a required module path — the
 // build list's entry when present, else the require's own floor
-// (mirrors Rust selected_ver)
+// (mirrors seed selected_ver)
 fn selected_ver(ck: ref Ck, mp: str) -> str {
     l := ck.mod_sel
     for l != nil {
@@ -5872,7 +5872,7 @@ fn std_at(base: str, rest: str) -> str {
 // Mirrors modcache.rs: `!`-escaped slot names, oxl.sum parsing, and the
 // h1 dirhash — sha256 + base64 over sorted "<hex>  <name>\n" lines —
 // verified on every load with identical diagnostics. `oxl get` itself
-// stays driver-side (Go's compiler doesn't fetch either).
+// stays driver-side (the compiler doesn't fetch either).
 //
 // ints are wrapping i64, so all u32 math masks with & 4294967295; the
 // language has no shift ops — x >> n is x / 2^n and x << n is x * 2^n,
@@ -5897,7 +5897,7 @@ fn strip_comment(t: str) -> str {
     return t
 }
 
-// Go's module.EscapePath — every uppercase letter becomes `!`+lower so
+// the established escape scheme — every uppercase letter becomes `!`+lower so
 // case-insensitive filesystems can't collide slots
 fn escape_path(s: str) -> str {
     lc := "abcdefghijklmnopqrstuvwxyz"
@@ -6139,7 +6139,7 @@ fn dir_h1(dir: str) -> str {
         for j < len(ent) {
             // compare the name portion only — sorting the joined
             // "name|hex" reverses prefix pairs (README vs README.md,
-            // `|` > `.`) and diverges from Rust's tuple sort
+            // `|` > `.`) and diverges from the seed's tuple sort
             nj := substr(ent[j], 0, find(ent[j], "|"))
             ni := substr(ent[i], 0, find(ent[i], "|"))
             if str_cmp(nj, ni) < 0 {
@@ -6208,7 +6208,7 @@ fn sum_for(ck: ref Ck, path: str, ver: str, is_mod: int) -> str {
 }
 
 // verify a cached slot against the sums: both lines must exist and
-// match — Go's two-entry rule. "" = verified
+// match — the two-entry rule. "" = verified
 fn verify_slot(ck: ref Ck, dir: str, path: str, ver: str) -> str {
     t := sum_for(ck, path, ver, 0)
     if len(t) == 0 {
@@ -6300,7 +6300,7 @@ fn resolve_imp(ck: mut Ck, imp: str) -> RRes {
 }
 
 // internal rule: the importing package's dir must sit under EVERY
-// `internal` segment's parent — mirrors the Rust component scan over
+// `internal` segment's parent — mirrors the seed component scan over
 // normalized paths
 fn internal_ok(resolved: str, importer_dir: str) -> bool {
     rd := norm_path(canon_or(resolved))
@@ -6389,7 +6389,7 @@ fn parse_pfile(ck: mut Ck, path: str) -> PFile {
 }
 
 // collect one file's items + its own import bindings: names shared
-// package-wide through `mod`, import tables stay per-file like Go
+// package-wide through `mod`, import tables stay per-file like the established model
 fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, itemmod: str) {
     match ast {
         parser.Node.Root{items} => {
@@ -6438,7 +6438,7 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
                                     qual = alias
                                 }
                                 // a second binding of the same local name is
-                                // an error (Go: redeclared in this block)
+                                // an error (redeclared in this block)
                                 if modent_has(al, qual) == 1 || modent_has(nm, qual) == 1 {
                                     diag(ck, "check", "`" + qual + "` redeclared as imported package name")
                                     ck.load_fail = 1
@@ -6472,7 +6472,7 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
                 l = l.next
             }
             // binds built by prepend — flip so unused diags emit in
-            // the file's import order like the Rust report
+            // the file's import order like the seed report
             let rb: own ImpBind = nil
             for binds != nil {
                 bn := binds.next
@@ -6489,7 +6489,7 @@ fn pfile_items(ck: mut Ck, ld: mut Loader, fpath: str, ast: own parser.Node, ite
 }
 
 // load every .oxl in a package dir; returns the clause ("" on failure —
-// diagnostics already emitted). Mirrors the Rust load_pkg checks:
+// diagnostics already emitted). Mirrors the seed load_pkg checks:
 // mixed clauses, clause-vs-dirname, `main` isn't importable.
 fn load_pkg(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int, is_root: int) -> str {
     if ck.load_fail == 1 {
@@ -6513,7 +6513,7 @@ fn load_pkg(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int, is_r
 
 fn load_pkg_inner(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int, is_root: int) -> str {
     // .oxl entries of the dir — rt_lsdir presorts so the load order
-    // (and diagnostics) match the Rust loader deterministically
+    // (and diagnostics) match the seed loader deterministically
     fs := mkslice(str, 0)
     raw := rt_lsdir(dir)
     for len(raw) > 0 {
@@ -6572,7 +6572,7 @@ fn load_pkg_inner(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int
 
 // file-mode root: one file is a one-file package — no dir-name or
 // mixed-clause checks, items stay unqualified; imports still resolve
-// to package directories (mirrors the Rust PkgSrc::Files path)
+// to package directories (mirrors the seed PkgSrc::Files path)
 fn load_file_root(ck: mut Ck, ld: mut Loader, path: str) -> str {
     pf := parse_pfile(ck, path)
     if pf.ast == nil {
@@ -6682,7 +6682,7 @@ fn check_file(path: str, need_main: int) -> own CkRes {
     check_fnvals(ck)
     check_suspend_rules(ck, ld.items)
     // M3: each file's imports judged against its decls — one diag per
-    // dead binding in import order (Rust emits these mid-load)
+    // dead binding in import order (seed emits these mid-load)
     if ck.load_fail == 0 {
         fi2 := 0
         for fi2 < len(ck.file_aliases) {

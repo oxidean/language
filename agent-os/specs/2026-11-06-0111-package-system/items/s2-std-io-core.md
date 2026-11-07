@@ -2,7 +2,8 @@
 
 ## Problem
 
-Go's stdlib hangs off `io.Reader`/`Writer` and `[]byte`. oxl has
+A core library hangs off `io.Reader`/`Writer`-shaped interfaces and a
+byte slice. oxl has
 iface types (D3) — the interfaces are expressible — but no `byte`
 type and an `err` that's an opaque int-like value. Three real gaps
 stand between today and an io-shaped library: `byte`/`[]byte`,

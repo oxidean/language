@@ -1,6 +1,6 @@
-//! Go-flavored semantic versions: `vMAJOR.MINOR.PATCH[-pre][+build]`.
+//! Semantic versions: `vMAJOR.MINOR.PATCH[-pre][+build]`.
 //! Pseudo-versions ride the same grammar (`v1.2.4-0.yyyymmddhhmmss-<sha>`
-//! sorts after v1.2.3, before v1.2.4 — Go's rule falls out of ordinary
+//! sorts after v1.2.3, before v1.2.4 — the rule falls out of ordinary
 //! prerelease precedence, no special casing needed).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +19,7 @@ fn ident_ok(s: &str) -> bool {
 }
 
 fn num_field(s: &str) -> Option<u64> {
-    // numeric fields: digits only, no leading zeros (semver spec; Go
+    // numeric fields: digits only, no leading zeros (semver spec —
     // rejects `v01.2.3` too)
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -40,7 +40,7 @@ fn pre_idents(s: &str) -> Option<Vec<String>> {
 }
 
 /// parse `vX.Y.Z[-pre][+build]`; leading `v` required, full triplet
-/// required — the require/replace version shape (Go's go.mod rule)
+/// required — the require/replace version shape (the manifest rule)
 pub fn parse(s: &str) -> Option<Ver> {
     let s = s.strip_prefix('v')?;
     // an empty post-separator piece is malformed, not absent:
@@ -115,9 +115,9 @@ pub fn path_major(path: &str) -> Option<u64> {
     (v >= 2).then_some(v)
 }
 
-/// Go's require rule: the version's major must match the path's /vN
+/// The require rule: the version's major must match the path's /vN
 /// suffix (v0/v1 paths carry no suffix). Err echoes the raw version
-/// token like Go's own diagnostics.
+/// token like the upstream diagnostics.
 pub fn require_ok(path: &str, raw: &str, ver: &Ver) -> Result<(), String> {
     match (path_major(path), ver.maj) {
         (Some(n), m) if n == m => Ok(()),
@@ -175,7 +175,8 @@ mod tests {
 
     #[test]
     fn pseudo_version_ordering() {
-        // after base release, before next patch — Go's pseudo rule
+        // after base release, before next patch — the pseudo-version
+        // rule
         let base = v("v1.2.3");
         let pseudo = v("v1.2.4-0.20240101000000-deadbeef1234");
         let next = v("v1.2.4");

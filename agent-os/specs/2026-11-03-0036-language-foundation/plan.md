@@ -10,7 +10,7 @@ parallel worktree tracks in Phase 2. Every task lands behind the
 **Status (2026-11-05): complete — v0.0.1 tagged.** Phase 0–2 all done.
 The compiler compiles all `examples/` to native binaries and they run —
 including the HTTP CRUD + SQLite and GTK pilots. Implementation language
-is Rust (approved alternative — Zig absent on the dev machine); codegen
+is Rust (the settled seed language); codegen
 backend is C emit → cc (documented interim, swappable for LLVM behind
 the `interfaces.md` seam). Deferred items — including the state-machine
 transform opened under Task 10 — were spec'd and landed under
@@ -41,7 +41,7 @@ at measurement noise (~0–4%). Verdict: GO.
 
 ### Task 4: Toolchain skeleton [done]
 
-`oxl/` (Rust): `build run test fmt doc lsp`. build/run/test work;
+`oxl/` (seed toolchain): `build run test fmt doc lsp`. build/run/test work;
 fmt/doc are honest stubs; lsp is a stdio JSON-RPC scaffold (initialize/
 shutdown/exit).
 

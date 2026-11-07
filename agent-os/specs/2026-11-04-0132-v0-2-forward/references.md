@@ -21,10 +21,10 @@
 
 ## Prior art per item
 
-- Rust async / embassy — state-machine transform (A1)
-- Go select — multi-channel wait surface (A2)
-- Go enum-free Rust enum / Zig tagged union — for B1 shape
-- Go structural interfaces — D3 (shallow, no trait solving)
-- Go gcshape stenciling — D4
-- Zig defer — B5
-- Rust syn/prettyplease + gofmt — E2 direction
+- Stackless async runtimes — state-machine transform (A1)
+- Multi-channel `select` prior art — wait surface semantics (A2)
+- Tagged-union prior art — for B1 shape
+- Structural-interface prior art — D3 (shallow, no trait solving)
+- Shape-stenciling prior art — D4
+- Scoped `defer` prior art — B5
+- AST pretty-printer prior art — E2 direction

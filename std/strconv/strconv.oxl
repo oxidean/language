@@ -2,7 +2,7 @@ package strconv
 
 // std/strconv — string<->number conversions with real error returns.
 // The lenient builtins (atoi/atof stop at the first bad char) sit under
-// validating wrappers; [v, err] everywhere Go has one.
+// validating wrappers; [v, err] wherever conversion can fail.
 import "std/errors"
 
 fn synerr(fnname: str, s: str) -> err {
@@ -24,7 +24,7 @@ fn itoa(v: int) -> str {
 }
 
 /// parseint parses s in base 2..36; digits then letters. [value, err].
-/// Overflow wraps int64 (v1 bound — Go would report ErrRange).
+/// Overflow wraps int64 (v1 bound — out-of-range reports ErrRange).
 fn parseint(s: str, base: int) -> [int, err] {
     if base < 2 || base > 36 {
         return 0, errors.new("strconv.parseint: base " + itoa(base) + " out of range")

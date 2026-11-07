@@ -1,7 +1,8 @@
 # Package System + Stdlib — Implementation Plan
 
-Go-shaped packages, versions, fetching, dead-code elimination, and a
-Go-parity `std/`. Per-item design sketches live in `items/`; this file
+Versioned packages, fetching, dead-code elimination, and a
+batteries-included `std/`. Per-item design sketches live in `items/`;
+this file
 is the order of battle. Milestone-gated, not date-gated.
 
 **Status (2026-11-06): M1 (PR #5), M2 (PR #6), M3 (PR #7), G1 (PR #9), G2 (PR #10), V1 (PR #11), S1 (PR #12), V2 (PR #13), V3 (PR #14), S2 (PR #15), S3 (PR #16), S4 (PR #17), S5 (PR #18) implemented — spec complete.**
@@ -37,7 +38,8 @@ cache only — fetching lands in V2.
 
 ### Task M3: unused imports = compile error [done — PR #7]
 
-`items/m3-unused-imports.md`. Per-file usage, Go wording
+`items/m3-unused-imports.md`. Per-file usage, with the established
+`imported and not used` wording
 (`imported and not used: "path"`), selective names checked
 individually, `as _` exempt. Small — do it right after M1 so the
 migration commit also fixes any newly-illegal imports.
@@ -53,7 +55,7 @@ library code — the resolver's foundation.
 ### Task V2: module cache + `oxl get` + `oxl.sum` [done — PR #13]
 
 `items/v2-module-cache.md`. `OXLMODCACHE` layout, git-based fetch
-(shells out to `git`, like early Go), `h1:`-style tree hashes,
+(shells out to `git`), `h1:`-style tree hashes,
 verify-on-load. `@latest`/`@vX.Y.Z`/`@<ref>` queries.
 
 ### Task V3: `oxl mod` commands [done — PR #14]
@@ -83,7 +85,7 @@ the program actually uses. Independent of G1.
 ### Task S1: `stdlib/` → `std/` package tree [done — PR #12]
 
 `items/s1-std-restructure.md`. Directory-package relayout of the 8
-existing modules onto Go paths where they map (`json`→`encoding/json`,
+existing modules onto their canonical paths (`json`→`encoding/json`,
 `http`→`net/http`), toolchain-side std root resolution, repo-wide call
 site updates. Lands with the M1 migration commit or immediately behind
 it — same diff family.
@@ -111,12 +113,13 @@ TLS stays a documented non-goal.
 ### Task S5: `std/regexp` [done]
 
 `items/s5-std-regexp.md`. Thompson NFA, linear-time, no backrefs —
-RE2's guarantee on an oxl-scale engine. Largest single S item;
+the linear-time guarantee on an oxl-scale engine. Largest single S
+item;
 schedule last in the track.
 
 ### Parked (no spec — do not implement)
 
-`items/parked-stdlib.md`. Go packages deliberately out of reach for
+`items/parked-stdlib.md`. Library areas deliberately out of reach for
 this milestone — reflect/`%v`-any formatting, `encoding/gob`,
 `database/sql`, `image`, `compress`, `crypto/tls`, `context` (scopes
 replace it), and the rest — each with the reason it doesn't map or

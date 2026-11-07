@@ -274,7 +274,7 @@ typedef struct {
     void *fp;
 } RtFnv;
 
-/* --- interface values (D3): {data, vtable} fat pair, Go-style itab.
+/* --- interface values (D3): {data, vtable} fat pair.
  * vtab[i] is the fn ptr for the interface's i-th method; its signature
  * is always (void* data, args...) so any impl slots in uniformly */
 typedef struct {
@@ -353,7 +353,7 @@ int64_t rt_fd_write(int64_t fd, RtSlice b);  /* n or -errno        */
 int64_t rt_fd_close(int64_t fd);   /* 0 or -errno              */
 int64_t rt_remove(OxlStr path);      /* unlink, 0 or -errno      */
 OxlStr  rt_errstr(int64_t code);      /* strerror text             */
-int64_t rt_str_cmp(OxlStr a, OxlStr b);      /* byte-lex order, Go str<str */
+int64_t rt_str_cmp(OxlStr a, OxlStr b);      /* byte-lex order for str < str */
 int64_t rt_is_windows(void);                  /* 1 under _WIN32              */
 OxlStr  rt_timestr(void);                     /* "YYYY-MM-DD HH:MM:SS" local */
 double  rt_m_sqrt(double);

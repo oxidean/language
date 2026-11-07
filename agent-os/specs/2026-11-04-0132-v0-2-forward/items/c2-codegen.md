@@ -13,10 +13,10 @@ a separate future seam, not part of bootstrap):
 
 - `Expr`/`Stmt`/`Item` → C text via a `std/buffer`-style string builder
 - monomorphized generic instantiations (`l_f_name__T` naming scheme —
-  same as the Rust backend so `runtime/` links identically)
+  same as the seed backend so `runtime/` links identically)
 - spawn trampolines, `[v,err]` ret structs, borrow-check emission
   (must emit `rt_unborrow` — the exact discipline fixed in v0.0.1)
-- imports already merged by `parser.oxl`'s crate walk
+- imports already merged by `parser.oxl`'s AST walk
 
 Output contract: the emitted C must compile against `runtime/rt.{c,h}`
 byte-for-byte-compatible at the ABI level (same struct layouts, same
@@ -26,7 +26,7 @@ byte-for-byte-compatible at the ABI level (same struct layouts, same
 
 - `bootstrap/codegen.oxl` emits C for all `examples/` — `cc` builds
   them, they run identically
-- **The bootstrap chain**: `oxl` (Rust) compiles
+- **The bootstrap chain**: `oxl` (seed) compiles
   `lexlib+parser+check+codegen.oxl` → that binary compiles
   `hello.oxl` → hello runs. This is the demo.
 - Self-compile: the self-hosted compiler compiles *itself* (all four
@@ -69,5 +69,5 @@ in `tests/run.sh` codegen coverage, emitting + running identically to
 - The two biggest files in the language (~1200 lines combined) — the
   real DX/perf test for the stdlib; expect to land `std/buffer` and
   stdlib hardening as side-effects.
-- ABI drift vs the Rust backend — the runtime contract pins it; the
+- ABI drift vs the seed backend — the runtime contract pins it; the
   differential test (same input → same C behavior) catches drift.

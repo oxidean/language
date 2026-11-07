@@ -6,7 +6,7 @@ package bytes
 // with the buffer's backing (same arena rules as every borrowed view).
 //
 // Boxing a Buffer into io.Reader/Writer COPIES it — writes land in the
-// box, invisible to the variable. The as*/-methods are Go's `&buf`:
+// box, invisible to the variable. The as*/-methods take a `&buf`:
 // they box a borrow of the receiver, so mutations write through to the
 // value the caller still holds.
 
@@ -151,7 +151,7 @@ fn tostr(b: []byte) -> str {
 import "std/io"
 
 /// asreader boxes a borrow of this Buffer as an io.Reader — reads
-/// drain the caller's value (Go's `&buf`).
+/// drain the caller's value (`&buf`).
 fn (b mut Buffer) asreader() -> io.Reader {
     return b
 }

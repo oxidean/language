@@ -42,7 +42,7 @@ existing meaning). There is no `cap` accessor in the surface language.
 header. Because the header is a value, **the result must be
 reassigned**: `s = push(s, v)`. Elements are copied on growth; existing
 views into the old backing keep referencing it — they do not follow the
-reallocation (same rule as Go append).
+reallocation.
 
 ## Views — `s[a:b]`
 

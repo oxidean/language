@@ -6,7 +6,7 @@
 resolve to directories; all `.oxl` files in one directory form one
 package sharing a decl namespace; bound name = declared clause name.
 
-**Architecture:** the Rust toolchain (`oxl/src/`) gains clause parsing
+**Architecture:** the seed toolchain (`oxl/src/`) gains clause parsing
 (`Crate.pkg`), directory-package loading (`load_pkg`), and file/dir
 argument modes. The self-hosted bootstrap (`bootstrap/`) mirrors the
 same semantics (`resolve_imp`/`load_mod` → dir versions) using a new
@@ -18,10 +18,10 @@ and every file gets a clause.
 
 ## Global constraints
 
-- Diag parity: every diagnostic the Rust side emits for package
+- Diag parity: every diagnostic the seed side emits for package
   loading must be byte-identical from `check.oxl` — they share the
   `tests/diag/` corpus. Wording below is normative.
-- `package` becomes a keyword in BOTH lexers (Rust `lexer.rs`,
+- `package` becomes a keyword in BOTH lexers (seed `lexer.rs`,
   `lexlib.oxl`).
 - Canonical module qualifier = **clause name** (same-collision
   semantics as today's file stems; M2 upgrades identity to module
@@ -50,7 +50,7 @@ and every file gets a clause.
 each side sees them — corpus fixtures keep paths relative and
 identical by construction.
 
-## Task M1.1 — Rust front-end: keyword + clause + `Crate.pkg`
+## Task M1.1 — seed front-end: keyword + clause + `Crate.pkg`
 
 **Files:** `oxl/src/lexer.rs`, `oxl/src/parser.rs`, `oxl/src/ast.rs`,
 `oxl/src/fmt.rs`, `oxl/src/main.rs` (parse callers compile-fix only)
@@ -68,7 +68,7 @@ identical by construction.
 fn main(){println("x")}` compiles+runs; file without clause → parse
 diag.
 
-## Task M1.2 — Rust loader: `resolve_pkg` + `load_pkg` + modes
+## Task M1.2 — seed loader: `resolve_pkg` + `load_pkg` + modes
 
 **Files:** `oxl/src/main.rs`
 
@@ -89,7 +89,7 @@ diag.
   - pass A: collect decl names across ALL files → shared renames
     `n -> pkg.n` (pkg = clause); pass B: per file, renames = shared +
     that file's selective imports, aliases = that file's imports —
-    file-scope like Go; qualify items; extend merged items/item_files.
+    file-scope; qualify items; extend merged items/item_files.
   - recursion per file's imports (a file's imports are its own).
 - Root: `load_crate` unchanged role — root decls bare (`modname ""`).
 - File list mode: `oxl build a.oxl b.oxl` — all listed files same dir +
@@ -129,7 +129,7 @@ diags fire; `oxl run` file-mode on old single file works.
   as first item in `Root.items` (new Node variant + `to_json` case);
   missing → lex-style error print + nil (parse failures aren't corpus
   diags). `p_item` dispatches `package` only at pos 0 — after items,
-  `package` is not an item start (error path like Rust).
+  `package` is not an item start (error path like the seed).
 - `check.oxl`: `resolve_imp` → dir version (same 3-step order minus
   exe-walk — note: corpus only exercises in-repo paths; document the
   asymmetry in a comment). `load_mod` → `load_pkg(ck, ld, dir)`:
@@ -139,13 +139,13 @@ diags fire; `oxl run` file-mode on old single file works.
   unchanged in shape. `check_file(path)` → file-mode entry: dir of
   path + single-file package semantics — actually: check_file gets a
   FILE arg (CLI); treat as file-mode root (no dir-name check, siblings
-  not loaded — matches Rust file mode). BUT its imports still resolve
+  not loaded — matches seed file mode). BUT its imports still resolve
   to dir packages.
 - `codegen.oxl`: no loader logic of its own (calls `check_file`) —
   import-path updates only.
 
-**Verify:** Rust-toolchain `oxl run bootstrap/check.oxl -- <fixture>`
-matches Rust diags on the same fixture.
+**Verify:** seed-toolchain `oxl run bootstrap/check.oxl -- <fixture>`
+matches seed diags on the same fixture.
 
 ## Task M1.5 — tree migration + bootstrap relayout
 
@@ -197,4 +197,4 @@ byte-identity, diag parity, fmt --check, LSP definition test.
 - `package` as identifier: repo grep found zero uses — keyword is
   safe.
 - File-mode `oxl run bootstrap/check/check.oxl` would treat a lib file
-  as a command — same hazard as `go run lib.go`; scripts use dir mode.
+  as a command — the bare-file hazard; scripts use dir mode.

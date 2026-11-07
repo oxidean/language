@@ -9,7 +9,7 @@ op-constraint vocabulary — not a type.
 
 ## Design sketch
 
-Go-shaped, deliberately shallow:
+Deliberately shallow:
 
 - Methods: `fn (r Receiver) name(args)` — `recv` on the type; called
   `r.name(args)`. Sugar for `name(r, args)` — same C emit, just
@@ -18,7 +18,7 @@ Go-shaped, deliberately shallow:
   op-constraint `interface` gains *method* decls). A struct satisfies
   it structurally (has the methods) — no explicit `implements`.
 - Interface values: `let w: Writer = my_impl` — fat pair `{data, vtable}`
-  in codegen (itab, Go-style).
+  in codegen (vtab).
 - Dispatch: `w.write(s)` → indirect call through vtable.
 - Generics: `interface` constraints already exist — method-declaring
   interfaces become constraint-capable automatically (a `Writer`

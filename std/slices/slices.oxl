@@ -1,13 +1,12 @@
 package slices
 
-// std/slices — Go's slices package: generic operations over []T.
+// std/slices — generic operations over []T.
 // Functions that produce a slice return `own []T` (boxed, escapes
 // the arena); callers slice it with (*p)[lo:hi]... — actually they
 // pass the box anywhere []T is wanted: own coerces at call sites.
 import "std/cmp"
 
-/// index returns the first index where v[i] == x, or -1 — Go's
-/// slices.Index.
+/// index returns the first index where v[i] == x, or -1.
 fn index[T eq](v: []T, x: T) -> int {
     i := 0
     for i < len(v) {
@@ -19,13 +18,13 @@ fn index[T eq](v: []T, x: T) -> int {
     return -1
 }
 
-/// contains reports whether x occurs in v — Go's slices.Contains.
+/// contains reports whether x occurs in v.
 fn contains[T eq](v: []T, x: T) -> bool {
     return index(v, x) >= 0
 }
 
 /// equal reports whether a and b hold equal elements in the same
-/// order — Go's slices.Equal.
+/// order — elements equal pairwise.
 fn equal[T eq](a: []T, b: []T) -> bool {
     if len(a) != len(b) {
         return false
@@ -66,8 +65,8 @@ fn compare[T cmp.Ordered](a: []T, b: []T) -> int {
     return 0
 }
 
-/// clone returns a fresh slice with v's elements — Go's
-/// slices.Clone (boxed `own` since local slices can't escape).
+/// clone returns a fresh slice with v's elements (boxed `own`
+/// since local slices can't escape).
 fn clone[T any](v: []T) -> own []T {
     out := new(mkslice(T, len(v)))
     i := 0
@@ -78,7 +77,7 @@ fn clone[T any](v: []T) -> own []T {
     return out
 }
 
-/// concat returns one slice with a's elements then b's — Go's
+/// concat returns one slice with a's elements then b's —
 /// slices.Concat.
 fn concat[T any](a: []T, b: []T) -> own []T {
     out := new(mkslice(T, len(a) + len(b)))
@@ -95,7 +94,7 @@ fn concat[T any](a: []T, b: []T) -> own []T {
     return out
 }
 
-/// reverse reverses v in place — Go's slices.Reverse.
+/// reverse reverses v in place.
 fn reverse[T any](v: []T) {
     i := 0
     j := len(v) - 1
@@ -108,7 +107,7 @@ fn reverse[T any](v: []T) {
     }
 }
 
-/// min returns the smallest element — Go's slices.Min. Fatal on
+/// min returns the smallest element. Fatal on
 /// empty (like indexing v[0] would be).
 fn min[T cmp.Ordered](v: []T) -> T {
     m := v[0]
@@ -122,7 +121,7 @@ fn min[T cmp.Ordered](v: []T) -> T {
     return m
 }
 
-/// max returns the largest element — Go's slices.Max.
+/// max returns the largest element.
 fn max[T cmp.Ordered](v: []T) -> T {
     m := v[0]
     i := 1

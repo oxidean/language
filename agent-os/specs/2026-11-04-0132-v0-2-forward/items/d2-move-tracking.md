@@ -27,7 +27,7 @@ checker — the runtime stays the semantic backstop):
 - `own` returned from a fn is a fresh binding — no tracking needed
 
 Explicitly out: partial moves (`a.b` fields), lifetime inference,
-borrow regions — that's Rust's problem-set; this is the lean version
+borrow regions — that's the static-checker problem-set; this is the lean version
 that catches the actual bug class (use-after-move) statically.
 
 ## Acceptance

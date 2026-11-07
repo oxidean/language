@@ -21,13 +21,15 @@
 
 ## Prior art per item
 
-- Go modules: `go.dev/ref/mod` — `go.mod` grammar, MVS algorithm,
-  pseudo-version format, `go.sum` `h1:` dirhash, `/vN` suffix rule
+- Versioned-module model (the upstream design M/V tracks implement):
+  `go.dev/ref/mod` — manifest grammar, MVS algorithm, pseudo-version
+  format, `h1:` dirhash, `/vN` suffix rule
   (M-track, V-track)
-- Go `internal/` package rule — `go.dev/doc/go1.4` §internalpackages
+- `internal/` package-visibility rule — `go.dev/doc/go1.4`
+  §internalpackages
 - `goimports` unused-import diagnosis — M3's error wording mirrors
-  `go build`'s `imported and not used`
-- Go linker dead-code GC — G1/G2 (`-ffunction-sections` +
+  the `imported and not used` compile error
+- Linker dead-code GC prior art — G1/G2 (`-ffunction-sections` +
   `--gc-sections`/`-dead_strip`/`/OPT:REF` equivalents)
-- Go stdlib API surface — `pkg.go.dev/std` (S-track bounds)
-- RE2/Thompson NFA construction — S5 (linear-time regex, no backrefs)
+- The core-library API surface the S track maps — `pkg.go.dev/std`
+- Thompson NFA construction — S5 (linear-time regex, no backrefs)

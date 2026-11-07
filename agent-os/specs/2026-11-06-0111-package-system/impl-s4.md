@@ -14,7 +14,7 @@ and `crypto/{sha256,md5,hmac}` — pure .oxl except one runtime helper.
   the same portable style (E3 veneer: `connect` on `oxl_sock_t`,
   `_fullpath`-style normalization not needed — no paths). Host is a
   dotted IPv4 parsed in .oxl — getaddrinfo/DNS stays parked
-  (documented; Go parity for numeric hosts, which covers loopback).
+  (documented; numeric hosts resolve — which covers loopback).
 - **nil-slice emit fixed on the way.** `let r: [][]str = nil` checks
   fine (`nil` types as Err, `assignable` lets it through) but both
   emitters wrote `RtSlice rows = 0` — invalid C. `conv_v`/`gconv_v`
@@ -22,7 +22,7 @@ and `crypto/{sha256,md5,hmac}` — pure .oxl except one runtime helper.
   `[][]T` declarations — `csv.read_all` returns `[][]str`; there is
   no `mkslice([]T)` element literal so nil-init + push is the only
   construction path. Both codegens get the arm (parity).
-- **`hash` is a Go-shaped iface package.** `interface Hash` —
+- **`hash` is an iface-shaped package.** `interface Hash` —
   `write(b) -> [int,err]` (io.Writer), `sum() -> int`, `reset()`,
   `blocksize() -> int` — plus `new_fnv1a/new_adler32/new_crc32 ->
   Hash` and package-level `fnv1a32/fnv1a64/adler32/crc32` one-shots.
@@ -35,7 +35,7 @@ and `crypto/{sha256,md5,hmac}` — pure .oxl except one runtime helper.
   T-table are the spec-mandated constants (allowed by the item).
   Each pkg: `sum*(b []byte) -> []byte` + `new() -> hash.Hash`
   incremental impl + `hexdigest(b) -> str` convenience.
-- **`hmac` is Go-shaped over the Hash iface:** `new(hf: fn() ->
+- **`hmac` is shaped over the Hash iface:** `new(hf: fn() ->
   hash.Hash, key: []byte) -> hash.Hash` — Hmac itself is a Hash
   (write/sum/reset chain to inner). Named-fn-type params landed in
   S3. Convenience `sum256(key,msg)`/`sum_md5(key,msg)` one-shots.
@@ -65,7 +65,7 @@ and `crypto/{sha256,md5,hmac}` — pure .oxl except one runtime helper.
   padding), `encode_raw`/`decode_raw` (no padding),
   `url_encode`/`url_decode` (`-_` alphabet). Decode rejects
   non-alphabet bytes and bad padding.
-- `std/encoding/hex` — `encode`/`decode`, lower-case per Go; decode
+- `std/encoding/hex` — `encode`/`decode`, lower-case; decode
   rejects odd length and non-hex.
 - `std/encoding/binary` — `le_u16/le_u32/le_u64/be_u16/be_u32/be_u64`
   readers over `[]byte` at offset, `put_le_*/put_be_*` writers.

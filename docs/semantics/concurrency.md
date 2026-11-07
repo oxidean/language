@@ -14,8 +14,8 @@ scope {
   Closing the block waits for every task spawned inside. If any task
   traps, remaining tasks are cancelled and `ErrTrap` propagates.
 - `spawn f(args)` — enqueue task in the innermost enclosing scope.
-- `go f(args)` — identical to `spawn`; both spellings accepted (Go
-  familiarity). v0 implements both as the same AST node.
+- `go f(args)` — identical to `spawn`; both spellings accepted, a
+  familiar shorthand. v0 implements both as the same AST node.
 - `spawnPinned f(args)` — reserved: task bound to the OS thread it was
   spawned on (GUI/main-thread work). Not yet parsed in v0 (the call
   resolves as an ordinary undefined ident); executor support later.

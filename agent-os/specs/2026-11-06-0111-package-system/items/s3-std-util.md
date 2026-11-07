@@ -2,7 +2,7 @@
 
 ## Problem
 
-The Go-parity surface everyone touches: paths, sorting, math, UTF-8,
+The surface everyone touches: paths, sorting, math, UTF-8,
 flags, logging. None need new language machinery — generics and
 interfaces already landed.
 
@@ -21,7 +21,7 @@ interfaces already landed.
   less: fn(T,T) -> bool)` (fn values — have them).
 - `std/math` — externs to libm (already linked for float) + constants.
 - `std/math/rand` — small pure-.oxl PRNG (PCG/xorshift — write fresh,
-  don't port Go's), `seed`/`intn`/`floatn`/`shuffle`.
+  don't port), `seed`/`intn`/`floatn`/`shuffle`.
 - `std/unicode/utf8` — `utf8.len`, `decode`, `valid` — self-contained.
 - `std/flag` — `-x=v`, `-x v`, `--x`, positional remainder — the
   `cli` example's hand parser becomes a flag consumer.
@@ -35,7 +35,8 @@ interfaces already landed.
 - `filepath` passes on Windows CI — join/clean/abs with `\\` semantics
 - `flag` drives the `cli` example end-to-end: `-n=3`, `-n 3`, `--n`,
   bad flag → usage error
-- `utf8` agrees with Go behavior on the usual edge cases (surrogates,
+- `utf8` agrees with established behavior on the usual edge cases
+  (surrogates,
   truncation, 4-byte)
 - `log.info` output shape is fixed (asserted in run.sh)
 
@@ -46,5 +47,6 @@ independent dirs.
 
 ## Risks
 
-- `filepath` needs real OS knowledge — port Go's behavior table
+- `filepath` needs real OS knowledge — port the established behavior
+  table
   (drive letters, UNC, `/` acceptance) rather than inventing.

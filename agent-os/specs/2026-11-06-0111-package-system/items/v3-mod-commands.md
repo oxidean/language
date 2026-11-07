@@ -2,7 +2,7 @@
 
 ## Problem
 
-Manifests shouldn't be hand-maintained. Go's ergonomics — `mod init`,
+Manifests shouldn't be hand-maintained. The ergonomics — `mod init`,
 `mod tidy`, `mod verify` — are the DX bar.
 
 ## Design sketch

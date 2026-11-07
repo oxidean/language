@@ -25,7 +25,7 @@ require upsert), `cmd_list` (`oxl list -m all`).
   to declare that exact path. Subdir-in-repo modules can't be fetched —
   tidy's prefix probing still *finds* the containing module correctly
   because probes that 404 keep falling to shorter prefixes.
-- **Tidy keeps `// indirect` requires** (Go-faithful): the require set
+- **Tidy keeps `// indirect` requires**: the require set
   ends up = every module providing a package in the transitive import
   closure — unmarked when imported by main-module sources, `// indirect`
   when only imported by dep sources. Pinned at the *selected* version
@@ -39,8 +39,8 @@ require upsert), `cmd_list` (`oxl list -m all`).
   byte; a free-standing comment inside a rewritten region is preserved
   by re-emitting it before the region's entries.
 - **Replace + tidy**: an import provided only through a replace dir
-  still needs a require (Go's rule). Missing → `require <mp>
-  v0.0.0-00010101000000-000000000000` (Go's local-replace placeholder).
+  still needs a require. Missing → `require <mp>
+  v0.0.0-00010101000000-000000000000` (the local-replace placeholder form).
 
 ## Steps
 
@@ -55,7 +55,7 @@ require upsert), `cmd_list` (`oxl list -m all`).
   no-module error as get). For every `(mp, mv)` in `ctx.selected`:
   replace-covered → skip (never verified by design); slot missing →
   `error: <mp>@<mv>: not in module cache`; else `verify_slot` —
-  Err → `error: <that text>` (Go wording, already Go's). Success →
+  Err → `error: <that text>`. Success →
   `all modules verified`. Nonzero exit on any failure.
 - `mod list` → `print_build_list(&ctx)` (extracted from `cmd_list`).
 
@@ -90,7 +90,7 @@ nothing (bounded by module count):
   fetch `M@latest` (+ declared==M) → extract to tmp → `tmp/rest` of
   `imp` is_dir? yes → install slot + require `M@ver` (or upgrade the
   existing require) and mark; no → next prefix. Required `M` whose
-  pinned copy lacks the package still gets probed at @latest (Go's
+  pinned copy lacks the package still gets probed at @latest (the
   upgrade path). All fail →
   `error: no required module provides package "imp"; to add it: oxl get imp`.
 - Replace-only coverage (import provided by a replace dir, no
@@ -112,7 +112,7 @@ Phase D — rewrite files:
   `resolve_pkg` only ever scans the MAIN manifest's requires — a dep
   package's import of `b` can't resolve unless `b` is a main require.
   `// indirect` entries are how oxl's model flattens transitive deps
-  into the main manifest (Go 1.17+ pruned-module shape).
+  into the main manifest (the pruned-module shape).
 - Report: `added`/`upgraded`/`dropped`/`marked indirect` lines like
   get's.
 
@@ -125,7 +125,7 @@ Phase D — rewrite files:
   appears for a transitive-only dep (dep requires leaf). Sorted
   output + comments/replace lines preserved. `mod verify` clean run
   prints `all modules verified`; hand-edit a cached file → fails with
-  the Go-worded mismatch. `mod list` shows main + selected.
+  the familiar mismatch wording. `mod list` shows main + selected.
 - README: `oxl mod` subsection beside the `oxl get` docs.
 - plan.md: V3 → `[done — PR #n]` on merge.
 

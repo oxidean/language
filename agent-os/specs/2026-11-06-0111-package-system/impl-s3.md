@@ -2,7 +2,7 @@
 
 > Implements `items/s3-std-util.md`. Executed natively in-session.
 
-**Goal:** the Go-parity util surface — `path`/`filepath`, `cmp`/`sort`/
+**Goal:** the core util surface — `path`/`filepath`, `cmp`/`sort`/
 `slices`/`maps`, `math`/`math/rand`, `unicode/utf8`, `flag`, `log` —
 all pure .oxl over existing generics, fn values, ifaces, and a small
 set of new `rt_*` externs.
@@ -11,10 +11,10 @@ set of new `rt_*` externs.
 
 - **`cmp.Ordered` wants `str` — and `str < str` doesn't exist.** The
   comparison arm assigns `<` to Int operands; `Str` never reaches it.
-  Go's `cmp.Ordered` covers strings, and sorting `[]str` is the single
+  `cmp.Ordered` covers strings, and sorting `[]str` is the single
   most common sort. The fix is small and follows the S2 pattern:
   `rt_str_cmp(a,b)` (memcmp over the shared prefix, len tiebreak —
-  Go's byte-wise lexicographic order), `check` allows `str op str`
+  byte-wise lexicographic order), `check` allows `str op str`
   under Lt/Le/Gt/Ge, `codegen` emits `rt_str_cmp(l, r) <op> 0`.
   `==`/`!=` keep the existing byte-compare emit — no semantic change.
 
@@ -47,7 +47,8 @@ set of new `rt_*` externs.
 - **`rand` is pure .oxl on a mutable global** — top-level `let` globals
   are assignable (verified). xorshift64* written fresh (not ported):
   state `int`, `x ^= x>>12; x ^= x<<25; x ^= x>>27; return x * K` —
-  passes the same acceptance bar without borrowing Go's lagged-Fibonacci
+  passes the same acceptance bar without borrowing the lagged-Fibonacci
+design
   machinery. `Rand` struct for explicit-source users; top-level fns
   mirror `math/rand`'s global-source API.
 
@@ -58,12 +59,12 @@ set of new `rt_*` externs.
   `needs_math = c_src.contains("rt_m_")` mirrors `needs_sqlite`. `-lm`
   POSIX-only (msvcrt/mingw carry libm) — same treatment as `-pthread`.
 
-- **`flag` can't hand back pointers** — Go binds `*string` at
+- **`flag` can't hand back pointers** — binding a `*T` at
   registration. oxl shape: `fs.str/num/bool` register name+default+
   usage; `fs.parse(args)` fills internal state; typed getters
   `get/geti/getb`, `rest()` for positionals. Internally a small
   slice-backed string map (`collections.Map` is str→int — can't hold
-  str values). Parse errors are `errors.new` with Go-worded messages;
+  str values). Parse errors are `errors.new` with familiar messages;
   caller decides exit.
 
 - **`log` can't be `log.err`** — `err` is a type keyword. Levels are
@@ -96,7 +97,7 @@ line each; `--gc-sections` drops them when uncalled).
 
 ## Language changes (×2 toolchains)
 
-| Change | Rust | Self-hosted |
+| Change | Seed | Self-hosted |
 |---|---|---|
 | `str op str` under Lt/Le/Gt/Ge | check.rs | check.oxl |
 | `rt_str_cmp` emit | codegen.rs | codegen.oxl |
@@ -108,14 +109,14 @@ line each; `--gc-sections` drops them when uncalled).
 - `std/cmp` — `iface Ordered { ordered }`; `compare/min/max[T Ordered]`.
 - `std/sort` — `sort[T Ordered]` (median-of-3 quicksort + insertion
   cutoff ≤16), `sortby[T any](s, less)`, `issorted[T Ordered]`,
-  `issortedby`, `search(n, f)` (Go's sort.Search).
+  `issortedby`, `search(n, f)` (binary search by predicate).
 - `std/slices` — `contains`/`index`/`lastindex`/`equal[T eq]`,
   `clone`/`concat`/`reverse`/`insert`/`delete[T any]`,
   `min`/`max`/`binarysearch[T Ordered]`, `sorted`/`sortby` convenience.
 - `std/maps` — `keys`/`values`/`has`/`merge`/`equal`/`keys_sorted`
   over `collections.Map` (str→int concrete).
 - `std/path` — `join/dir/base/ext/clean/isabs/match` (`*`,`?`,`[set]`
-  glob subset) — Go `path` semantics, slash-only.
+  glob subset) — slash-only path semantics.
 - `std/path/filepath` — `sep/listsep/volume_name/join/dir/base/ext/
   clean/isabs/abs/toslash/fromslash` — OS-aware via `rt_is_windows`;
   `abs` = `rt_fullpath`.
@@ -126,7 +127,7 @@ line each; `--gc-sections` drops them when uncalled).
   source; `shuffle[T any](r mut Rand, s)` — generic methods verified at
   impl time, else pkg fn form.
 - `std/unicode/utf8` — `len/decode/valid/fullrune/encode/runeerror`
-  (Go semantics: RuneError=0xFFFD,size 1 on invalid input).
+  (invalid input decodes as replacement rune 0xFFFD, size 1).
 - `std/flag` — `FlagSet` + `new(usage)` + `str/num/bool`/`parse`/
   `get/geti/getb/rest`; `-x=v`,`-x v`,`--x`,`-x`(bool),`--` terminator;
   `-h`/`-help` → `flag: help requested` err.

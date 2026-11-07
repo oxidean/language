@@ -1,6 +1,6 @@
 package flag
 
-// std/flag — Go's flag package surface: defined flags, -x=v and
+// std/flag — defined flags, -x=v and
 // -x v forms, `--` terminator, positional remainder, usage text.
 //
 //     fs := flag.newset("tool")
@@ -37,8 +37,8 @@ struct FlagSet {
     pos: own []str,
 }
 
-/// newset creates a flag set named for the program — Go's
-/// flag.NewFlagSet(os.Args[0], ExitOnError) minus the exit.
+/// newset creates a flag set named for the program; parse errors
+/// report and return rather than exiting.
 fn newset(prog: str) -> own FlagSet {
     fs := new(FlagSet)
     fs.prog = prog
@@ -49,7 +49,7 @@ fn newset(prog: str) -> own FlagSet {
     return fs
 }
 
-/// int_ defines an int flag — Go's FlagSet.Int, minus the pointer:
+/// int_ defines an int flag — no pointer binding:
 /// own cells can't be shared out, so parsed values come back
 /// through geti/gets/getb.
 fn int_(fs: mut FlagSet, name: str, def: int, help: str) {
@@ -89,7 +89,7 @@ fn getb(fs: ref FlagSet, name: str) -> bool {
     return c.v != 0
 }
 
-/// string defines a string flag — Go's FlagSet.String. (Not `str`:
+/// string defines a string flag. (Not `str`:
 /// a member named `str` shadows the builtin type inside this file.)
 fn string(fs: mut FlagSet, name: str, def: str, help: str) {
     c := new(StrFlag)
@@ -101,7 +101,7 @@ fn string(fs: mut FlagSet, name: str, def: str, help: str) {
     fs.strs = c
 }
 
-/// boolean defines a bool flag — Go's FlagSet.Bool. Bool flags take
+/// boolean defines a bool flag. Bool flags take
 /// no separate argument: `-v` sets, `-v=false` clears.
 fn boolean(fs: mut FlagSet, name: str, def: int, help: str) {
     c := new(BoolFlag)
@@ -147,7 +147,7 @@ fn find_bool(fs: ref FlagSet, name: str) -> own BoolFlag {
     return nil
 }
 
-/// usage builds the Go-shaped usage block — callers print it on
+/// usage builds the usage block — callers print it on
 /// parse errors and -help.
 fn usage(fs: ref FlagSet) -> str {
     out := "Usage of " + fs.prog + ":\n"
@@ -177,7 +177,7 @@ fn usage(fs: ref FlagSet) -> str {
     return out
 }
 
-// fail reports a parse error the Go way: message + usage on stderr,
+// fail reports a parse error: message + usage on stderr,
 // then the caller gets an err value back.
 fn fail(fs: ref FlagSet, msg: str) -> err {
     f := os.stderr()
@@ -188,8 +188,8 @@ fn fail(fs: ref FlagSet, msg: str) -> err {
     return errors.new(msg)
 }
 
-/// parse reads os.args for flags — Go's FlagSet.Parse. `-x=v`,
-/// `-x v`, `--x`, and bare `--` all behave like Go; the positional
+/// parse reads os.args for flags. `-x=v`,
+/// `-x v`, `--x`, and bare `--` are all recognized forms; the positional
 /// remainder lands in `pos` (see args). The err return is nil on
 /// success; on failure parse has already written the message and
 /// usage to stderr.
@@ -291,7 +291,7 @@ fn parse(fs: mut FlagSet) -> [int, err] {
     return 0, nil
 }
 
-/// args returns the positional remainder — Go's FlagSet.Args.
+/// args returns the positional remainder.
 /// Returns the caller's own box (escape-checked like everything
 /// else that leaves a scope).
 fn args(fs: ref FlagSet) -> own []str {

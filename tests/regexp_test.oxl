@@ -1,6 +1,6 @@
 package main
 
-// S5 acceptance: the ported Go-regexp corpus — literals, anchors,
+// S5 acceptance: the ported regexp corpus — literals, anchors,
 // classes (incl. posix + rune ranges), alternation priority,
 // quantifiers (greedy/lazy/bounded), escapes, findall/split/
 // replaceall semantics, compile-error cases, and the pathological
@@ -174,8 +174,8 @@ fn test_posix() {
 fn test_alternation() {
     re := must("a|ab")
     testing.expect_streq(re.find("ab"), "a", "first alt preferred")
-    re2 := must("ab|a")
-    testing.expect_streq(re2.find("ab"), "ab", "first alt wins")
+    re_alt := must("ab|a")
+    testing.expect_streq(re_alt.find("ab"), "ab", "first alt wins")
     re3 := must("(a|b)+")
     testing.expect_streq(re3.find("abba"), "abba", "alt in group")
     re4 := must("a(b|c)d")
@@ -405,7 +405,7 @@ fn test_compile_errors() {
 
 fn test_quoted_rep() {
     // a quantifier after \\Q…\\E binds the last literal only —
-    // Go's \\Qab\\E+ is ab+, not (ab)+.
+    // \\Qab\\E+ is ab+, not (ab)+.
     r := must("\\Qab\\E+")
     testing.expect_streq(r.find("abab"), "ab", "\\Qab\\E+ is ab+")
     testing.expect_streq(r.find("abbb"), "abbb", "\\Qab\\E+ greedy")

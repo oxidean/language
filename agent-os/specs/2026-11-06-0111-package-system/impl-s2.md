@@ -2,7 +2,7 @@
 
 > Implements `items/s2-std-io-core.md`. Executed natively in-session.
 
-**Goal:** the Go-shaped io substrate — `byte`/`[]byte`, message-carrying
+**Goal:** the io substrate — `byte`/`[]byte`, message-carrying
 `err`, `std/io` interfaces — plus `errors`, `strconv`, `bytes`, `bufio`,
 and a bounded `fmt`. Everything S4 consumes lands here.
 
@@ -22,7 +22,7 @@ and a bounded `fmt`. Everything S4 consumes lands here.
 - **`byte` is `Ty::Byte` (u8), byte↔int assignable both ways** — the
   `err`↔`int` precedent. `byteat` keeps returning `int` (zero churn);
   `b[i] = byteat(s, i)` just compiles. Arithmetic wraps mod 256 —
-  codegen emits `(uint8_t)(l op r)` when result ty is byte (Go parity:
+  codegen emits `(uint8_t)(l op r)` when result ty is byte (parity:
   `byte + byte` stays byte, doesn't promote to int64).
 
 - **`'a'` is lexer sugar for the int 97** — no new AST/checker/codegen
@@ -63,7 +63,7 @@ is the acceptance path, so Windows can't be a stub.
 
 ## Language changes (×2 toolchains, byte-parity diags)
 
-| Change | Rust | Self-hosted |
+| Change | Seed | Self-hosted |
 |---|---|---|
 | `Ty::Byte` + `name()` + assignable | check.rs | check.oxl Ty |
 | `"byte"` in type resolution | check.rs `ty_named` | check.oxl |
@@ -93,7 +93,7 @@ is the acceptance path, so Windows can't be a stub.
 ## Tasks
 
 - **S2.1** rt.c/rt.h externs + Windows veneer.
-- **S2.2** Rust: `byte` ty, char lit, `as` convs, FFI allowlist, wrap emit.
+- **S2.2** seed: `byte` ty, char lit, `as` convs, FFI allowlist, wrap emit.
 - **S2.3** oxl: same four in lexlib/parser/check/codegen + corpus parity.
 - **S2.4** `std/errors`, `std/io`, `std/os` File, `std/strconv`.
 - **S2.5** `std/bytes`, `std/bufio`, `std/fmt`.
@@ -111,7 +111,7 @@ is the acceptance path, so Windows can't be a stub.
 ## Risks
 
 - `'c'` in the self-hosted lexlib must produce identical Int tokens —
-  lexlib.oxl diffs its token stream against Rust's in the bootstrap
+  lexlib.oxl diffs its token stream against the seed lexer's in the bootstrap
   chain; divergence = chain break, caught immediately.
 - `rt_bytes_str` arena-copy vs `own` — an escaping `[]byte` needs
   `new(b)`; documented in `std/bytes` docs (B3 dangling class).

@@ -18,13 +18,13 @@ requires to `<cache>/<path>@<ver>` via `module_dir` and MVS `selected`.
 
 ## Steps
 
-### V2.1 — Rust: load-time verification (main.rs)
+### V2.1 — seed: load-time verification (main.rs)
 
 - `ModCtx` gains `sums: Vec<SumLine>`; `mod_ctx` parses `oxl.sum` beside
   `oxl.mod` (absent = empty; malformed = hard manifest error).
 - `module_dir` → `Result<Option<PathBuf>, String>`: replace ⇒ `Ok(Some)`
   (never verified); cache slot exists ⇒ `verify_slot` (`Err` propagates —
-  the `missing oxl.sum entry` / `checksum mismatch` texts are Go's);
+  the `missing oxl.sum entry` / `checksum mismatch` texts);
   absent ⇒ `Ok(None)`. Slot name via `modcache::slot()` (fixes raw
   `{mp}@{ver}` — uppercase paths would never resolve).
 - `build_list` treats `Err` like `None` (untrusted dir can't feed MVS).
@@ -32,7 +32,7 @@ requires to `<cache>/<path>@<ver>` via `module_dir` and MVS `selected`.
   `error [check] <msg>` from it.
 - Dedupe: `main.rs::modcache_dir` delegates to `modcache::cache_dir`.
 
-### V2.2 — Rust: `oxl get <path>@<query>` (main.rs)
+### V2.2 — seed: `oxl get <path>@<query>` (main.rs)
 
 - Requires a module root from cwd (`error: no oxl.mod in current directory
   or any parent`); bare `@`/absent query ⇒ `latest`.
@@ -53,7 +53,8 @@ resolution in its module_dir equivalent, parse_sums/sum_for,
 sha256+b64+hex (no shift ops — rotates via `*2^`/`/2^` + `& 0xffffffff`;
 ints are wrapping i64 so all u32 math masks), dir_h1 (rt_lsdir+readfile),
 mod_h1, verify_slot → identical `error [check]` text. `oxl get` itself
-stays driver-only (like `go get` outside the compiler).
+stays driver-only — fetching is a toolchain command, not a language
+feature.
 
 ### V2.4 — corpus + docs
 

@@ -15,10 +15,11 @@ truth: `docs/superpowers/specs/2026-11-03-language-design.md`.
 - **Traps are scope-contained.** A trap kills the task, cancels siblings,
   unwinds the scope, propagates to parent. Process abort only outside
   any scope or for corruption a scope cannot unwind.
-- **Go-style errors.** `[value, err]` multiple returns;
+- **`[v, err]` errors.** Multiple returns;
   `if err != nil` idiom; silently dropping an error is a compile error.
 - **Shallow type system.** Static, explicit at boundaries, inferred
-  inside bodies. Go-style generics with constraint interfaces. No
+  inside bodies. Generics are type parameters with constraint
+  interfaces. No
   macros, no metaprogramming; comptime evaluation for constants only.
 - **Structured concurrency.** Tasks spawn inside `scope` blocks;
   channels transfer ownership on send; cross-thread shared state only
