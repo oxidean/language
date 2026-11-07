@@ -79,7 +79,11 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: scripts/commit-check.sh --pr-title "$PR_TITLE"
       - name: scan PR body for attribution markers
-        if: github.event_name == 'pull_request'
+        # Bot-authored bodies (dependabot, renovate) are platform-
+        # generated boilerplate — GitHub injects zero-width spaces into
+        # @-mentions for anti-ping, which this scan exists to catch.
+        # Not a human attribution surface; commits/title still lint.
+        if: github.event_name == 'pull_request' && github.event.pull_request.user.type != 'Bot'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
