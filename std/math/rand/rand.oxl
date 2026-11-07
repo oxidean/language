@@ -58,18 +58,19 @@ fn int31() -> int {
     return top(31)
 }
 
-/// intn returns a uniform value in [0, n). Draws the top 31
-/// bits and rejects draws at or above the largest multiple of n
-/// below 2^31, so every outcome is equally likely. A fatal err on
-/// n <= 0.
+/// intn returns a uniform value in [0, n). Draws the full
+/// 48-bit state and rejects draws at or above the largest
+/// multiple of n below 2^48, so every outcome is equally likely.
+/// n must be in [1, 2^48] — the generator's draw range; anything
+/// outside it is a fatal err.
 fn intn(n: int) -> int {
-    if n <= 0 {
+    if n <= 0 || n > modulus {
         exit(1) // process-fatal is exit
     }
-    lim := 2147483648 - 2147483648 % n
-    v := top(31)
+    lim := modulus - modulus % n
+    v := top(48)
     for v >= lim {
-        v = top(31)
+        v = top(48)
     }
     return v % n
 }
