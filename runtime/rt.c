@@ -3094,10 +3094,25 @@ static int env_key_eq(const char *base, OxlStr ov) {
 static char **env_base(void) {
 #ifdef _WIN32
     size_t n = 0;
-    while (_wenviron && _wenviron[n]) n++;
+    if (_wenviron) {
+        while (_wenviron[n]) n++;
+        char **r = xmalloc((n + 1) * sizeof *r);
+        for (size_t i = 0; i < n; i++) r[i] = w2u(_wenviron[i]);
+        r[n] = NULL;
+        return r;
+    }
+    /* _wenviron is created lazily by the UCRT — a wmain entry or the
+     * first wide-env call — so under main() it can still be null here.
+     * Fall back to the OS block or the merged child environment would
+     * contain only the overrides and drop PATH/SystemRoot. */
+    wchar_t *blk = GetEnvironmentStringsW();
+    if (!blk) return NULL;
+    for (wchar_t *p = blk; *p; p += wcslen(p) + 1) n++;
     char **r = xmalloc((n + 1) * sizeof *r);
-    for (size_t i = 0; i < n; i++) r[i] = w2u(_wenviron[i]);
+    n = 0;
+    for (wchar_t *p = blk; *p; p += wcslen(p) + 1) r[n++] = w2u(p);
     r[n] = NULL;
+    FreeEnvironmentStringsW(blk);
     return r;
 #else
     return environ;
@@ -3107,6 +3122,7 @@ static char **env_base(void) {
 static char **env_merge(RtSlice env) {
     if (env.len <= 0) return NULL;
     char **base = env_base();
+    if (!base) return NULL;   /* inherited env unreadable — callers must error, not spawn with overrides only */
     size_t nb = 0;
     while (base[nb]) nb++;
     char **r = xmalloc((nb + (size_t)env.len + 1) * sizeof(char *));
@@ -3187,6 +3203,7 @@ int64_t rt_proc_run(RtSlice argv, RtSlice env) {
     char **av = argv_c(argv);
     if (!av) return -EINVAL;
     char **ev = env_merge(env);
+    if (env.len > 0 && !ev) return -EIO;
     pid_t pid;
     int rc = posix_spawnp(&pid, av[0], NULL, NULL, av, ev ? ev : environ);
     if (rc != 0) return -(int64_t)rc;   /* spawn failures report errno directly */
@@ -3213,6 +3230,7 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
     posix_spawn_file_actions_addclose(&fa, ep[0]);
     posix_spawn_file_actions_addclose(&fa, ep[1]);
     char **ev = env_merge(env);
+    if (env.len > 0 && !ev) return -EIO;
     pid_t pid;
     int rc = posix_spawnp(&pid, av[0], &fa, NULL, av, ev ? ev : environ);
     posix_spawn_file_actions_destroy(&fa);
@@ -3355,6 +3373,7 @@ int64_t rt_proc_run(RtSlice argv, RtSlice env) {
     char *cmd = join_cmdline(argv);
     wchar_t *cmdw = u2wz(cmd);
     wchar_t *envw = env_block_w(env);
+    if (env.len > 0 && !envw) return -EIO;
     STARTUPINFOW si;
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
@@ -3391,6 +3410,7 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
     char *cmd = join_cmdline(argv);
     wchar_t *cmdw = u2wz(cmd);
     wchar_t *envw = env_block_w(env);
+    if (env.len > 0 && !envw) return -EIO;
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     HANDLE outR = NULL, outW = NULL, errR = NULL, errW = NULL;
     if (!CreatePipe(&outR, &outW, &sa, 0)) return RT_GLE();

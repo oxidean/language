@@ -3,6 +3,8 @@ package main
 // exec_test — std/os/exec process spawn/wait/capture contract.
 // git is the fixture binary: the fetch veneer already depends on it,
 // so CI runners guarantee it on PATH on every platform.
+import "std/os"
+
 import "std/os/exec"
 
 import "std/strings"
@@ -52,6 +54,30 @@ fn test_env_override() {
     testing.expect_eq(o.status, 0, "status 0")
     out := o.stdout as str
     testing.expect(strings.contains(out, "/tmp/oxl-exec-test"), "env override landed")
+    // an override merge must still deliver the inherited environment:
+    // under main() the CRT's _wenviron can be null, and a merge built
+    // from nothing would ship the child only the override list
+    es := "oxl-exec-envdump-9z"
+    if argv(1) == es {
+        // name=value on one line — the test runner's output precedes
+        // it on stdout, so asserts key on the marker, not the tail
+        print(argv(2) + "=" + os.getenv(argv(2)))
+        exit(0)
+    }
+    env2 := push(mkslice(str, 0), "OXL_EXEC_INHERIT_9Z=merged-ok")
+    c5 := exec.cmd_env(argv(0), push(push(mkslice(str, 0), es), "OXL_EXEC_INHERIT_9Z"), env2)
+    [o5, e5] = c5.output()
+    testing.expect(e5 == nil, "env respawn runs")
+    testing.expect(strings.contains(o5.stdout as str, "OXL_EXEC_INHERIT_9Z=merged-ok"), "override lands under merged env")
+    c6 := exec.cmd_env(argv(0), push(push(mkslice(str, 0), es), "PATH"), env2)
+    [o6, e6] = c6.output()
+    testing.expect(e6 == nil, "PATH respawn runs")
+    lines := strings.split(strings.trim(o6.stdout as str), "\n")
+    tail := lines
+    for tail.next != nil {
+        tail = tail.next
+    }
+    testing.expect(strings.startswith(tail.v, "PATH=") && len(tail.v) > 5, "child still receives inherited PATH")
 }
 
 fn test_arg_space_backslash_roundtrip() {
