@@ -1,0 +1,33 @@
+# Dependency maintenance — weekly batch, grouped so majors stay reviewable.
+#
+# Covered:
+#   cargo           — the seed-toolchain crate (oxl/Cargo.toml)
+#   github-actions  — workflow action refs
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - "/oxl"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      rust-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        update-types:
+          - minor
+          - patch
