@@ -192,6 +192,14 @@ printf '%s
 for t in test_echo test_refused test_badip; do
     grep -q "$t ... ok" <<<"$out" || { echo "FAIL net: $out"; exit 1; }
 done
+
+echo "== oxl test: regexp (s5) =="
+out=$("$OXL" test tests/regexp_test.oxl)
+printf '%s
+' "$out" >&2
+for t in test_literals test_anchors test_dot test_classes test_posix test_alternation test_quantifiers test_lazy test_escapes test_word_boundary test_utf8 test_findall test_replaceall test_split test_compile_errors test_pathological; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL regexp: $out"; exit 1; }
+done
 # the client test runs under `oxl run`: it exits the process to end
 # serve()'s accept loop, so the oxl-test task drain can't hang on it
 out=$("$OXL" run tests/httpclient_test.oxl)
@@ -808,6 +816,16 @@ for t in test_fnv test_adler_crc test_incremental; do
 done
 for t in test_sha256 test_md5 test_hmac; do
     grep -q "$t ... ok" "$cgen_dir/crypto.out" || { echo "FAIL codegen crypto $t"; cat "$cgen_dir/crypto.out"; exit 1; }
+done
+# s5 regexp through the self-hosted emitter + cc — the NFA engine is
+# the heaviest pure-.oxl package (struct slices, closures, utf8)
+"$OXL" run bootstrap/cmd/codegen -- --test "tests/regexp_test.oxl" > "$cgen_dir/rx.c"
+"$CC" -O2 $THREAD_FLAG -Iruntime "$cgen_dir/rx.c" runtime/rt.c $NET_LIBS -o "$cgen_dir/rx$EXE" || { echo "FAIL codegen cc regexp"; exit 1; }
+"$cgen_dir/rx$EXE" > "$cgen_dir/rx.out"
+printf '%s
+' "$(cat "$cgen_dir/rx.out")" >&2
+for t in test_literals test_anchors test_dot test_classes test_posix test_alternation test_quantifiers test_lazy test_escapes test_word_boundary test_utf8 test_findall test_replaceall test_split test_compile_errors test_pathological; do
+    grep -q "$t ... ok" "$cgen_dir/rx.out" || { echo "FAIL codegen regexp $t"; cat "$cgen_dir/rx.out"; exit 1; }
 done
 # http pilot through the self-hosted codegen: the Handler param is an
 # iface value, exercising the RtIface/vtab emission end to end

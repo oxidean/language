@@ -108,7 +108,7 @@ needs — that's part of the item, not a side quest.
 `std/hash`, `std/crypto/{sha256,md5,hmac}` written fresh in oxl.
 TLS stays a documented non-goal.
 
-### Task S5: `std/regexp` [not started]
+### Task S5: `std/regexp` [done]
 
 `items/s5-std-regexp.md`. Thompson NFA, linear-time, no backrefs —
 RE2's guarantee on an oxl-scale engine. Largest single S item;

@@ -209,7 +209,7 @@ curl localhost:8080/items                      # → {"items":[{"id":1,"name":"w
 oxl/          the compiler (Rust): lexer → parser → check → codegen → C → cc
 runtime/       rt.c/rt.h — arenas, ObjHdr checks, scopes/traps, executor, channels
 docs/          design doc, semantics annex, prototype report
-std/           the standard library, written in the language (strings, testing, http/net, json, csv, base64, hex, binary, sync, time, os, errors, io, bytes, bufio, fmt, strconv, path, filepath, sort, slices, maps, cmp, math, rand, unicode/utf8, flag, log, net, net/http, hash, crypto/{sha256,md5,hmac}, collections)
+std/           the standard library, written in the language (strings, testing, http/net, json, csv, base64, hex, binary, sync, time, os, errors, io, bytes, bufio, fmt, strconv, path, filepath, sort, slices, maps, cmp, math, rand, unicode/utf8, flag, log, net, net/http, hash, crypto/{sha256,md5,hmac}, collections, regexp)
 bootstrap/     self-host components — lexlib, parser, check libraries + cmd/ drivers (docs/self-hosting.md)
 oxl.mod        this repo's module manifest (`module oxl`)
 examples/      pilot programs (see above)
