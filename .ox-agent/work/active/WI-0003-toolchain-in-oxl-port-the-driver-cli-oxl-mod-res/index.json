@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "WI-0003",
+  "title": "toolchain-in-oxl: port the driver (CLI, oxl.mod resolution, git fetch, fmt, doc, LSP, test runner) from Rust to .oxl",
+  "state": "implementing",
+  "profile": "normal",
+  "current_stage": "implementation",
+  "created_at": "2026-11-07T16:41:58Z",
+  "updated_at": "2026-11-07T16:47:11Z"
+}

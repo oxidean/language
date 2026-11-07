@@ -40,6 +40,10 @@ bootstrap/diag gates.
 machinery, T3 test runner, T4 fmt/doc, T5 LSP, T6 cargo removal +
 dogfood CI.
 
+**Detailed spec + staged plan:**
+[`docs/specs/2026-11-07-toolchain-in-oxl/`](../2026-11-07-toolchain-in-oxl/spec.md)
+(WI-0003).
+
 ## G — portable GUI layer
 
 Widget layer in the language on top of the GTK4 FFI pilot
