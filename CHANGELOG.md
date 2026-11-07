@@ -40,7 +40,7 @@ the standard library.
 
 ## [0.2.0] - 2026-11-05
 
-The v0.2 language: the full forward spec, a self-hosted toolchain, and
+The v0.2 language: the full forward spec, a self-hosted compiler, and
 pilots exercising every subsystem.
 
 ### Added
