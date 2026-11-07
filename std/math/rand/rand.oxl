@@ -69,10 +69,11 @@ fn intn(n: int) -> int {
         exit(1) // process-fatal is exit
     }
     bits := 1
-    for pow2(bits) < n {
+    span := 2
+    for span < n {
+        span = span * 2
         bits = bits + 1
     }
-    span := pow2(bits)
     lim := span - span % n
     v := top(bits)
     for v >= lim {
