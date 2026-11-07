@@ -19,7 +19,9 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <spawn.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -2995,6 +2997,358 @@ int64_t rt_m_isnan(double x) { return isnan(x) ? 1 : 0; }
 int64_t rt_m_isinf(double x) { return isinf(x) ? 1 : 0; }
 int64_t rt_m_signbit(double x) { return signbit(x) ? 1 : 0; }
 #endif /* OXL_MATH */
+
+
+/* ---------------- process & dir primitives (T0) ----------------
+ * argv/env arrive as []str (RtSlice of OxlStr elems). argv[0] is the
+ * program; PATH resolution applies (posix_spawnp / CreateProcess both
+ * search it). env entries are "K=V" overrides merged onto the inherited
+ * environment — an empty env slice inherits unchanged.
+ * Return contract: >=0 is the child exit status (POSIX exit code, or
+ * 128+signal when killed; Windows GetExitCodeProcess). <0 is a negative
+ * errno / GetLastError for a failure in spawn/pipe/wait itself — a
+ * nonzero child exit is a status, never an error. */
+
+static char *os_cstr(OxlStr s) {
+    char *p = xmalloc((size_t)s.n + 1);
+    memcpy(p, s.p, (size_t)s.n);
+    p[s.n] = 0;
+    return p;
+}
+
+/* NULL-terminated argv copy; NULL on an embedded-NUL arg (caller maps
+ * to -EINVAL — the truncated arg would otherwise silently rename the
+ * program being run) */
+static char **argv_c(RtSlice argv) {
+    char **a = xmalloc(((size_t)argv.len + 1) * sizeof(char *));
+    for (int64_t i = 0; i < argv.len; i++) {
+        OxlStr s = ((OxlStr *)argv.ptr)[i];
+        if (s.n > 0 && memchr(s.p, 0, (size_t)s.n)) { free(a); return NULL; }
+        a[i] = os_cstr(s);
+    }
+    a[argv.len] = NULL;
+    return a;
+}
+
+#ifdef _WIN32
+#define oxl_environ _environ
+#else
+extern char **environ;
+#define oxl_environ environ
+#endif
+
+static int env_key_eq(const char *base, OxlStr ov) {
+    const char *eq = strchr(base, '=');
+    const char *oeq = memchr(ov.p, '=', (size_t)ov.n);
+    if (!eq || !oeq) return 0;
+    size_t k = (size_t)(eq - base), ok = (size_t)(oeq - ov.p);
+    return k == ok && memcmp(base, ov.p, k) == 0;
+}
+
+/* envp = inherited environment with overrides applied (replace on key
+ * match, else append). NULL when env is empty → caller inherits. */
+static char **env_merge(RtSlice env) {
+    if (env.len <= 0) return NULL;
+    size_t nb = 0;
+    while (oxl_environ[nb]) nb++;
+    char **r = xmalloc((nb + (size_t)env.len + 1) * sizeof(char *));
+    size_t w = 0;
+    for (size_t i = 0; i < nb; i++) {
+        int drop = 0;
+        for (int64_t j = 0; j < env.len; j++)
+            if (env_key_eq(oxl_environ[i], ((OxlStr *)env.ptr)[j])) { drop = 1; break; }
+        if (!drop) r[w++] = oxl_environ[i];
+    }
+    for (int64_t j = 0; j < env.len; j++) r[w++] = os_cstr(((OxlStr *)env.ptr)[j]);
+    r[w] = NULL;
+    return r;
+}
+
+/* growable byte buffer for captured child output — xmalloc'd, process-
+ * lifetime retained (the runtime's standing policy for interned data) */
+static void bufcat(char **b, int64_t *len, int64_t *cap, const char *d, int64_t n) {
+    if (*len + n > *cap) {
+        int64_t nc = *cap ? *cap : 4096;
+        while (*len + n > nc) nc *= 2;
+        char *nb = xmalloc((size_t)nc);
+        if (*b) memcpy(nb, *b, (size_t)*len);
+        *b = nb;
+        *cap = nc;
+    }
+    memcpy(*b + *len, d, (size_t)n);
+    *len += n;
+}
+
+int64_t rt_mkdir(OxlStr path) {
+    if (path.n > 0 && memchr(path.p, 0, (size_t)path.n)) return -EINVAL;
+    const char *cp = rt_cstr(path);
+#ifdef _WIN32
+    return CreateDirectoryA(cp, NULL) ? 0 : -(int64_t)GetLastError();
+#else
+    return mkdir(cp, 0777) < 0 ? -(int64_t)errno : 0;
+#endif
+}
+
+int64_t rt_rmdir(OxlStr path) {
+    if (path.n > 0 && memchr(path.p, 0, (size_t)path.n)) return -EINVAL;
+    const char *cp = rt_cstr(path);
+#ifdef _WIN32
+    return RemoveDirectoryA(cp) ? 0 : -(int64_t)GetLastError();
+#else
+    return rmdir(cp) < 0 ? -(int64_t)errno : 0;
+#endif
+}
+
+int64_t rt_rename(OxlStr old_p, OxlStr new_p) {
+    if ((old_p.n > 0 && memchr(old_p.p, 0, (size_t)old_p.n)) ||
+        (new_p.n > 0 && memchr(new_p.p, 0, (size_t)new_p.n))) return -EINVAL;
+    const char *oc = rt_cstr(old_p), *nc = rt_cstr(new_p);
+#ifdef _WIN32
+    /* rename() can't cross volumes or replace — MoveFileEx can both */
+    return MoveFileExA(oc, nc, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)
+        ? 0 : -(int64_t)GetLastError();
+#else
+    return rename(oc, nc) < 0 ? -(int64_t)errno : 0;
+#endif
+}
+
+#ifndef _WIN32
+static int64_t child_status(pid_t pid) {
+    int st;
+    while (waitpid(pid, &st, 0) < 0) {
+        if (errno == EINTR) continue;
+        return -(int64_t)errno;
+    }
+    if (WIFEXITED(st)) return WEXITSTATUS(st);
+    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
+    return st;
+}
+
+int64_t rt_proc_run(RtSlice argv, RtSlice env) {
+    if (argv.len < 1) return -EINVAL;
+    char **av = argv_c(argv);
+    if (!av) return -EINVAL;
+    char **ev = env_merge(env);
+    pid_t pid;
+    int rc = posix_spawnp(&pid, av[0], NULL, NULL, av, ev ? ev : environ);
+    if (rc != 0) return -(int64_t)rc;   /* spawn failures report errno directly */
+    return child_status(pid);
+}
+
+int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
+    if (argv.len < 1) return -EINVAL;
+    char **av = argv_c(argv);
+    if (!av) return -EINVAL;
+    int op[2] = { -1, -1 }, ep[2] = { -1, -1 };
+    if (pipe(op) < 0) return -(int64_t)errno;
+    if (pipe(ep) < 0) {
+        int e = errno;
+        close(op[0]); close(op[1]);
+        return -(int64_t)e;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, op[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, ep[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&fa, op[0]);
+    posix_spawn_file_actions_addclose(&fa, op[1]);
+    posix_spawn_file_actions_addclose(&fa, ep[0]);
+    posix_spawn_file_actions_addclose(&fa, ep[1]);
+    char **ev = env_merge(env);
+    pid_t pid;
+    int rc = posix_spawnp(&pid, av[0], &fa, NULL, av, ev ? ev : environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(op[1]);
+    close(ep[1]);
+    if (rc != 0) {
+        close(op[0]); close(ep[0]);
+        return -(int64_t)rc;
+    }
+    /* drain both pipes concurrently — a child that fills one pipe while
+     * the parent blocks reading the other deadlocks; poll covers both */
+    char *ob = NULL, *eb = NULL;
+    int64_t olen = 0, ocap = 0, elen = 0, ecap = 0;
+    int fds[2] = { op[0], ep[0] };
+    for (;;) {
+        if (fds[0] < 0 && fds[1] < 0) break;
+        struct pollfd pf[2];
+        for (int i = 0; i < 2; i++) {
+            pf[i].fd = fds[i];
+            pf[i].events = POLLIN;
+            pf[i].revents = 0;
+        }
+        if (poll(pf, 2, -1) < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        for (int i = 0; i < 2; i++) {
+            if (pf[i].fd < 0 || !pf[i].revents) continue;
+            char tmp[8192];
+            /* POLLHUP/ERR can still carry buffered data — read first */
+            ssize_t n = read(pf[i].fd, tmp, sizeof tmp);
+            if (n > 0) {
+                if (i == 0) bufcat(&ob, &olen, &ocap, tmp, n);
+                else bufcat(&eb, &elen, &ecap, tmp, n);
+            } else {
+                close(pf[i].fd);
+                fds[i] = -1;
+            }
+        }
+    }
+    int64_t st = child_status(pid);
+    out->ptr = ob;  out->len = olen;  out->cap = ocap;  out->heap = 1;
+    errb->ptr = eb; errb->len = elen; errb->cap = ecap; errb->heap = 1;
+    return st;
+}
+
+#else /* _WIN32 */
+
+/* CommandLineToArgvW-compatible quoting: quote when empty/space/tab/
+ * quote present; inside quotes, backslashes preceding a quote double,
+ * the quote escapes as \", and trailing backslashes double. */
+static char *win_quote(OxlStr a) {
+    int need = a.n == 0;
+    for (int64_t i = 0; i < a.n && !need; i++) {
+        char c = a.p[i];
+        if (c == ' ' || c == '\t' || c == '"') need = 1;
+    }
+    if (!need) return os_cstr(a);
+    char *b = xmalloc((size_t)a.n * 2 + 3), *w = b;
+    *w++ = '"';
+    int64_t bs = 0;
+    for (int64_t i = 0; i < a.n; i++) {
+        char c = a.p[i];
+        if (c == '\\') { bs++; continue; }
+        if (c == '"') for (int64_t k = 0; k < 2 * bs + 1; k++) *w++ = '\\';
+        bs = 0;
+        *w++ = c;
+    }
+    for (int64_t k = 0; k < 2 * bs; k++) *w++ = '\\';
+    *w++ = '"';
+    *w = 0;
+    return b;
+}
+
+static char *join_cmdline(RtSlice argv) {
+    char **q = xmalloc((size_t)argv.len * sizeof(char *));
+    size_t n = 1;
+    for (int64_t i = 0; i < argv.len; i++) {
+        q[i] = win_quote(((OxlStr *)argv.ptr)[i]);
+        n += strlen(q[i]) + 1;
+    }
+    char *b = xmalloc(n), *w = b;
+    for (int64_t i = 0; i < argv.len; i++) {
+        size_t l = strlen(q[i]);
+        memcpy(w, q[i], l);
+        w += l;
+        if (i + 1 < argv.len) *w++ = ' ';
+        free(q[i]);
+    }
+    *w = 0;
+    free(q);
+    return b;
+}
+
+/* merged env as the double-NUL block CreateProcess expects */
+static char *env_block(RtSlice env) {
+    char **m = env_merge(env);
+    if (!m) return NULL;
+    size_t n = 1;
+    for (char **p = m; *p; p++) n += strlen(*p) + 1;
+    char *b = xmalloc(n), *w = b;
+    for (char **p = m; *p; p++) {
+        size_t l = strlen(*p);
+        memcpy(w, *p, l);
+        w += l;
+        *w++ = 0;
+    }
+    *w = 0;
+    free(m);
+    return b;
+}
+
+int64_t rt_proc_run(RtSlice argv, RtSlice env) {
+    if (argv.len < 1) return -EINVAL;
+    char *cmd = join_cmdline(argv);
+    char *envb = env_block(env);
+    STARTUPINFOA si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, envb, NULL, &si, &pi))
+        return -(int64_t)GetLastError();
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return (int64_t)code;
+}
+
+typedef struct { HANDLE h; char *buf; int64_t len, cap; } RtDrain;
+static DWORD WINAPI drain_th(void *pv) {
+    RtDrain *d = pv;
+    char tmp[8192];
+    for (;;) {
+        DWORD n = 0;
+        if (!ReadFile(d->h, tmp, sizeof tmp, &n, NULL) || n == 0) break;
+        bufcat(&d->buf, &d->len, &d->cap, tmp, (int64_t)n);
+    }
+    return 0;
+}
+
+int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
+    if (argv.len < 1) return -EINVAL;
+    char *cmd = join_cmdline(argv);
+    char *envb = env_block(env);
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    HANDLE outR = NULL, outW = NULL, errR = NULL, errW = NULL;
+    if (!CreatePipe(&outR, &outW, &sa, 0)) return -(int64_t)GetLastError();
+    SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);
+    if (!CreatePipe(&errR, &errW, &sa, 0)) {
+        DWORD e = GetLastError();
+        CloseHandle(outR); CloseHandle(outW);
+        return -(int64_t)e;
+    }
+    SetHandleInformation(errR, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOA si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = outW;
+    si.hStdError = errW;
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, envb, NULL, &si, &pi)) {
+        DWORD e = GetLastError();
+        CloseHandle(outR); CloseHandle(outW);
+        CloseHandle(errR); CloseHandle(errW);
+        return -(int64_t)e;
+    }
+    CloseHandle(outW);
+    CloseHandle(errW);
+    /* two drain threads — same don't-block-one-pipe-on-the-other rule */
+    RtDrain d1 = { outR, NULL, 0, 0 }, d2 = { errR, NULL, 0, 0 };
+    HANDLE t1 = CreateThread(NULL, 0, drain_th, &d1, 0, NULL);
+    HANDLE t2 = CreateThread(NULL, 0, drain_th, &d2, 0, NULL);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    if (t1) { WaitForSingleObject(t1, INFINITE); CloseHandle(t1); }
+    if (t2) { WaitForSingleObject(t2, INFINITE); CloseHandle(t2); }
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(outR);
+    CloseHandle(errR);
+    out->ptr = d1.buf;  out->len = d1.len;  out->cap = d1.cap;  out->heap = 1;
+    errb->ptr = d2.buf; errb->len = d2.len; errb->cap = d2.cap; errb->heap = 1;
+    return (int64_t)code;
+}
+#endif /* _WIN32 */
 
 /* ---------------- entry ---------------- */
 

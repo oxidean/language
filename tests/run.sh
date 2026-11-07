@@ -219,6 +219,20 @@ printf '%s
 ' "$out" >&2
 grep -q "httpclient done" <<<"$out" || { echo "FAIL httpclient: $out"; exit 1; }
 
+echo "== oxl test: exec + fs (t0) =="
+out=$("$OXL" test tests/exec_test.oxl)
+printf '%s
+' "$out" >&2
+for t in test_output_git test_nonzero_is_status_not_err test_spawn_failure_is_err test_env_override; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL exec: $out"; exit 1; }
+done
+out=$("$OXL" test tests/fsops_test.oxl)
+printf '%s
+' "$out" >&2
+for t in test_mkdir_ls_rename_remove test_mkdir_all_idempotent; do
+    grep -q "$t ... ok" <<<"$out" || { echo "FAIL fsops: $out"; exit 1; }
+done
+
 echo "== stdmods (json/sync/time) =="
 out=$("$OXL" run tests/stdmods_test.oxl)
 grep -q '"name":"widget"' <<<"$out" || { echo "FAIL stdmods json: $out"; exit 1; }

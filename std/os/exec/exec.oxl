@@ -1,0 +1,65 @@
+package exec
+
+// std/os/exec — run external processes. argv is passed through as an
+// array, never a shell string; env entries are "K=V" overrides merged
+// onto the inherited environment (cmd_env only — cmd inherits as-is).
+// Contract: a nonzero child exit is a status, never an err — err covers
+// spawn/pipe/wait failures only, so callers can propagate exit codes
+// losslessly and read stderr even from failed commands.
+import "std/errors"
+
+extern fn rt_proc_run(argv: []str, env: []str) -> int
+
+extern fn rt_proc_output(argv: []str, env: []str, out: mut []byte, errb: mut []byte) -> int
+
+extern fn rt_errstr(code: int) -> str
+
+/// Cmd is a prepared external command: full argv (argv[0] is the
+/// program) plus the env overrides it will run under.
+struct Cmd { argv: []str, env: []str }
+
+/// Out is output()'s result: both captured streams and the exit status.
+struct Out { stdout: []byte, stderr: []byte, status: int }
+
+/// cmd prepares name with args; the child inherits this environment.
+fn cmd(name: str, args: []str) -> Cmd {
+    return cmd_env(name, args, mkslice(str, 0))
+}
+
+/// cmd_env prepares name with args under env overrides — "K=V" pairs
+/// that replace or extend the inherited environment.
+fn cmd_env(name: str, args: []str, env: []str) -> Cmd {
+    argv := mkslice(str, len(args) + 1)
+    argv[0] = name
+    i := 0
+    for i < len(args) {
+        argv[i + 1] = args[i]
+        i = i + 1
+    }
+    return Cmd{argv: argv, env: env}
+}
+
+/// run executes the command with inherited stdio. [status, nil] when
+/// the child ran at all — a nonzero exit stays in status; err means the
+/// spawn/wait itself failed and status is meaningless.
+fn (c Cmd) run() -> [int, err] {
+    st := rt_proc_run(c.argv, c.env)
+    if st < 0 {
+        return 0, errors.new("exec " + c.argv[0] + ": " + rt_errstr(-st))
+    }
+    return st, nil
+}
+
+/// output executes the command capturing stdout and stderr. Same err
+/// contract as run — capture failure is an err, a nonzero exit is not.
+fn (c Cmd) output() -> [Out, err] {
+    // mut params take own values — the runtime fills these headers with
+    // the captured streams (heap backings that outlive this scope)
+    ob := new(mkslice(byte, 0))
+    eb := new(mkslice(byte, 0))
+    st := rt_proc_output(c.argv, c.env, ob, eb)
+    if st < 0 {
+        return Out{stdout: mkslice(byte, 0), stderr: mkslice(byte, 0), status: 0}, errors.new("exec " + c.argv[0] + ": " + rt_errstr(-st))
+    }
+    return Out{stdout: ob, stderr: eb, status: st}, nil
+}

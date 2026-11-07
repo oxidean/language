@@ -1,0 +1,55 @@
+package main
+
+// exec_test — std/os/exec process spawn/wait/capture contract.
+// git is the fixture binary: the fetch veneer already depends on it,
+// so CI runners guarantee it on PATH on every platform.
+import "std/os/exec"
+
+import "std/strings"
+
+import "std/testing"
+
+fn args1(a: str) -> own []str {
+    return new(push(mkslice(str, 0), a))
+}
+
+fn test_output_git() {
+    c := exec.cmd("git", args1("--version"))
+    [o, e] = c.output()
+    testing.expect(e == nil, "git --version runs")
+    testing.expect_eq(o.status, 0, "status is 0")
+    out := o.stdout as str
+    testing.expect(strings.contains(out, "git version"), "stdout has version")
+    testing.expect_eq(len(o.stderr), 0, "stderr empty")
+}
+
+fn test_nonzero_is_status_not_err() {
+    // `git` on an unknown command exits nonzero — that is a status, not
+    // an err. The contract is what lets callers propagate exit codes.
+    c2 := exec.cmd("git", args1("oxl-no-such-subcommand-9z"))
+    [st, e] = c2.run()
+    testing.expect(e == nil, "nonzero child exit must not be an err")
+    testing.expect(st != 0, "status carries the nonzero exit")
+}
+
+fn test_spawn_failure_is_err() {
+    // a missing binary is a spawn failure → err. POSIX may instead
+    // report it as a 127 child exit; either way it must not look like
+    // success.
+    c3 := exec.cmd("oxl-definitely-missing-bin-9z8y7x", args1("x"))
+    [st, e] = c3.run()
+    testing.expect(e != nil || st != 0, "spawn failure surfaces")
+}
+
+fn test_env_override() {
+    // GIT_EXEC_PATH redirects `git --exec-path` — proves the override
+    // actually lands in the child environment (the fetch veneer relies
+    // on this for TZ/GIT_TERMINAL_PROMPT).
+    env := push(mkslice(str, 0), "GIT_EXEC_PATH=/tmp/oxl-exec-test")
+    c4 := exec.cmd_env("git", args1("--exec-path"), env)
+    [o, e] = c4.output()
+    testing.expect(e == nil, "cmd_env runs")
+    testing.expect_eq(o.status, 0, "status 0")
+    out := o.stdout as str
+    testing.expect(strings.contains(out, "/tmp/oxl-exec-test"), "env override landed")
+}
