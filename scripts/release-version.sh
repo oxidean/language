@@ -34,13 +34,15 @@ bump)
     best="patch"
     while IFS= read -r sha; do
         [ -n "$sha" ] || continue
-        b=$(git log -1 --format=%B "$sha" | bump_msg)
+        msg=$(git log -1 --format=%B "$sha")
+        b=$(printf '%s\n' "$msg" | bump_msg)
         [ "$(rank "$b")" -gt "$(rank "$best")" ] && best=$b
     done
     echo "$best"
     ;;
 latest)
-    git tag -l 'v*' | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1 | sed 's/^v//' || true
+    tags=$(git tag -l 'v*')
+    printf '%s\n' "$tags" | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1 | sed 's/^v//' || true
     ;;
 next)
     range=${2:-HEAD}
@@ -48,7 +50,8 @@ next)
     IFS=. read -r M m p <<EOF2
 $latest
 EOF2
-    bump=$(git log --format=%H "$range" | "$0" bump)
+    shas=$(git log --format=%H "$range")
+    bump=$(printf '%s\n' "$shas" | "$0" bump)
     case "$bump" in
         major) if [ "$M" -eq 0 ]; then m=$((m+1)); p=0; else M=$((M+1)); m=0; p=0; fi;;
         minor) m=$((m+1)); p=0;;

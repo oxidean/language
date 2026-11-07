@@ -39,12 +39,20 @@ jobs:
             exit 1
           fi
           if [ "$REF_TYPE" = "tag" ]; then
+            tag_sha=$(git rev-list -n1 "$REF_NAME")
+            # a v* tag may only release commits that are on main — otherwise a
+            # tag push could ship unreviewed code (fetch-depth:0 gives origin/main)
+            if ! git merge-base --is-ancestor "$tag_sha" origin/main; then
+              echo "tag $REF_NAME points at $tag_sha, which is not on main" >&2
+              exit 1
+            fi
             echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
-            echo "sha=$(git rev-list -n1 "$REF_NAME")" >> "$GITHUB_OUTPUT"
+            echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ -z "$EVENT_BEFORE" ] \
-          || [ "$EVENT_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+          || [ "$EVENT_BEFORE" = "0000000000000000000000000000000000000000" ] \
+          || ! git cat-file -e "$EVENT_BEFORE^{commit}" 2>/dev/null; then
             range="HEAD~1..HEAD"
           else
             range="$EVENT_BEFORE..$SHA"
@@ -109,7 +117,17 @@ jobs:
           set -eu
           exists=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG" --jq length)
           if [ "$exists" != "0" ]; then
-            echo "tag $TAG already exists — reusing"
+            ref_obj=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
+              --jq '.object | "\(.sha) \(.type)"')
+            actual=${ref_obj% *}
+            if [ "${ref_obj##* }" = "tag" ]; then
+              actual=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual" --jq .object.sha)
+            fi
+            if [ "$actual" != "$SHA" ]; then
+              echo "tag $TAG points at $actual, expected $SHA" >&2
+              exit 1
+            fi
+            echo "tag $TAG already exists on $SHA — reusing"
             exit 0
           fi
           tag_obj=$(gh api "repos/$GITHUB_REPOSITORY/git/tags" \
