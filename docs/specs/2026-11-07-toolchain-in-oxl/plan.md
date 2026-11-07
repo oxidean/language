@@ -1,6 +1,6 @@
 # WI-0003 plan: toolchain-in-oxl (milestone T)
 
-Spec: `artifacts/spec.md`. ADRs: 0005 (monolith), 0006 (seed +
+Spec: `spec.md` (sibling). ADRs: 0005 (monolith), 0006 (seed +
 C-text fixpoint), 0007 (std/os + std/os/exec). Every stage is its own
 PR through the loop (branch → suite green → CodeRabbit approved →
 squash-merge, `type(scope):` subjects, no attribution).
@@ -33,8 +33,10 @@ AST consumers, and the fetch/cache write paths.
 - `std/os`: `mkdir_all`, `remove_all`, `rename`, `temp_dir`, `getenv`,
   `exists`, `isdir`, `ls`, `fullpath` (wrapping existing externs +
   new ones).
-- `std/os/exec`: `cmd(name, args)` → `run() -> err` / `output() ->
-  [str, err]` (stderr folded into err text on nonzero exit).
+- `std/os/exec`: `cmd(name, args)` → `run() -> [int, err]` (child
+  exit status + spawn error) / `output() -> [Out, err]` with
+  `Out{stdout, stderr, status}` — spawn failure is the only `err`, so
+  `oxl run` can propagate exit 42 losslessly.
 - Tests: `tests/exec_test.oxl`, `tests/fsops_test.oxl` + run.sh
   section; Windows leg exercises the veneer.
 - Deps: none. Gate: suite green incl. windows.
@@ -69,7 +71,7 @@ AST consumers, and the fetch/cache write paths.
 
 ## Stage T3 — fmt + doc
 
-- `fmt [-d] [-w]`: port `fmt.rs` (984) over `parser.Node` AST —
+- `fmt [--check] [-w]`: port `fmt.rs` (984) over `parser.Node` AST —
   the one place ASTs differ; preserve comment attachment + canonical
   line breaking exactly (round-trip, not reformat opinion).
 - `doc`: line-scan `///` extraction port (~60 lines).
@@ -93,14 +95,18 @@ AST consumers, and the fetch/cache write paths.
 - `check` pkg: port `check::Index` — `uses` use-site records +
   `decls` scope-parallel binding spans (Rust `check.rs:119-160`,
   ~150 lines) as a read-only checking product.
-- `cmd/oxl lsp`: JSON-RPC `Content-Length` stdio loop; `initialize`
-  (position-encoding note: cols are bytes), `didOpen`/`didChange`,
-  `hover`, `definition`, `publishDiagnostics` with per-scope clear.
+- `cmd/oxl lsp`: JSON-RPC `Content-Length` stdio loop; `initialize`,
+  `didOpen`/`didChange`, `hover`, `definition`, `publishDiagnostics`
+  with per-scope clear. Columns are **UTF-16 code units** — port the
+  seed's col↔byte-offset conversions; scripted fixture includes
+  non-ASCII text.
 - Tests: scripted stdio fixture — framed requests in, expected
   responses out (`tests/lsp_session.oxl` or run.sh heredoc).
 - **Split gate**: if the Index port outgrows the stage, record the
   split decision here + file a WI; milestone exit becomes
-  all-commands-but-`lsp` parity per the spec's contingency.
+  all-commands-but-`lsp` parity, and the suite's lsp section becomes
+  capability-gated (probe `oxl lsp`, skip when absent) so the dogfood
+  run stays green per the spec's contingency.
 - Deps: T2 (uses module machinery + analyze path).
 
 ## Stage T6 — dogfood CI + docs

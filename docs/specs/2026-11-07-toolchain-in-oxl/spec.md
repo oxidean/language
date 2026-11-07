@@ -17,8 +17,11 @@ WI-0002 precedent.
 
 1. **`std/os` + `std/os/exec`** (ADR-0007): `mkdir_all`, `remove_all`
    (recursive), `rename`, `temp_dir`, `getenv`, `exists`, `isdir`,
-   `ls`, `fullpath`; `exec.cmd(name, args)` → `run()` (inherit stdio,
-   exit status) and `output()` (captured stdout+stderr, exit status).
+   `ls`, `fullpath`; `exec.cmd(name, args)` → `run() -> [int, err]`
+   (child exit status + spawn error — status recoverable, spawn
+   failure distinguishable) and `output() -> [Out, err]` with
+   `Out{stdout, stderr, status}` (both streams captured; spawn
+   failure is the only `err`).
    Backing rt.c primitives: POSIX `posix_spawn`/fork+execvp+`waitpid`
    +`pipe`, Windows `CreateProcess`/`WaitForSingleObject`/`CreatePipe`
    via the E3 veneer; `mkdir`, `rename`, recursive-remove.
@@ -32,7 +35,7 @@ WI-0002 precedent.
      via `os/exec` with the proven flag ordering (sources → rt.c →
      `-lsqlite3`/`-lm`/`-pthread`/`--gc-sections` platform set), scratch
      dirs via `temp_dir`, test binary via `exec.run`, exit-code passthrough.
-   - `fmt [-d] [-w]` — AST printer over `parser.Node` (port of
+   - `fmt [--check] [-w]` — AST printer over `parser.Node` (port of
      `fmt.rs`, 984 lines — the one surface where the ASTs differ).
    - `doc` — `///` extraction (line-scan port, ~60 lines).
    - `get`, `mod init/tidy/verify/list` — manifest parse, MVS build
@@ -41,9 +44,13 @@ WI-0002 precedent.
      `h1:` verify.
    - `lsp` — JSON-RPC `Content-Length` stdio loop; `initialize`,
      `didOpen`/`didChange`, `hover`, `definition`, `publishDiagnostics`
-     with per-scope clearing parity. Requires porting `check::Index`
-     (`uses` use-site records + `decls` binding-site spans) into
-     check.oxl — read-only index product, not a pass change.
+     with per-scope clearing parity. Position columns are **UTF-16
+     code units** (the LSP default `initialize` doesn't negotiate) —
+     ported conversions between protocol cols and internal byte
+     offsets, exercised by a non-ASCII session fixture. Requires
+     porting `check::Index` (`uses` use-site records + `decls`
+     binding-site spans) into check.oxl — read-only index product,
+     not a pass change.
 4. **Module resolution parity** — the M2 machinery in `.oxl`:
    manifest discover/parse (`module`/`oxl`/`require`/`replace`), std
    anchor (exe-walk), internal/ rule, cycle diagnostics, file-mode
@@ -94,9 +101,11 @@ Milestone exit (phase-2 map) + per-stage gates (in `plan.md`):
 - CI green on ubuntu/macos/windows; commit-lint clean; CodeRabbit
   approved on the final PR.
 - If T5 (LSP) splits: milestone exit becomes "all commands except
-  `lsp` at parity"; the Index port moves to its own WI with the same
-  acceptance bar. The split decision is recorded in `plan.md` at T5
-  start, not silently.
+  `lsp` at parity" **and the suite gate is capability-scoped** — the
+  lsp section probes driver support and skips under split mode, so
+  `tests/run.sh <self-built-oxl>` still passes while the Index port
+  moves to its own WI with the same acceptance bar. The split
+  decision is recorded in `plan.md` at T5 start, not silently.
 
 ## Non-goals
 

@@ -7,10 +7,16 @@ The `oxl/` crate remains in the tree as the documented **seed
 toolchain**: it is the bootstrap compiler that builds the first
 `.oxl`-written `oxl`. The product binary is `.oxl`-built. The dogfood
 gate is `tests/run.sh` passing with the self-built driver. The
-fixpoint proof is **C-text equality** — the self-built driver emits
-the same C for the driver sources as the seed does (the same gate the
-compiler bootstrap already passes). Binary hashes are not compared:
-build-ids and embedded paths differ legitimately. Dual-driver CI runs
+fixpoint proof is **C-text equality across successive generations
+of the .oxl toolchain** — the seed-built driver emits `C_A` for the
+driver sources; the driver built by that product emits `C_B`;
+`C_A == C_B` because both run the same `.oxl` emitter. Seed-vs-self C
+text is **not** compared: the Rust and `.oxl` emitters differ
+cosmetically (e.g. `void oxl_main(void) { /*GLOBALS*/` inline vs
+newline layout) and legitimately so — this is the same
+successive-builds gate the compiler bootstrap already uses. Binary
+hashes are not compared either: build-ids and embedded paths differ
+legitimately. Dual-driver CI runs
 only during the transition; afterwards the suite runs under the
 self-built driver and the seed is exercised only as the bootstrap
 input.
