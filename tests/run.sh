@@ -89,6 +89,18 @@ out=$("$OXL" run examples/hello.oxl)
 "$OXL" build examples/hello.oxl -o "$scratch/hello$EXE" || { echo "FAIL hello build"; exit 1; }
 echo "  hello.oxl binary: $(wc -c <"$scratch/hello$EXE") bytes"
 
+# the README's language-surface example (the fenced 'oxl' code block) is
+# a byte-identical copy of examples/http-hello minus its comment banner —
+# extract both sides and diff them so the doc can't drift, then prove the
+# file still compiles. Backticks can't appear in this comment or the
+# FAIL message below: bash parses them as command substitution.
+awk '/^```oxl$/{f=1;next} /^```$/{f=0} f' README.md > "$scratch/readme-snippet.oxl"
+sed -n '/^import /,$p' examples/http-hello/main.oxl > "$scratch/http-hello-body.oxl"
+{ echo "package main"; echo; cat "$scratch/http-hello-body.oxl"; } > "$scratch/http-hello-expected.oxl"
+diff -u "$scratch/http-hello-expected.oxl" "$scratch/readme-snippet.oxl" >/dev/null \
+    || { echo "FAIL README example drift: sync the fenced oxl block with examples/http-hello/main.oxl"; exit 1; }
+"$OXL" build examples/http-hello/main.oxl -o "$scratch/http-hello$EXE" || { echo "FAIL http-hello build"; exit 1; }
+
 echo "== features =="
 out=$("$OXL" run examples/features.oxl)
 [ "$(tail -1 <<<"$out")" = "done" ] || { echo "FAIL features"; exit 1; }
