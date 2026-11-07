@@ -4,7 +4,7 @@ Go-shaped packages, versions, fetching, dead-code elimination, and a
 Go-parity `std/`. Per-item design sketches live in `items/`; this file
 is the order of battle. Milestone-gated, not date-gated.
 
-**Status (2026-11-06): M1 (PR #5), M2 (PR #6), M3 (PR #7), G1 (PR #9), G2 (PR #10), V1 (PR #11), S1 (PR #12), V2 (PR #13), V3 (PR #14), S2 (PR #15), S3 (PR #16), S4 implemented; S5 spec'd.**
+**Status (2026-11-06): M1 (PR #5), M2 (PR #6), M3 (PR #7), G1 (PR #9), G2 (PR #10), V1 (PR #11), S1 (PR #12), V2 (PR #13), V3 (PR #14), S2 (PR #15), S3 (PR #16), S4 (PR #17), S5 (PR #18) implemented — spec complete.**
 Review findings folded into the item files — see threads on the PR.
 
 Execution model: Track M is the critical path — every other track
