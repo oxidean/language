@@ -14,7 +14,7 @@ Port the seed driver — today the Rust code under `oxl/src/` — to
 
 **In scope:**
 - `oxl` CLI: arg parsing, subcommand dispatch (`build`/`run`/`test`/
-  `fmt`/`doc`/`get`/`mod`/`lsp`/`new`)
+  `fmt`/`doc`/`get`/`mod`/`list`/`lsp`)
 - Module machinery in the driver: `oxl.mod` manifest parse, MVS
   build-list, `~/.oxl/mod` cache layout, git fetch, `oxl.sum`
   `h1:` verify (sha256 dirhash already ported for the checker)

@@ -2,9 +2,9 @@
   "schema_version": 1,
   "id": "WI-0002",
   "title": "plan remaining roadmap work and rename the self-hosting milestone",
-  "state": "implementing",
+  "state": "shipping",
   "profile": "normal",
-  "current_stage": "implementation",
+  "current_stage": "shipping",
   "created_at": "2026-11-07T15:29:01Z",
-  "updated_at": "2026-11-07T15:30:49Z"
+  "updated_at": "2026-11-07T15:33:19Z"
 }

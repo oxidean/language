@@ -34,7 +34,7 @@
 
 ## Phase 2: Post-v0.2
 
-Milestone map: `docs/specs/2026-11-07-phase-2-plan/`
+Milestone map: [docs/specs/2026-11-07-phase-2-plan/](docs/specs/2026-11-07-phase-2-plan/shape.md)
 
 - **T — toolchain-in-oxl**: port the seed driver (CLI, module
   resolution, git fetch, fmt, doc, LSP, test runner) to `.oxl`;
