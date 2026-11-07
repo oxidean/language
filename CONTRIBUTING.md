@@ -66,6 +66,18 @@ self-compile comparison. `tests/run.sh` covers both.
   `git commit --no-verify` bypasses the hook; CI still checks.
 - Commits use your configured git identity (see `AGENTS.md`).
 
+## Releases
+
+Every merge to `main` cuts a GitHub release
+(`.github/workflows/release.yml`). The `version` job derives the next
+tag from commit subjects — `feat` → minor, `!`/`BREAKING CHANGE` →
+major (minor while 0.x), everything else → patch — the `release` job
+re-runs the suite, pushes the annotated tag, and publishes the
+toolchain tarball with generated notes. Your subject picks the bump:
+a breaking change typed `fix` ships as a patch release. Manual `v*`
+tag pushes still release, and `workflow_dispatch` re-runs the
+pipeline for `main`.
+
 ## Rules of the road
 
 - The C backend is interim — keep the codegen seam clean behind the
