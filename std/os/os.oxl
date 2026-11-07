@@ -35,6 +35,8 @@ fn quit(code: int) {
 // text>"); fds are plain ints under the hood.
 import "std/errors"
 
+import "std/strings"
+
 extern fn rt_open_read(path: str) -> int
 
 extern fn rt_open_write(path: str) -> int
@@ -46,6 +48,26 @@ extern fn rt_fd_write(fd: int, b: []byte) -> int
 extern fn rt_fd_close(fd: int) -> int
 
 extern fn rt_remove(path: str) -> int
+
+extern fn rt_mkdir(path: str) -> int
+
+extern fn rt_rmdir(path: str) -> int
+
+extern fn rt_rename(old: str, new: str) -> int
+
+extern fn rt_fexists(path: str) -> int
+
+extern fn rt_isdir(path: str) -> int
+
+extern fn rt_islnk(path: str) -> int
+
+extern fn rt_lsdir(path: str) -> []str
+
+extern fn rt_getenv(name: str) -> str
+
+extern fn rt_fullpath(path: str) -> str
+
+extern fn rt_is_windows() -> int
 
 extern fn rt_errstr(code: int) -> str
 
@@ -132,4 +154,138 @@ fn remove(path: str) -> err {
         return nil
     }
     return errors.new("remove " + path + ": " + rt_errstr(-r))
+}
+
+/// exists reports whether path exists (file, dir, or link).
+fn exists(path: str) -> bool {
+    return rt_fexists(path) != 0 || rt_islnk(path) != 0
+}
+
+/// isdir reports whether path is a directory.
+fn isdir(path: str) -> bool {
+    return rt_isdir(path) != 0
+}
+
+/// ls returns the sorted entry names of directory path.
+fn ls(path: str) -> own []str {
+    return new(rt_lsdir(path))
+}
+
+/// getenv returns the value of environment variable name, "" when unset.
+fn getenv(name: str) -> str {
+    return rt_getenv(name)
+}
+
+/// fullpath returns the canonical absolute form of path.
+fn fullpath(path: str) -> str {
+    return rt_fullpath(path)
+}
+
+/// mkdir creates one directory level; err when it can't (EEXIST is an
+/// error here — use mkdir_all for create-if-missing semantics).
+fn mkdir(path: str) -> err {
+    r := rt_mkdir(path)
+    if r < 0 {
+        return errors.new("mkdir " + path + ": " + rt_errstr(-r))
+    }
+    return nil
+}
+
+/// mkdir_all creates path and every missing parent. Existing dirs along
+/// the way are fine; a non-dir in the path is an error.
+fn mkdir_all(path: str) -> err {
+    if isdir(path) {
+        return nil
+    }
+    cur := ""
+    parts := strings.split(path, "/")
+    for parts != nil {
+        p := parts.v
+        parts = parts.next
+        if len(p) == 0 {
+            if len(cur) == 0 {
+                cur = "/"
+            }
+            continue
+        }
+        if strings.endswith(p, ":") {
+            // drive prefix (C:) — not a creatable dir, always a root
+            cur = cur + p
+            continue
+        }
+        if len(cur) == 0 || strings.endswith(cur, "/") {
+            cur = cur + p
+        } else {
+            cur = cur + "/" + p
+        }
+        if isdir(cur) {
+            continue
+        }
+        r := rt_mkdir(cur)
+        if r < 0 && !isdir(cur) {
+            return errors.new("mkdir " + cur + ": " + rt_errstr(-r))
+        }
+    }
+    return nil
+}
+
+/// remove_all deletes path recursively — files, links, and dir trees.
+/// Symlinks themselves are removed, never followed. A missing path is
+/// not an error (same contract as the reference RemoveAll).
+fn remove_all(path: str) -> err {
+    if !exists(path) && rt_islnk(path) == 0 {
+        return nil
+    }
+    if rt_islnk(path) != 0 || !isdir(path) {
+        return remove(path)
+    }
+    ents := rt_lsdir(path)
+    i := 0
+    for i < len(ents) {
+        e := remove_all(path + "/" + ents[i])
+        if e != nil {
+            return e
+        }
+        i = i + 1
+    }
+    r := rt_rmdir(path)
+    if r < 0 {
+        return errors.new("rmdir " + path + ": " + rt_errstr(-r))
+    }
+    return nil
+}
+
+/// rename moves/renames old to new, replacing an existing target and
+/// crossing volumes where the platform allows it.
+fn rename(old: str, new: str) -> err {
+    r := rt_rename(old, new)
+    if r < 0 {
+        return errors.new("rename " + old + " -> " + new + ": " + rt_errstr(-r))
+    }
+    return nil
+}
+
+/// temp_dir returns the per-OS scratch directory: $TMPDIR or /tmp on
+/// POSIX; %TMP%, %TEMP%, %USERPROFILE%, or C:/Windows on Windows.
+fn temp_dir() -> str {
+    if rt_is_windows() != 0 {
+        names := mkslice(str, 0)
+        names = push(names, "TMP")
+        names = push(names, "TEMP")
+        names = push(names, "USERPROFILE")
+        i := 0
+        for i < len(names) {
+            v := rt_getenv(names[i])
+            if len(v) > 0 {
+                return v
+            }
+            i = i + 1
+        }
+        return "C:/Windows"
+    }
+    v := rt_getenv("TMPDIR")
+    if len(v) > 0 {
+        return v
+    }
+    return "/tmp"
 }

@@ -23,7 +23,7 @@ AST consumers, and the fetch/cache write paths.
 - Verify: markdown links resolve; commit-check clean; docs-only diff
   → CI + CodeRabbit → merge.
 
-## Stage T0 — exec + fs primitives
+## Stage T0 — exec + fs primitives (done)
 
 - `runtime/rt.c`/`rt.h`: `rt_mkdir`, `rt_rename`, `rt_proc_run`
   (spawn+wait, inherited stdio), `rt_proc_output` (spawn+pipe

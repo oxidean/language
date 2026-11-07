@@ -21,6 +21,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <shellapi.h>
+#include <wchar.h>
 #include <process.h>
 #include <io.h>
 #include <fcntl.h>
@@ -321,7 +323,7 @@ void rt_poke16(void *buf, int64_t off, int64_t v);
 void rt_poke32(void *buf, int64_t off, int64_t v);
 void rt_init(void);                                    /* proc init (WinSock); main() calls it */
 int64_t rt_file_readable(const char *path);            /* open+close probe */
-OxlStr rt_lsdir(OxlStr path);
+RtSlice rt_lsdir(OxlStr path);
 int64_t rt_isdir(OxlStr path);
 int64_t rt_isfile(OxlStr path);
 int64_t rt_islnk(OxlStr path);
@@ -353,6 +355,15 @@ int64_t rt_fd_write(int64_t fd, RtSlice b);  /* n or -errno        */
 int64_t rt_fd_close(int64_t fd);   /* 0 or -errno              */
 int64_t rt_remove(OxlStr path);      /* unlink, 0 or -errno      */
 OxlStr  rt_errstr(int64_t code);      /* strerror text             */
+int64_t rt_mkdir(OxlStr path);       /* mkdir 0777, 0 or -errno/GetLastError */
+int64_t rt_rmdir(OxlStr path);       /* empty-dir remove, 0 or -errno/GLE    */
+int64_t rt_rename(OxlStr a, OxlStr b); /* replace+cross-volume, 0 or -errno/GLE */
+/* argv/env are []str; argv[0]=program (PATH search), env="K=V" overrides
+ * merged onto the inherited env (empty = inherit). Return: >=0 child exit
+ * status (128+sig when signaled), <0 negative errno/GLE for spawn/pipe/
+ * wait failure — a nonzero child exit is a status, never an error. */
+int64_t rt_proc_run(RtSlice argv, RtSlice env);
+int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb);
 int64_t rt_str_cmp(OxlStr a, OxlStr b);      /* byte-lex order for str < str */
 int64_t rt_is_windows(void);                  /* 1 under _WIN32              */
 OxlStr  rt_timestr(void);                     /* "YYYY-MM-DD HH:MM:SS" local */

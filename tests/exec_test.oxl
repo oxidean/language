@@ -1,0 +1,109 @@
+package main
+
+// exec_test — std/os/exec process spawn/wait/capture contract.
+// git is the fixture binary: the fetch veneer already depends on it,
+// so CI runners guarantee it on PATH on every platform.
+import "std/os"
+
+import "std/os/exec"
+
+import "std/strings"
+
+import "std/testing"
+
+fn args1(a: str) -> own []str {
+    return new(push(mkslice(str, 0), a))
+}
+
+fn test_output_git() {
+    c := exec.cmd("git", args1("--version"))
+    [o, e] = c.output()
+    testing.expect(e == nil, "git --version runs")
+    testing.expect_eq(o.status, 0, "status is 0")
+    out := o.stdout as str
+    testing.expect(strings.contains(out, "git version"), "stdout has version")
+    testing.expect_eq(len(o.stderr), 0, "stderr empty")
+}
+
+fn test_nonzero_is_status_not_err() {
+    // `git` on an unknown command exits nonzero — that is a status, not
+    // an err. The contract is what lets callers propagate exit codes.
+    c2 := exec.cmd("git", args1("oxl-no-such-subcommand-9z"))
+    [st, e] = c2.run()
+    testing.expect(e == nil, "nonzero child exit must not be an err")
+    testing.expect(st != 0, "status carries the nonzero exit")
+}
+
+fn test_spawn_failure_is_err() {
+    // a missing binary is a spawn failure → err. POSIX may instead
+    // report it as a 127 child exit; either way it must not look like
+    // success.
+    c3 := exec.cmd("oxl-definitely-missing-bin-9z8y7x", args1("x"))
+    [st, e] = c3.run()
+    testing.expect(e != nil || st != 0, "spawn failure surfaces")
+}
+
+fn test_env_override() {
+    // GIT_EXEC_PATH redirects `git --exec-path` — proves the override
+    // actually lands in the child environment (the fetch veneer relies
+    // on this for TZ/GIT_TERMINAL_PROMPT).
+    env := push(mkslice(str, 0), "GIT_EXEC_PATH=/tmp/oxl-exec-test")
+    c4 := exec.cmd_env("git", args1("--exec-path"), env)
+    [o, e] = c4.output()
+    testing.expect(e == nil, "cmd_env runs")
+    testing.expect_eq(o.status, 0, "status 0")
+    out := o.stdout as str
+    testing.expect(strings.contains(out, "/tmp/oxl-exec-test"), "env override landed")
+    // an override merge must still deliver the inherited environment:
+    // under main() the CRT's _wenviron can be null, and a merge built
+    // from nothing would ship the child only the override list
+    es := "oxl-exec-envdump-9z"
+    if argv(1) == es {
+        // name=value on one line — the test runner's output precedes
+        // it on stdout, so asserts key on the marker, not the tail
+        print(argv(2) + "=" + os.getenv(argv(2)))
+        exit(0)
+    }
+    env2 := push(mkslice(str, 0), "OXL_EXEC_INHERIT_9Z=merged-ok")
+    c5 := exec.cmd_env(argv(0), push(push(mkslice(str, 0), es), "OXL_EXEC_INHERIT_9Z"), env2)
+    [o5, e5] = c5.output()
+    testing.expect(e5 == nil, "env respawn runs")
+    testing.expect(strings.contains(o5.stdout as str, "OXL_EXEC_INHERIT_9Z=merged-ok"), "override lands under merged env")
+    c6 := exec.cmd_env(argv(0), push(push(mkslice(str, 0), es), "PATH"), env2)
+    [o6, e6] = c6.output()
+    testing.expect(e6 == nil, "PATH respawn runs")
+    lines := strings.split(strings.trim(o6.stdout as str), "\n")
+    tail := lines
+    for tail.next != nil {
+        tail = tail.next
+    }
+    testing.expect(strings.startswith(tail.v, "PATH=") && len(tail.v) > 5, "child still receives inherited PATH")
+}
+
+fn test_arg_space_backslash_roundtrip() {
+    // self-respawn: argv[1]==sentinel makes the child print argv[2]
+    // and exit. Windows builds a command-line string (win_quote) that
+    // CommandLineToArgvW re-parses; POSIX execvps argv verbatim.
+    sentinel := "oxl-exec-argdump-9z"
+    if argv(1) == sentinel {
+        print(argv(2))
+        exit(0)
+    }
+    payload := "a b\\c\"d\\e\\\\"
+    c5 := exec.cmd(argv(0), push(push(mkslice(str, 0), sentinel), payload))
+    [o, e] = c5.output()
+    testing.expect(e == nil, "respawn runs")
+    testing.expect_eq(o.status, 0, "child exits 0")
+    got := o.stdout as str
+    // the child is this same test binary — earlier tests' runner output
+    // precedes the payload line, so assert on the tail
+    testing.expect(strings.endswith(strings.trim(got), payload), "argv survives quoting")
+    // UTF-8 argv: survives CreateProcessW on the spawn side and the
+    // wide-argv rebuild in the child's runtime main
+    payload2 := "héllo wörld\\café ☃"
+    c6 := exec.cmd(argv(0), push(push(mkslice(str, 0), sentinel), payload2))
+    [o2, e2] = c6.output()
+    testing.expect(e2 == nil, "utf-8 respawn runs")
+    got2 := o2.stdout as str
+    testing.expect(strings.endswith(strings.trim(got2), payload2), "utf-8 argv survives")
+}

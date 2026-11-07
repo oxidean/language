@@ -1,0 +1,57 @@
+package main
+
+// fsops_test — std/os filesystem primitives: mkdir_all, ls, exists,
+// isdir, rename, temp_dir, remove_all (recursive, no symlink-follow).
+import "std/os"
+
+import "std/testing"
+
+fn has(names: []str, want: str) -> bool {
+    i := 0
+    for i < len(names) {
+        if names[i] == want {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn test_mkdir_ls_rename_remove() {
+    base := os.temp_dir() + "/oxl-fsops-test-9z"
+    // clean slate in case a prior run left the tree
+    testing.expect(os.remove_all(base) == nil, "pre-clean ok")
+
+    e := os.mkdir_all(base + "/a/b/c")
+    testing.expect(e == nil, "mkdir_all nested")
+    testing.expect(os.isdir(base + "/a/b/c"), "nested dir exists")
+    testing.expect(os.isdir(base + "/a"), "parents created")
+
+    // a file inside, so remove_all has something to recurse over
+    [f, fe] = os.create(base + "/a/b/f.txt")
+    testing.expect(fe == nil, "create in tree")
+    f.close()
+
+    testing.expect(has(os.ls(base + "/a/b"), "c"), "ls sees nested dir")
+    testing.expect(has(os.ls(base + "/a/b"), "f.txt"), "ls sees file")
+    testing.expect(!has(os.ls(base + "/a/b"), "nope"), "ls excludes absent")
+
+    e = os.rename(base + "/a/b/f.txt", base + "/a/b/g.txt")
+    testing.expect(e == nil, "rename file")
+    testing.expect(os.exists(base + "/a/b/g.txt"), "renamed exists")
+    testing.expect(!os.exists(base + "/a/b/f.txt"), "old name gone")
+
+    e = os.remove_all(base)
+    testing.expect(e == nil, "remove_all tree")
+    testing.expect(!os.exists(base), "tree gone")
+
+    // a missing path is not an error — same RemoveAll contract
+    testing.expect(os.remove_all(base + "-absent") == nil, "remove_all missing is nil")
+}
+
+fn test_mkdir_all_idempotent() {
+    base := os.temp_dir() + "/oxl-fsops-idem-9z"
+    testing.expect(os.mkdir_all(base) == nil, "mkdir_all once")
+    testing.expect(os.mkdir_all(base) == nil, "mkdir_all existing is fine")
+    testing.expect(os.remove_all(base) == nil, "cleanup")
+}

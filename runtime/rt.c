@@ -19,7 +19,9 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <spawn.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -47,6 +49,13 @@ static void *xrealloc(void *p, size_t n) {
     if (!q && n) { fprintf(stderr, "oxl: out of memory (%zu bytes)\n", n); abort(); }
     return q;
 }
+
+#ifdef _WIN32
+/* high tag bit marks GetLastError codes in the int64 error channel —
+ * rt_errstr decodes via FormatMessage; untagged values stay errno */
+#define RT_GLE_TAG ((int64_t)1 << 30)
+#define RT_GLE() (-((int64_t)GetLastError() | RT_GLE_TAG))
+#endif
 
 static ObjHdr *hdr_of(void *obj) { return ((ObjHdr *)obj) - 1; }
 
@@ -2180,21 +2189,21 @@ OxlStr rt_getenv(OxlStr name) {
     return v ? rt_str(v) : rt_str("");
 }
 
-/* file-exists probe — rt_isdir answers dirs; the module loader needs
- * "is there a FILE here" for oxl.mod discovery */
+/* file-exists probe — stat, not fopen: dirs, unreadable entries and
+ * permission-denied paths still exist, and callers (remove_all, module
+ * resolve) make deletion decisions on this answer */
 int64_t rt_fexists(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);
     cp[path.n] = 0;
-    FILE *f = fopen(cp, "rb");
-    if (!f) return 0;
-    fclose(f);
-    return 1;
+#ifdef _WIN32
+    return GetFileAttributesA(cp) != INVALID_FILE_ATTRIBUTES ? 1 : 0;
+#else
+    struct stat st;
+    return stat(cp, &st) == 0 ? 1 : 0;
+#endif
 }
 
-/* absolute canonical path, `/`-separated; "" when the path doesn't
- * resolve. find_root and the internal-package rule walk/compare real
- * ancestors, so `.`/relative starts must resolve before the walk */
 OxlStr rt_fullpath(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);
@@ -2347,6 +2356,23 @@ int64_t rt_fd_write(int64_t fd, RtSlice b) {
 }
 
 OxlStr rt_errstr(int64_t code) {
+#ifdef _WIN32
+    /* two error domains share this channel: errno (strerror) and
+     * Win32 GetLastError. The primitives tag Win32 codes with
+     * RT_GLE_TAG so they can't be misreported as errno text */
+    if (code & RT_GLE_TAG) {
+        char *buf = rt_alloc(256);
+        DWORD n = FormatMessageA(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL, (DWORD)(code & ~RT_GLE_TAG),
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, 255, NULL);
+        while (n > 0 && (buf[n - 1] == '\r' || buf[n - 1] == '\n' ||
+               buf[n - 1] == '.' || buf[n - 1] == ' '))
+            buf[--n] = 0;
+        if (n == 0) return rt_str("win32 error");
+        return (OxlStr){ buf, (int64_t)n };
+    }
+#endif
     const char *m = strerror((int)code);
     return m ? rt_str(m) : rt_str("unknown error");
 }
@@ -2512,10 +2538,11 @@ static int name_cmp(const void *a, const void *b) {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-/* directory entry names, sorted + newline-joined; "" on any failure.
- * package loading needs a portable enumeration — the sort keeps the
- * load order (and generated code) deterministic across filesystems */
-OxlStr rt_lsdir(OxlStr path) {
+/* sorted dir entries as a []str — element boundaries are the API, so
+ * names can't smuggle separators (a POSIX name may legally contain
+ * '\n'); callers never re-split. Empty slice on any failure, matching
+ * the old "" contract. Entries are process-lifetime. */
+RtSlice rt_lsdir(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);
     cp[path.n] = 0;
@@ -2532,7 +2559,7 @@ OxlStr rt_lsdir(OxlStr path) {
     free(pat);
     if (h == INVALID_HANDLE_VALUE) {
         free(names);
-        return rt_str("");
+        return (RtSlice){ NULL, 0, 0, 1 };
     }
     do {
         const char *nm = fd.cFileName;
@@ -2548,7 +2575,7 @@ OxlStr rt_lsdir(OxlStr path) {
     DIR *d = opendir(cp);
     if (!d) {
         free(names);
-        return rt_str("");
+        return (RtSlice){ NULL, 0, 0, 1 };
     }
     struct dirent *e;
     while ((e = readdir(d))) {
@@ -2563,20 +2590,17 @@ OxlStr rt_lsdir(OxlStr path) {
     closedir(d);
 #endif
     qsort(names, n, sizeof *names, name_cmp);
-    size_t total = 0;
-    for (size_t i = 0; i < n; i++) total += strlen(names[i]) + 1;
-    char *buf = rt_alloc((int64_t)total + 1);
-    size_t off = 0;
-    for (size_t i = 0; i < n; i++) {
-        size_t m = strlen(names[i]);
-        memcpy(buf + off, names[i], m);
-        off += m;
-        if (i + 1 < n) buf[off++] = '\n';
-        free(names[i]);
+    if (n == 0) {
+        free(names);
+        return (RtSlice){ NULL, 0, 0, 1 };
     }
-    buf[off] = 0;
+    OxlStr *elems = xmalloc(n * sizeof *elems);
+    for (size_t i = 0; i < n; i++) {
+        elems[i].p = names[i];
+        elems[i].n = (int64_t)strlen(names[i]);
+    }
     free(names);
-    return (OxlStr){ buf, (int64_t)off };
+    return (RtSlice){ elems, (int64_t)n, (int64_t)n, 1 };
 }
 
 #ifdef OXL_NET
@@ -2996,6 +3020,495 @@ int64_t rt_m_isinf(double x) { return isinf(x) ? 1 : 0; }
 int64_t rt_m_signbit(double x) { return signbit(x) ? 1 : 0; }
 #endif /* OXL_MATH */
 
+
+/* ---------------- process & dir primitives (T0) ----------------
+ * argv/env arrive as []str (RtSlice of OxlStr elems). argv[0] is the
+ * program; PATH resolution applies (posix_spawnp / CreateProcess both
+ * search it). env entries are "K=V" overrides merged onto the inherited
+ * environment — an empty env slice inherits unchanged.
+ * Return contract: >=0 is the child exit status (POSIX exit code, or
+ * 128+signal when killed; Windows GetExitCodeProcess). <0 is a negative
+ * errno / GetLastError for a failure in spawn/pipe/wait itself — a
+ * nonzero child exit is a status, never an error. */
+
+static char *os_cstr(OxlStr s) {
+    char *p = xmalloc((size_t)s.n + 1);
+    memcpy(p, s.p, (size_t)s.n);
+    p[s.n] = 0;
+    return p;
+}
+
+/* NULL-terminated argv copy; NULL on an embedded-NUL arg (caller maps
+ * to -EINVAL — the truncated arg would otherwise silently rename the
+ * program being run) */
+static char **argv_c(RtSlice argv) {
+    char **a = xmalloc(((size_t)argv.len + 1) * sizeof(char *));
+    for (int64_t i = 0; i < argv.len; i++) {
+        OxlStr s = ((OxlStr *)argv.ptr)[i];
+        if (s.n > 0 && memchr(s.p, 0, (size_t)s.n)) { free(a); return NULL; }
+        a[i] = os_cstr(s);
+    }
+    a[argv.len] = NULL;
+    return a;
+}
+
+#ifndef _WIN32
+extern char **environ;
+#endif
+
+#ifdef _WIN32
+/* UTF-8 <-> UTF-16 for the wide process APIs — oxl strings are UTF-8
+ * and the A-suffixed calls would reinterpret them in the ANSI code
+ * page, mangling any arg/path/env value that isn't ASCII */
+static wchar_t *u2w(const char *s, int64_t n) {
+    int wn = MultiByteToWideChar(CP_UTF8, 0, s, (int)n, NULL, 0);
+    wchar_t *w = xmalloc(((size_t)wn + 1) * sizeof *w);
+    MultiByteToWideChar(CP_UTF8, 0, s, (int)n, w, wn);
+    w[wn] = 0;
+    return w;
+}
+
+static wchar_t *u2wz(const char *s) { return u2w(s, (int64_t)strlen(s) + 1); }
+
+static char *w2u(const wchar_t *w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    char *s = xmalloc((size_t)n);
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
+    return s;
+}
+#endif
+
+static int env_key_eq(const char *base, OxlStr ov) {
+    const char *eq = strchr(base, '=');
+    const char *oeq = memchr(ov.p, '=', (size_t)ov.n);
+    if (!eq || !oeq) return 0;
+    size_t k = (size_t)(eq - base), ok = (size_t)(oeq - ov.p);
+    return k == ok && memcmp(base, ov.p, k) == 0;
+}
+
+/* envp = inherited environment with overrides applied (replace on key
+ * match, else append). NULL when env is empty → caller inherits. */
+/* inherited env as UTF-8 strings: _wenviron is authoritative on
+ * Windows (_environ entries would arrive ANSI-decoded and mangle
+ * non-ASCII values in the merged block); POSIX borrows environ */
+static char **env_base(void) {
+#ifdef _WIN32
+    size_t n = 0;
+    if (_wenviron) {
+        while (_wenviron[n]) n++;
+        char **r = xmalloc((n + 1) * sizeof *r);
+        for (size_t i = 0; i < n; i++) r[i] = w2u(_wenviron[i]);
+        r[n] = NULL;
+        return r;
+    }
+    /* _wenviron is created lazily by the UCRT — a wmain entry or the
+     * first wide-env call — so under main() it can still be null here.
+     * Fall back to the OS block or the merged child environment would
+     * contain only the overrides and drop PATH/SystemRoot. */
+    wchar_t *blk = GetEnvironmentStringsW();
+    if (!blk) return NULL;
+    for (wchar_t *p = blk; *p; p += wcslen(p) + 1) n++;
+    char **r = xmalloc((n + 1) * sizeof *r);
+    n = 0;
+    for (wchar_t *p = blk; *p; p += wcslen(p) + 1) r[n++] = w2u(p);
+    r[n] = NULL;
+    FreeEnvironmentStringsW(blk);
+    return r;
+#else
+    return environ;
+#endif
+}
+
+static char **env_merge(RtSlice env) {
+    if (env.len <= 0) return NULL;
+    char **base = env_base();
+    if (!base) return NULL;   /* inherited env unreadable — callers must error, not spawn with overrides only */
+    size_t nb = 0;
+    while (base[nb]) nb++;
+    char **r = xmalloc((nb + (size_t)env.len + 1) * sizeof(char *));
+    size_t w = 0;
+    for (size_t i = 0; i < nb; i++) {
+        int drop = 0;
+        for (int64_t j = 0; j < env.len; j++)
+            if (env_key_eq(base[i], ((OxlStr *)env.ptr)[j])) { drop = 1; break; }
+        if (!drop) r[w++] = base[i];
+    }
+    for (int64_t j = 0; j < env.len; j++) r[w++] = os_cstr(((OxlStr *)env.ptr)[j]);
+    r[w] = NULL;
+#ifdef _WIN32
+    free(base);   /* the w2u'd strings live on in r — only the array goes */
+#endif
+    return r;
+}
+
+/* release an env_merge result: the trailing nov entries are always
+ * os_cstr copies; the kept base strings point into environ on POSIX
+ * but are w2u allocations on Windows, so there every entry frees */
+static void env_merge_free(char **ev, int64_t nov) {
+    if (!ev) return;
+    size_t n = 0;
+    while (ev[n]) n++;
+    size_t first = (nov >= 0 && (size_t)nov <= n) ? n - (size_t)nov : 0;
+#ifdef _WIN32
+    first = 0;
+#endif
+    for (size_t i = first; i < n; i++) free(ev[i]);
+    free(ev);
+}
+
+/* release an argv_c result — every string is an os_cstr copy */
+static void argv_free(char **av) {
+    if (!av) return;
+    for (size_t i = 0; av[i]; i++) free(av[i]);
+    free(av);
+}
+
+/* growable byte buffer for captured child output — xmalloc'd, process-
+ * lifetime retained (the runtime's standing policy for interned data) */
+static void bufcat(char **b, int64_t *len, int64_t *cap, const char *d, int64_t n) {
+    if (*len + n > *cap) {
+        int64_t nc = *cap ? *cap : 4096;
+        while (*len + n > nc) nc *= 2;
+        char *nb = xmalloc((size_t)nc);
+        if (*b) memcpy(nb, *b, (size_t)*len);
+        *b = nb;
+        *cap = nc;
+    }
+    memcpy(*b + *len, d, (size_t)n);
+    *len += n;
+}
+
+int64_t rt_mkdir(OxlStr path) {
+    if (path.n > 0 && memchr(path.p, 0, (size_t)path.n)) return -EINVAL;
+    const char *cp = rt_cstr(path);
+#ifdef _WIN32
+    return CreateDirectoryA(cp, NULL) ? 0 : RT_GLE();
+#else
+    return mkdir(cp, 0777) < 0 ? -(int64_t)errno : 0;
+#endif
+}
+
+int64_t rt_rmdir(OxlStr path) {
+    if (path.n > 0 && memchr(path.p, 0, (size_t)path.n)) return -EINVAL;
+    const char *cp = rt_cstr(path);
+#ifdef _WIN32
+    return RemoveDirectoryA(cp) ? 0 : RT_GLE();
+#else
+    return rmdir(cp) < 0 ? -(int64_t)errno : 0;
+#endif
+}
+
+int64_t rt_rename(OxlStr old_p, OxlStr new_p) {
+    if ((old_p.n > 0 && memchr(old_p.p, 0, (size_t)old_p.n)) ||
+        (new_p.n > 0 && memchr(new_p.p, 0, (size_t)new_p.n))) return -EINVAL;
+    const char *oc = rt_cstr(old_p), *nc = rt_cstr(new_p);
+#ifdef _WIN32
+    /* rename() can't cross volumes or replace — MoveFileEx can both */
+    return MoveFileExA(oc, nc, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)
+        ? 0 : RT_GLE();
+#else
+    return rename(oc, nc) < 0 ? -(int64_t)errno : 0;
+#endif
+}
+
+#ifndef _WIN32
+static int64_t child_status(pid_t pid) {
+    int st;
+    while (waitpid(pid, &st, 0) < 0) {
+        if (errno == EINTR) continue;
+        return -(int64_t)errno;
+    }
+    if (WIFEXITED(st)) return WEXITSTATUS(st);
+    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
+    return st;
+}
+
+int64_t rt_proc_run(RtSlice argv, RtSlice env) {
+    if (argv.len < 1) return -EINVAL;
+    char **av = argv_c(argv);
+    if (!av) return -EINVAL;
+    char **ev = env_merge(env);
+    if (env.len > 0 && !ev) { argv_free(av); return -EIO; }
+    pid_t pid;
+    int rc = posix_spawnp(&pid, av[0], NULL, NULL, av, ev ? ev : environ);
+    argv_free(av);
+    env_merge_free(ev, env.len);
+    if (rc != 0) return -(int64_t)rc;   /* spawn failures report errno directly */
+    return child_status(pid);
+}
+
+int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
+    if (argv.len < 1) return -EINVAL;
+    char **av = argv_c(argv);
+    if (!av) return -EINVAL;
+    char **ev = env_merge(env);
+    if (env.len > 0 && !ev) { argv_free(av); return -EIO; }
+    int op[2] = { -1, -1 }, ep[2] = { -1, -1 };
+    if (pipe(op) < 0) {
+        int e = errno;
+        argv_free(av); env_merge_free(ev, env.len);
+        return -(int64_t)e;
+    }
+    if (pipe(ep) < 0) {
+        int e = errno;
+        close(op[0]); close(op[1]);
+        argv_free(av); env_merge_free(ev, env.len);
+        return -(int64_t)e;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, op[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, ep[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&fa, op[0]);
+    posix_spawn_file_actions_addclose(&fa, op[1]);
+    posix_spawn_file_actions_addclose(&fa, ep[0]);
+    posix_spawn_file_actions_addclose(&fa, ep[1]);
+    pid_t pid;
+    int rc = posix_spawnp(&pid, av[0], &fa, NULL, av, ev ? ev : environ);
+    posix_spawn_file_actions_destroy(&fa);
+    argv_free(av);
+    env_merge_free(ev, env.len);
+    close(op[1]);
+    close(ep[1]);
+    if (rc != 0) {
+        close(op[0]); close(ep[0]);
+        return -(int64_t)rc;
+    }
+    /* drain both pipes concurrently — a child that fills one pipe while
+     * the parent blocks reading the other deadlocks; poll covers both */
+    char *ob = NULL, *eb = NULL;
+    int64_t olen = 0, ocap = 0, elen = 0, ecap = 0;
+    int fds[2] = { op[0], ep[0] };
+    for (;;) {
+        if (fds[0] < 0 && fds[1] < 0) break;
+        struct pollfd pf[2];
+        for (int i = 0; i < 2; i++) {
+            pf[i].fd = fds[i];
+            pf[i].events = POLLIN;
+            pf[i].revents = 0;
+        }
+        if (poll(pf, 2, -1) < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        for (int i = 0; i < 2; i++) {
+            if (pf[i].fd < 0 || !pf[i].revents) continue;
+            char tmp[8192];
+            /* POLLHUP/ERR can still carry buffered data — read first */
+            ssize_t n = read(pf[i].fd, tmp, sizeof tmp);
+            if (n > 0) {
+                if (i == 0) bufcat(&ob, &olen, &ocap, tmp, n);
+                else bufcat(&eb, &elen, &ecap, tmp, n);
+            } else {
+                close(pf[i].fd);
+                fds[i] = -1;
+            }
+        }
+    }
+    int64_t st = child_status(pid);
+    out->ptr = ob;  out->len = olen;  out->cap = ocap;  out->heap = 1;
+    errb->ptr = eb; errb->len = elen; errb->cap = ecap; errb->heap = 1;
+    return st;
+}
+
+#else /* _WIN32 */
+
+/* CommandLineToArgvW-compatible quoting: quote when empty/space/tab/
+ * quote present; inside quotes, backslashes preceding a quote double,
+ * the quote escapes as \", and trailing backslashes double. */
+static char *win_quote(OxlStr a) {
+    int need = a.n == 0;
+    for (int64_t i = 0; i < a.n && !need; i++) {
+        char c = a.p[i];
+        if (c == ' ' || c == '\t' || c == '"') need = 1;
+    }
+    if (!need) return os_cstr(a);
+    char *b = xmalloc((size_t)a.n * 2 + 3), *w = b;
+    *w++ = '"';
+    int64_t bs = 0;
+    for (int64_t i = 0; i < a.n; i++) {
+        char c = a.p[i];
+        if (c == '\\') { bs++; continue; }
+        if (c == '"') {
+            /* a quote doubles the pending backslashes and takes one
+             * more to escape itself */
+            for (int64_t k = 0; k < 2 * bs + 1; k++) *w++ = '\\';
+        } else {
+            /* backslashes not preceding a quote are literal */
+            for (int64_t k = 0; k < bs; k++) *w++ = '\\';
+        }
+        bs = 0;
+        *w++ = c;
+    }
+    for (int64_t k = 0; k < 2 * bs; k++) *w++ = '\\';
+    *w++ = '"';
+    *w = 0;
+    return b;
+}
+
+static char *join_cmdline(RtSlice argv) {
+    char **q = xmalloc((size_t)argv.len * sizeof(char *));
+    size_t n = 1;
+    for (int64_t i = 0; i < argv.len; i++) {
+        q[i] = win_quote(((OxlStr *)argv.ptr)[i]);
+        n += strlen(q[i]) + 1;
+    }
+    char *b = xmalloc(n), *w = b;
+    for (int64_t i = 0; i < argv.len; i++) {
+        size_t l = strlen(q[i]);
+        memcpy(w, q[i], l);
+        w += l;
+        if (i + 1 < argv.len) *w++ = ' ';
+        free(q[i]);
+    }
+    *w = 0;
+    free(q);
+    return b;
+}
+
+/* Unicode env blocks must be sorted or CreateProcessW rejects them —
+ * case-insensitive primary key, codepoint order on ties (uppercase
+ * before lowercase, matching the system's own block layout) */
+static int wenv_cmp(const void *a, const void *b) {
+    const wchar_t *x = *(const wchar_t *const *)a;
+    const wchar_t *y = *(const wchar_t *const *)b;
+    int c = _wcsicmp(x, y);
+    return c ? c : wcscmp(x, y);
+}
+
+/* merged env as the sorted double-NUL wide block CreateProcessW
+ * expects (paired with CREATE_UNICODE_ENVIRONMENT) */
+static wchar_t *env_block_w(RtSlice env) {
+    char **m = env_merge(env);
+    if (!m) return NULL;
+    int64_t n = 0;
+    for (char **p = m; *p; p++) n++;
+    wchar_t **ws = xmalloc((size_t)n * sizeof *ws);
+    for (int64_t i = 0; i < n; i++) ws[i] = u2wz(m[i]);
+    qsort(ws, (size_t)n, sizeof *ws, wenv_cmp);
+    size_t total = 1;
+    for (int64_t i = 0; i < n; i++) total += wcslen(ws[i]) + 1;
+    wchar_t *b = xmalloc(total * sizeof *b), *o = b;
+    for (int64_t i = 0; i < n; i++) {
+        size_t l = wcslen(ws[i]);
+        memcpy(o, ws[i], l * sizeof *o);
+        o += l;
+        *o++ = 0;
+        free(ws[i]);
+    }
+    *o = 0;
+    free(ws);
+    env_merge_free(m, env.len);
+    return b;
+}
+
+int64_t rt_proc_run(RtSlice argv, RtSlice env) {
+    if (argv.len < 1) return -EINVAL;
+    char *cmd = join_cmdline(argv);
+    wchar_t *cmdw = u2wz(cmd);
+    wchar_t *envw = env_block_w(env);
+    if (env.len > 0 && !envw) {
+        free(cmd); free(cmdw);
+        return -EIO;
+    }
+    STARTUPINFOW si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION pi;
+    int64_t rc = 0;
+    if (!CreateProcessW(NULL, cmdw, NULL, NULL, TRUE,
+                        CREATE_UNICODE_ENVIRONMENT, envw, NULL, &si, &pi)) {
+        rc = RT_GLE();
+    } else {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD code = 0;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        rc = (int64_t)code;
+    }
+    free(cmd); free(cmdw); free(envw);
+    return rc;
+}
+
+typedef struct { HANDLE h; char *buf; int64_t len, cap; } RtDrain;
+static DWORD WINAPI drain_th(void *pv) {
+    RtDrain *d = pv;
+    char tmp[8192];
+    for (;;) {
+        DWORD n = 0;
+        if (!ReadFile(d->h, tmp, sizeof tmp, &n, NULL) || n == 0) break;
+        bufcat(&d->buf, &d->len, &d->cap, tmp, (int64_t)n);
+    }
+    return 0;
+}
+
+int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
+    if (argv.len < 1) return -EINVAL;
+    char *cmd = join_cmdline(argv);
+    wchar_t *cmdw = u2wz(cmd);
+    wchar_t *envw = env_block_w(env);
+    if (env.len > 0 && !envw) {
+        free(cmd); free(cmdw);
+        return -EIO;
+    }
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    HANDLE outR = NULL, outW = NULL, errR = NULL, errW = NULL;
+    if (!CreatePipe(&outR, &outW, &sa, 0)) {
+        DWORD e = GetLastError();
+        free(cmd); free(cmdw); free(envw);
+        return -((int64_t)e | RT_GLE_TAG);
+    }
+    SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);
+    if (!CreatePipe(&errR, &errW, &sa, 0)) {
+        DWORD e = GetLastError();
+        CloseHandle(outR); CloseHandle(outW);
+        free(cmd); free(cmdw); free(envw);
+        return -((int64_t)e | RT_GLE_TAG);
+    }
+    SetHandleInformation(errR, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = outW;
+    si.hStdError = errW;
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessW(NULL, cmdw, NULL, NULL, TRUE,
+                        CREATE_UNICODE_ENVIRONMENT, envw, NULL, &si, &pi)) {
+        DWORD e = GetLastError();
+        CloseHandle(outR); CloseHandle(outW);
+        CloseHandle(errR); CloseHandle(errW);
+        free(cmd); free(cmdw); free(envw);
+        return -((int64_t)e | RT_GLE_TAG);
+    }
+    CloseHandle(outW);
+    CloseHandle(errW);
+    /* two drain threads — same don't-block-one-pipe-on-the-other rule */
+    RtDrain d1 = { outR, NULL, 0, 0 }, d2 = { errR, NULL, 0, 0 };
+    HANDLE t1 = CreateThread(NULL, 0, drain_th, &d1, 0, NULL);
+    HANDLE t2 = CreateThread(NULL, 0, drain_th, &d2, 0, NULL);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    if (t1) { WaitForSingleObject(t1, INFINITE); CloseHandle(t1); }
+    if (t2) { WaitForSingleObject(t2, INFINITE); CloseHandle(t2); }
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(outR);
+    CloseHandle(errR);
+    free(cmd); free(cmdw); free(envw);
+    out->ptr = d1.buf;  out->len = d1.len;  out->cap = d1.cap;  out->heap = 1;
+    errb->ptr = d2.buf; errb->len = d2.len; errb->cap = d2.cap; errb->heap = 1;
+    return (int64_t)code;
+}
+#endif /* _WIN32 */
+
 /* ---------------- entry ---------------- */
 
 int main(int argc, char **argv) {
@@ -3003,6 +3516,22 @@ int main(int argc, char **argv) {
     /* select's uniform pick draws on rand() — seed per-process or every
      * run replays the same arm-pick sequence */
     srand((unsigned)(time(NULL) ^ oxl_pid()));
+#ifdef _WIN32
+    /* the CRT argv is ANSI-decoded — rebuild from the wide command
+     * line so UTF-8 args spawned via CreateProcessW reach argv() */
+    {
+        int wargc = 0;
+        LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+        if (wargv) {
+            char **u = xmalloc(((size_t)wargc + 1) * sizeof *u);
+            for (int i = 0; i < wargc; i++) u[i] = w2u(wargv[i]);
+            u[wargc] = NULL;
+            LocalFree(wargv);
+            argc = wargc;
+            argv = u;
+        }
+    }
+#endif
     rt_set_args(argc, argv);
     RtScope base;
     rt_scope_enter(&base);
