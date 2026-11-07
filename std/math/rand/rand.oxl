@@ -58,14 +58,20 @@ fn int31() -> int {
     return top(31)
 }
 
-/// intn returns a uniform value in [0, n). Draws the
-/// top 31 bits like drand48; the modulo bias is the same one
-// drand48 documents. A fatal err on n <= 0.
+/// intn returns a uniform value in [0, n). Draws the top 31
+/// bits and rejects draws at or above the largest multiple of n
+/// below 2^31, so every outcome is equally likely. A fatal err on
+/// n <= 0.
 fn intn(n: int) -> int {
     if n <= 0 {
         exit(1) // process-fatal is exit
     }
-    return top(31) % n
+    lim := 2147483648 - 2147483648 % n
+    v := top(31)
+    for v >= lim {
+        v = top(31)
+    }
+    return v % n
 }
 
 // (No `int` fn — a package member named `int` shadows the builtin
