@@ -1,5 +1,12 @@
 # Remaining work inventory (as of WI-0002)
 
+> **Pre-planning snapshot.** Captured at WI-0002 discovery
+> (2026-11-07), before the milestone map landed. Names below are the
+> *old* names — "Full self-hosting" is now **toolchain-in-oxl**
+> (milestone T), and the five small-debt items are filed as issues
+> #26–#30 (`polish` label). Authoritative current state:
+> `docs/specs/2026-11-07-phase-2-plan/plan.md`.
+
 Everything documented-but-unbuilt, grouped by how hard it is to schedule.
 
 ## Phase 2 roadmap items (`docs/product/roadmap.md`)
