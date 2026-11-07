@@ -2,17 +2,77 @@ name: release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# serializes main merges and tag pushes so version computation never races
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # tags + history for semver scan
+          persist-credentials: false
+      - id: v
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$REF_NAME" != "main" ]; then
+            echo "workflow_dispatch releases only from main" >&2
+            exit 1
+          fi
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag_sha=$(git rev-list -n1 "$REF_NAME")
+            # a v* tag may only release commits that are on main — otherwise a
+            # tag push could ship unreviewed code (fetch-depth:0 gives origin/main)
+            if ! git merge-base --is-ancestor "$tag_sha" origin/main; then
+              echo "tag $REF_NAME points at $tag_sha, which is not on main" >&2
+              exit 1
+            fi
+            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ -z "$EVENT_BEFORE" ] \
+          || [ "$EVENT_BEFORE" = "0000000000000000000000000000000000000000" ] \
+          || ! git cat-file -e "$EVENT_BEFORE^{commit}" 2>/dev/null; then
+            range="HEAD~1..HEAD"
+          else
+            range="$EVENT_BEFORE..$SHA"
+          fi
+          # recovery: a tag already on this sha (e.g. publish failed after
+          # tagging) is reused instead of burning another version
+          tag=$(git tag --points-at "$SHA" | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1 || true)
+          if [ -z "$tag" ]; then
+            tag=$(scripts/release-version.sh next "$range")
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
   release:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.version.outputs.sha }}
           persist-credentials: false # build/test steps run dep code; publish uses github.token directly
       - uses: dtolnay/rust-toolchain@stable
       - name: build oxl
@@ -31,7 +91,7 @@ jobs:
           cp LICENSE dist/oxl-toolchain/
           # the repo README documents building from oxl/ and other paths
           # the archive doesn't ship — give it release-specific steps
-          cat > dist/oxl-toolchain/README.md <<'EOF'
+          cat > dist/oxl-toolchain/README.md <<'EOF2'
           # oxl toolchain
 
           The `oxl` compiler plus `std/` library sources and `examples/` pilots.
@@ -42,10 +102,42 @@ jobs:
           ```
 
           `import "std/x"` resolves against `std/` next to the binary.
-          EOF
+          EOF2
           cd dist && tar czf oxl-toolchain-linux-x86_64.tar.gz oxl-toolchain
+      # tag creation happens AFTER the suite gate so a failed gate never burns
+      # a version; pushed via API because GITHUB_TOKEN tag pushes do not
+      # retrigger on:push:tags — publish runs in this same run
+      - name: tag commit
+        if: github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          SHA: ${{ needs.version.outputs.sha }}
+        run: |
+          set -eu
+          exists=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG" --jq length)
+          if [ "$exists" != "0" ]; then
+            ref_obj=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
+              --jq '.object | "\(.sha) \(.type)"')
+            actual=${ref_obj% *}
+            if [ "${ref_obj##* }" = "tag" ]; then
+              actual=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual" --jq .object.sha)
+            fi
+            if [ "$actual" != "$SHA" ]; then
+              echo "tag $TAG points at $actual, expected $SHA" >&2
+              exit 1
+            fi
+            echo "tag $TAG already exists on $SHA — reusing"
+            exit 0
+          fi
+          tag_obj=$(gh api "repos/$GITHUB_REPOSITORY/git/tags" \
+            -f tag="$TAG" -f message="release $TAG" \
+            -f object="$SHA" -f type=commit --jq .sha)
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$TAG" -f sha="$tag_obj"
       - name: github release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.version.outputs.tag }}
           files: dist/oxl-toolchain-linux-x86_64.tar.gz
           generate_release_notes: true
