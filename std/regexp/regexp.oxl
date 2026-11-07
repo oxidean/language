@@ -76,7 +76,17 @@ struct Span { s: int, e: int }
 struct Re { ins: []Inst, cls: []Cls, pat: str }
 
 // Par is the parser state.
-struct Par { s: str, pos: int, nodes: []Node, cls: []Cls }
+struct Par {
+    s: str,
+    pos: int,
+    nodes: []Node,
+    cls: []Cls,
+    depth: int,
+    qtail: int,
+    prep_lo: int,
+    prep_hi: int,
+    prep_lazy: int,
+}
 
 fn perr(msg: str) -> err {
     return errors.new("regexp: " + msg)
@@ -698,6 +708,13 @@ fn is_word_name(c: int) -> bool {
     return c >= 97 && c <= 122 || c >= 65 && c <= 90 || c >= 48 && c <= 57 || c == 95
 }
 
+// MAXNEST bounds group nesting: pa_group descends through
+// pa_alt -> pa_cat -> pa_rep -> pa_atom on the native stack, so a
+// pattern of attacker-controlled depth like ((((((… could exhaust
+// it before any syntax error returns. 256 is far beyond realistic
+// patterns and far under any sane stack, incl. pool threads.
+let MAXNEST = 256
+
 // pa_group parses `(…)` — `(?:`, `(?P<name>`, `(?<name>` all open
 // a plain group for a non-capturing engine; flag groups (?i) are
 // rejected as unsupported v1 surface.
@@ -738,7 +755,13 @@ fn pa_group(p: mut Par) -> [int, err] {
             p.pos = p.pos + 1
         }
     }
+    p.depth = p.depth + 1
+    if p.depth > MAXNEST {
+        p.depth = p.depth - 1
+        return 0, perr("expression too deeply nested")
+    }
     [ni, e] = pa_alt(p)
+    p.depth = p.depth - 1
     if e != nil {
         return 0, e
     }
@@ -749,10 +772,15 @@ fn pa_group(p: mut Par) -> [int, err] {
     return ni, nil
 }
 
-// pa_quoted consumes runes after \Q until \E or end, as a cat of
-// literal nodes.
+// pa_quoted consumes runes after \Q until \E or end. The cat of
+// all literals but the last is returned; the last literal index
+// goes to p.qtail so a following quantifier binds it alone — Go's
+// \Qab\E+ is ab+, not (ab)+. An empty \Q\E returns -1 with
+// qtail -1: transparent, so a following quantifier reaches the
+// preceding operand (pa_cat applies it via the pending rep).
 fn pa_quoted(p: mut Par) -> [int, err] {
     cur := -1
+    last := -1
     for p.pos < len(p.s) {
         if byteat(p.s, p.pos) == 92 && p.pos + 1 < len(p.s) && byteat(p.s, p.pos + 1) == 69 { // \E
             p.pos = p.pos + 2
@@ -763,15 +791,16 @@ fn pa_quoted(p: mut Par) -> [int, err] {
         }
         r := pnext(p)
         ni := pnode(p, Node{kind: N_LIT, ch: r, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0})
-        if cur < 0 {
-            cur = ni
-        } else {
-            cur = pnode(p, Node{kind: N_CAT, ch: 0, cidx: 0, a: cur, b: ni, lo: 0, hi: 0, lazy: 0})
+        if last >= 0 {
+            if cur < 0 {
+                cur = last
+            } else {
+                cur = pnode(p, Node{kind: N_CAT, ch: 0, cidx: 0, a: cur, b: last, lo: 0, hi: 0, lazy: 0})
+            }
         }
+        last = ni
     }
-    if cur < 0 {
-        cur = pnode(p, Node{kind: N_EMP, ch: 0, cidx: 0, a: 0, b: 0, lo: 0, hi: 0, lazy: 0})
-    }
+    p.qtail = last
     return cur, nil
 }
 
@@ -850,6 +879,8 @@ fn pa_rep(p: mut Par) -> [int, err] {
     if e != nil {
         return 0, e
     }
+    qt := p.qtail
+    p.qtail = -1
     repd := 0
     for p.pos < len(p.s) {
         b := byteat(p.s, p.pos)
@@ -889,7 +920,24 @@ fn pa_rep(p: mut Par) -> [int, err] {
             lazy = 1
             p.pos = p.pos + 1
         }
-        ni = pnode(p, Node{kind: N_REP, ch: 0, cidx: 0, a: ni, b: 0, lo: lo, hi: hi, lazy: lazy})
+        if qt >= 0 {
+            // a quantifier on \Q…\E binds its last literal alone
+            ri := pnode(p, Node{kind: N_REP, ch: 0, cidx: 0, a: qt, b: 0, lo: lo, hi: hi, lazy: lazy})
+            if ni < 0 {
+                ni = ri
+            } else {
+                ni = pnode(p, Node{kind: N_CAT, ch: 0, cidx: 0, a: ni, b: ri, lo: 0, hi: 0, lazy: 0})
+            }
+            qt = -1
+        } else if ni < 0 {
+            // transparent \Q\E — the rep reaches the preceding
+            // operand; pa_cat applies it (or errors if none).
+            p.prep_lo = lo
+            p.prep_hi = hi
+            p.prep_lazy = lazy
+        } else {
+            ni = pnode(p, Node{kind: N_REP, ch: 0, cidx: 0, a: ni, b: 0, lo: lo, hi: hi, lazy: lazy})
+        }
         repd = 1
         // a second quantifier on a quantified expr is an error —
         // `a**`, `a*+`, `a*{2}` (only a well-formed {} counts).
@@ -903,8 +951,14 @@ fn pa_rep(p: mut Par) -> [int, err] {
             }
         }
     }
-    if repd == 0 {
-        return ni, nil
+    if repd == 0 && qt >= 0 {
+        // quoted run ended without a quantifier — reattach the
+        // held-back last literal.
+        if ni < 0 {
+            ni = qt
+        } else {
+            ni = pnode(p, Node{kind: N_CAT, ch: 0, cidx: 0, a: ni, b: qt, lo: 0, hi: 0, lazy: 0})
+        }
     }
     return ni, nil
 }
@@ -920,6 +974,19 @@ fn pa_cat(p: mut Par) -> [int, err] {
         [ni, e] = pa_rep(p)
         if e != nil {
             return 0, e
+        }
+        if p.prep_lo >= 0 {
+            // rep deferred by a transparent \Q\E — binds the
+            // previous operand; with none it is the same error Go
+            // gives a leading `*`/`+`/`?`/`{m,n}`.
+            if cur < 0 {
+                return 0, perr("missing argument to repetition operator")
+            }
+            cur = pnode(p, Node{kind: N_REP, ch: 0, cidx: 0, a: cur, b: 0, lo: p.prep_lo, hi: p.prep_hi, lazy: p.prep_lazy})
+            p.prep_lo = -1
+        }
+        if ni < 0 {
+            continue
         }
         if cur < 0 {
             cur = ni
@@ -1154,7 +1221,7 @@ fn emit_rep(pg: mut Pg, ns: []Node, n: Node) -> err {
 /// compile parses pat and lowers it to an NFA program — Go's
 /// regexp.Compile shape: [Re, err].
 fn compile(pat: str) -> [Re, err] {
-    p := new(Par{s: pat, pos: 0, nodes: mkslice(Node, 0), cls: mkslice(Cls, 0)})
+    p := new(Par{s: pat, pos: 0, nodes: mkslice(Node, 0), cls: mkslice(Cls, 0), depth: 0, qtail: -1, prep_lo: -1, prep_hi: 0, prep_lazy: 0})
     [root, e] = pa_alt(p)
     if e != nil {
         return Re{ins: nil, cls: nil, pat: ""}, e
@@ -1350,7 +1417,7 @@ fn findat(re: ref Re, s: str, k: int) -> Span {
         if r.cs < 0 {
             addthread(r, 0, 0, pos, pos, prevr)
         }
-        if pos == len(s) {
+        if pos == len(s) || r.cs >= 0 && r.an == 0 {
             break
         }
         d := utf8.decode(s, pos)

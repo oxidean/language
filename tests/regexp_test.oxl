@@ -403,6 +403,70 @@ fn test_compile_errors() {
     testing.expect(e27 != nil, "err nested repeat too large")
 }
 
+fn test_quoted_rep() {
+    // a quantifier after \\Q…\\E binds the last literal only —
+    // Go's \\Qab\\E+ is ab+, not (ab)+.
+    r := must("\\Qab\\E+")
+    testing.expect_streq(r.find("abab"), "ab", "\\Qab\\E+ is ab+")
+    testing.expect_streq(r.find("abbb"), "abbb", "\\Qab\\E+ greedy")
+    testing.expect(!r.matchstr("a"), "\\Qab\\E+ needs b")
+    lz := must("\\Qab\\E+?")
+    testing.expect_streq(lz.find("abbb"), "ab", "\\Qab\\E+? lazy")
+
+    // \\Q\\E is transparent: a following rep reaches the previous
+    // operand — a\\Q\\E* is a*, x\\Q\\E{2} is x{2}.
+    s := must("a\\Q\\E*")
+    testing.expect_streq(s.find("aaa"), "aaa", "a\\Q\\E* = a*")
+    s2 := must("x\\Q\\E+")
+    testing.expect_streq(s2.find("xxb"), "xx", "x\\Q\\E+ = x+")
+    s3 := must("a\\Q\\E{2}")
+    testing.expect_streq(s3.find("aaa"), "aa", "a\\Q\\E{2} = a{2}")
+    testing.expect(!s3.matchstr("a"), "a\\Q\\E{2} floor")
+
+    // transparent with no operand and no rep — \\Q\\E vanishes.
+    e := must("x\\Q\\Ey")
+    testing.expect_streq(e.find("xy"), "xy", "x\\Q\\Ey = xy")
+    g := must("(\\Q\\E)*")
+    testing.expect(g.matchstr(""), "(\\Q\\E)* empty-group rep")
+    [r9, e9] = regexp.compile("\\Q\\E*")
+    testing.expect(e9 != nil, "err \\Q\\E*")
+    [r10, e10] = regexp.compile("|\\Q\\E*")
+    testing.expect(e10 != nil, "err |\\Q\\E*")
+    [r11, e11] = regexp.compile("a\\Q\\E**")
+    testing.expect(e11 != nil, "err a\\Q\\E** nested")
+}
+
+fn test_deep_nest() {
+    // group nesting caps at MAXNEST — a deeper input is a syntax
+    // error, not a stack overflow.
+    deep := ""
+    i := 0
+    for i < 300 {
+        deep = deep + "("
+        i = i + 1
+    }
+    i = 0
+    for i < 300 {
+        deep = deep + ")"
+        i = i + 1
+    }
+    [rd, ed] = regexp.compile(deep)
+    testing.expect(ed != nil, "err 300-deep nest")
+    ok := ""
+    i = 0
+    for i < 200 {
+        ok = ok + "("
+        i = i + 1
+    }
+    i = 0
+    for i < 200 {
+        ok = ok + ")"
+        i = i + 1
+    }
+    ro := must(ok)
+    testing.expect(ro.matchstr(""), "200-deep nest matches empty")
+}
+
 fn test_pathological() {
     // (x+x+)+y on x^30 with no y: exponential for a backtracker,
     // O(pat*input) for the Pike VM — finishing at all is the proof.
