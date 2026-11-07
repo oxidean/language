@@ -3135,7 +3135,32 @@ static char **env_merge(RtSlice env) {
     }
     for (int64_t j = 0; j < env.len; j++) r[w++] = os_cstr(((OxlStr *)env.ptr)[j]);
     r[w] = NULL;
+#ifdef _WIN32
+    free(base);   /* the w2u'd strings live on in r — only the array goes */
+#endif
     return r;
+}
+
+/* release an env_merge result: the trailing nov entries are always
+ * os_cstr copies; the kept base strings point into environ on POSIX
+ * but are w2u allocations on Windows, so there every entry frees */
+static void env_merge_free(char **ev, int64_t nov) {
+    if (!ev) return;
+    size_t n = 0;
+    while (ev[n]) n++;
+    size_t first = (nov >= 0 && (size_t)nov <= n) ? n - (size_t)nov : 0;
+#ifdef _WIN32
+    first = 0;
+#endif
+    for (size_t i = first; i < n; i++) free(ev[i]);
+    free(ev);
+}
+
+/* release an argv_c result — every string is an os_cstr copy */
+static void argv_free(char **av) {
+    if (!av) return;
+    for (size_t i = 0; av[i]; i++) free(av[i]);
+    free(av);
 }
 
 /* growable byte buffer for captured child output — xmalloc'd, process-
@@ -3203,9 +3228,11 @@ int64_t rt_proc_run(RtSlice argv, RtSlice env) {
     char **av = argv_c(argv);
     if (!av) return -EINVAL;
     char **ev = env_merge(env);
-    if (env.len > 0 && !ev) return -EIO;
+    if (env.len > 0 && !ev) { argv_free(av); return -EIO; }
     pid_t pid;
     int rc = posix_spawnp(&pid, av[0], NULL, NULL, av, ev ? ev : environ);
+    argv_free(av);
+    env_merge_free(ev, env.len);
     if (rc != 0) return -(int64_t)rc;   /* spawn failures report errno directly */
     return child_status(pid);
 }
@@ -3214,11 +3241,18 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
     if (argv.len < 1) return -EINVAL;
     char **av = argv_c(argv);
     if (!av) return -EINVAL;
+    char **ev = env_merge(env);
+    if (env.len > 0 && !ev) { argv_free(av); return -EIO; }
     int op[2] = { -1, -1 }, ep[2] = { -1, -1 };
-    if (pipe(op) < 0) return -(int64_t)errno;
+    if (pipe(op) < 0) {
+        int e = errno;
+        argv_free(av); env_merge_free(ev, env.len);
+        return -(int64_t)e;
+    }
     if (pipe(ep) < 0) {
         int e = errno;
         close(op[0]); close(op[1]);
+        argv_free(av); env_merge_free(ev, env.len);
         return -(int64_t)e;
     }
     posix_spawn_file_actions_t fa;
@@ -3229,11 +3263,11 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
     posix_spawn_file_actions_addclose(&fa, op[1]);
     posix_spawn_file_actions_addclose(&fa, ep[0]);
     posix_spawn_file_actions_addclose(&fa, ep[1]);
-    char **ev = env_merge(env);
-    if (env.len > 0 && !ev) return -EIO;
     pid_t pid;
     int rc = posix_spawnp(&pid, av[0], &fa, NULL, av, ev ? ev : environ);
     posix_spawn_file_actions_destroy(&fa);
+    argv_free(av);
+    env_merge_free(ev, env.len);
     close(op[1]);
     close(ep[1]);
     if (rc != 0) {
@@ -3364,7 +3398,7 @@ static wchar_t *env_block_w(RtSlice env) {
     }
     *o = 0;
     free(ws);
-    free(m);
+    env_merge_free(m, env.len);
     return b;
 }
 
@@ -3373,7 +3407,10 @@ int64_t rt_proc_run(RtSlice argv, RtSlice env) {
     char *cmd = join_cmdline(argv);
     wchar_t *cmdw = u2wz(cmd);
     wchar_t *envw = env_block_w(env);
-    if (env.len > 0 && !envw) return -EIO;
+    if (env.len > 0 && !envw) {
+        free(cmd); free(cmdw);
+        return -EIO;
+    }
     STARTUPINFOW si;
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
@@ -3382,15 +3419,20 @@ int64_t rt_proc_run(RtSlice argv, RtSlice env) {
     si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION pi;
+    int64_t rc = 0;
     if (!CreateProcessW(NULL, cmdw, NULL, NULL, TRUE,
-                        CREATE_UNICODE_ENVIRONMENT, envw, NULL, &si, &pi))
-        return RT_GLE();
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 0;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return (int64_t)code;
+                        CREATE_UNICODE_ENVIRONMENT, envw, NULL, &si, &pi)) {
+        rc = RT_GLE();
+    } else {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD code = 0;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        rc = (int64_t)code;
+    }
+    free(cmd); free(cmdw); free(envw);
+    return rc;
 }
 
 typedef struct { HANDLE h; char *buf; int64_t len, cap; } RtDrain;
@@ -3410,14 +3452,22 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
     char *cmd = join_cmdline(argv);
     wchar_t *cmdw = u2wz(cmd);
     wchar_t *envw = env_block_w(env);
-    if (env.len > 0 && !envw) return -EIO;
+    if (env.len > 0 && !envw) {
+        free(cmd); free(cmdw);
+        return -EIO;
+    }
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     HANDLE outR = NULL, outW = NULL, errR = NULL, errW = NULL;
-    if (!CreatePipe(&outR, &outW, &sa, 0)) return RT_GLE();
+    if (!CreatePipe(&outR, &outW, &sa, 0)) {
+        DWORD e = GetLastError();
+        free(cmd); free(cmdw); free(envw);
+        return -((int64_t)e | RT_GLE_TAG);
+    }
     SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);
     if (!CreatePipe(&errR, &errW, &sa, 0)) {
         DWORD e = GetLastError();
         CloseHandle(outR); CloseHandle(outW);
+        free(cmd); free(cmdw); free(envw);
         return -((int64_t)e | RT_GLE_TAG);
     }
     SetHandleInformation(errR, HANDLE_FLAG_INHERIT, 0);
@@ -3434,6 +3484,7 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
         DWORD e = GetLastError();
         CloseHandle(outR); CloseHandle(outW);
         CloseHandle(errR); CloseHandle(errW);
+        free(cmd); free(cmdw); free(envw);
         return -((int64_t)e | RT_GLE_TAG);
     }
     CloseHandle(outW);
@@ -3451,6 +3502,7 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
     CloseHandle(pi.hProcess);
     CloseHandle(outR);
     CloseHandle(errR);
+    free(cmd); free(cmdw); free(envw);
     out->ptr = d1.buf;  out->len = d1.len;  out->cap = d1.cap;  out->heap = 1;
     errb->ptr = d2.buf; errb->len = d2.len; errb->cap = d2.cap; errb->heap = 1;
     return (int64_t)code;
