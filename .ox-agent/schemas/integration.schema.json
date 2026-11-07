@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ox-agent.dev/schemas/integration.schema.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "name",
+    "adapter"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "adapter": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "spawn-cli",
+        "webhook"
+      ]
+    },
+    "command": {
+      "type": "string"
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "default": {
+      "type": "boolean"
+    },
+    "description": {
+      "type": "string"
+    },
+    "endpoint": {
+      "type": "string",
+      "description": "http(s) URL the webhook adapter posts the packet to"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "async",
+        "sync"
+      ],
+      "description": "async (default): remote writes output.json back; sync: response body is the output document"
+    },
+    "token_env": {
+      "type": "string",
+      "description": "name of the environment variable holding the bearer token (never the token itself)"
+    }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "adapter": {
+            "const": "webhook"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "endpoint"
+        ]
+      }
+    }
+  ]
+}

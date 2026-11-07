@@ -13,3 +13,6 @@ examples/gui-todo/todo
 
 # os_test residue (no file-delete builtin yet)
 oxl-ostest-*.txt
+
+# ox-agent generated context index — rebuild via `ox-agent context index`
+.ox-agent/context/index.yaml

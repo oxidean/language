@@ -1,0 +1,2 @@
+# The append-only event journal merges cleanly across branches with the union driver.
+state/events.ndjson merge=union

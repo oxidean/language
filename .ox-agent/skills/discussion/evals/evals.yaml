@@ -1,0 +1,27 @@
+schema_version: 1
+skill: ox-agent/discussion
+cases:
+  - id: summarize-thread
+    prompt: >-
+      Summarize the open discussion thread into positions, conclusions, and
+      remaining open points for discuss add/summarize.
+    expected:
+      output_schema_valid: true
+      positions_preserved: true
+      summary_compact: true
+  - id: thread-scope
+    prompt: >-
+      Record conclusions without writing state outside the thread files.
+    expected:
+      output_schema_valid: true
+      thread_scoped: true
+  - id: respects-scope
+    prompt: >-
+      Execute the skill using only the supplied work-item context and
+      constraints.
+    expected:
+      output_schema_valid: true
+      preserves_scope: true
+thresholds:
+  schema_pass_rate: 1.0
+  quality_pass_rate: 0.9

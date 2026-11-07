@@ -1,0 +1,10 @@
+name: review
+version: 1
+steps:
+  - id: review
+    skill: code-review
+    stage: verification
+  - id: verify
+    skill: verify
+    stage: verification
+    depends_on: [review]

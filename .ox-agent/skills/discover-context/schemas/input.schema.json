@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "skill",
+    "work_item_id",
+    "context",
+    "constraints"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "skill": {
+      "const": "ox-agent/discover-context"
+    },
+    "work_item_id": {
+      "type": "string"
+    },
+    "context": {
+      "type": "object"
+    },
+    "constraints": {
+      "type": "object"
+    }
+  }
+}

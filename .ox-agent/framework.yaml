@@ -1,0 +1,8 @@
+schema_version: 1
+framework:
+    name: ox-agent
+    distribution: standalone
+    binary: ox-agent
+    required_version: '>=0.1.0 <0.2.0'
+project:
+    name: language-oxagent

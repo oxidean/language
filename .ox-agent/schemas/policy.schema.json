@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ox-agent.dev/schemas/policy.schema.json",
+  "type": "object",
+  "required": ["schema_version", "autonomy", "approvals", "budgets"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "autonomy": { "type": "object", "required": ["profile_changes", "allow_downgrade"], "properties": { "profile_changes": { "const": "managed" }, "allow_downgrade": { "const": false } } },
+    "approvals": { "type": "object" },
+    "budgets": { "type": "object", "required": ["max_parallel_agents", "max_child_depth", "max_fix_cycles"], "properties": { "max_parallel_agents": { "type": "integer", "minimum": 1 }, "max_child_depth": { "type": "integer", "minimum": 0 }, "max_fix_cycles": { "type": "integer", "minimum": 0 } } }
+  },
+  "additionalProperties": true
+}

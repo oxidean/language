@@ -1,5 +1,0 @@
-# Agent OS Standards Index
-
-global:
-  language-principles:
-    description: Build-time conventions for the language project — ownership/reclamation, traps, errors, type system, concurrency, toolchain

@@ -1,0 +1,12 @@
+schema_version: 1
+autonomy:
+    profile_changes: managed
+    allow_downgrade: false
+approvals:
+    production_deploy: human
+    destructive_change: human
+    policy_change: human
+budgets:
+    max_parallel_agents: 4
+    max_child_depth: 1
+    max_fix_cycles: 3

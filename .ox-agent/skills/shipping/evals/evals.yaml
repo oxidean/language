@@ -1,0 +1,28 @@
+schema_version: 1
+skill: ox-agent/shipping
+cases:
+  - id: assess-readiness
+    prompt: >-
+      Assess ship-readiness against verification results and open policy
+      gates, returning a ship-readiness verdict.
+    expected:
+      output_schema_valid: true
+      gates_assessed: true
+      readiness_verdict: true
+  - id: escalate-gate
+    prompt: >-
+      Escalate with next_action.type escalate when a human approval gate
+      stands between the item and shipped.
+    expected:
+      output_schema_valid: true
+      escalates_for_approval: true
+  - id: respects-scope
+    prompt: >-
+      Execute the skill using only the supplied work-item context and
+      constraints.
+    expected:
+      output_schema_valid: true
+      preserves_scope: true
+thresholds:
+  schema_pass_rate: 1.0
+  quality_pass_rate: 0.9

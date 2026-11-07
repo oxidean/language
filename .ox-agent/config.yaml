@@ -1,0 +1,53 @@
+schema_version: 1
+project:
+    name: oxl
+    test_command: cargo build --release --manifest-path oxl/Cargo.toml && tests/run.sh oxl/target/release/oxl
+workflow:
+    default_profile: normal
+    profiles:
+        normal:
+            - discovery
+            - brainstorming
+            - specification
+            - planning
+            - implementation
+            - verification
+            - shipping
+            - retrospective
+skills:
+    enabled:
+        - discover-context
+        - brainstorm
+        - specify
+        - adr
+        - multi-stage-plan
+        - tdd
+        - implementation
+        - code-review
+        - verify
+        - discussion
+        - progress
+        - shipping
+        - retrospective
+    stage_skills:
+        brainstorming:
+            - brainstorm
+            - adr
+        discovery:
+            - discover-context
+        implementation:
+            - tdd
+            - implementation
+        planning:
+            - multi-stage-plan
+        retrospective:
+            - retrospective
+            - progress
+        shipping:
+            - shipping
+        specification:
+            - specify
+            - adr
+        verification:
+            - code-review
+            - verify
