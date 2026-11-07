@@ -1,16 +1,21 @@
 # oxl
 
-A lean, fast language for CLI tools and services — Go-shaped DX on a
-runtime with no tracing GC. Memory safety comes from dynamic
-ownership/borrow checking — with two v0 gaps: arena-backed slices stored
-in outer fields may be read after their scope closes, and ordinary `own`
-dereferences don't yet receive dangling checks; concurrency is
-structured (`scope`, `spawn`, channels); everything compiles ahead-of-time to native binaries through
-one toolchain binary.
+[![CI](https://github.com/oxidean/oxl/actions/workflows/ci.yml/badge.svg)](https://github.com/oxidean/oxl/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/oxidean/oxl)](https://github.com/oxidean/oxl/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Status: v0.0.1 bootstrap.** The compiler works end to end: programs in
-`examples/` compile to native binaries and run today — including the
-HTTP CRUD + SQLite pilot. See the roadmap below for what's v0 vs later.
+A lean, compiled language for CLI tools and services. Memory safety
+comes from dynamic ownership/borrow checking — no tracing GC, no static
+borrow checker; concurrency is structured (`scope`, `spawn`, channels);
+everything compiles ahead-of-time to native binaries through one
+toolchain binary.
+
+**Status: v0.2.0 released; the package/module system is on `main`.**
+The compiler works end to end — programs in `examples/` compile to
+native binaries today, including an HTTP CRUD + SQLite service and a
+GTK4 todo app — and the toolchain's own lexer, parser, checker, and C
+emitter are written in oxl and compile themselves (see
+`docs/self-hosting.md`).
 
 ## Design
 
@@ -18,19 +23,19 @@ HTTP CRUD + SQLite pilot. See the roadmap below for what's v0 vs later.
   design (the spec everything traces to)
 - `docs/semantics/` — ownership, concurrency, and compiler-interface
   contracts
-- `agent-os/specs/2026-11-03-0036-language-foundation/plan.md` — the
-  milestone plan and per-task status
+- `agent-os/specs/` — milestone plans and per-task status
 - `docs/prototype/report.md` — de-risking benchmarks (state-machine
   frames ~96 B/task; ownership checks ≈ free)
 
 ## Building the toolchain
 
-Requires: Rust (cargo), a C compiler (`cc`), and pthreads. Programs
-that use the sqlite3 shims also need sqlite3 dev headers (`-lsqlite3`
-is linked only when the emitted C calls them). Supported platforms: Linux
-(x86_64), macOS (aarch64), and Windows (x86_64, via MinGW gcc or
-LLVM clang — the runtime's `oxl_*` veneer in `runtime/rt.h` maps
-threads/sync to SRWLOCK+CONDITION_VARIABLE and sockets to WinSock2).
+Requires: a Rust toolchain (cargo) for the seed compiler, a C compiler
+(`cc`), and pthreads. Programs that use the sqlite3 shims also need
+sqlite3 dev headers (`-lsqlite3` is linked only when the emitted C calls
+it). Supported platforms: Linux (x86_64), macOS (aarch64), and Windows
+(x86_64, via MinGW gcc or LLVM clang — the runtime's `oxl_*` veneer in
+`runtime/rt.h` maps threads/sync to SRWLOCK+CONDITION_VARIABLE and
+sockets to WinSock2).
 
 ```sh
 cd oxl && cargo build --release && cd ..
@@ -88,18 +93,18 @@ fn main() {
 }
 ```
 
-Types `int float bool str cstr err chan` + user structs, `enum` tagged
-unions with `match`, slices `[]T`, function values/closures, and methods
-`fn (r T) m`; `own T` / `ref T` / `mut T` handles with runtime borrow
-checks and compile-time move tracking; `[v, err]` returns with
+Types `int float bool byte str cstr err chan` + user structs, `enum`
+tagged unions with `match`, slices `[]T`, function values/closures, and
+methods `fn (r T) m`; `own T` / `ref T` / `mut T` handles with runtime
+borrow checks and compile-time move tracking; `[v, err]` returns with
 dropped-error-as-compile-error; `defer`; `extern fn` C FFI;
 `scope`/`spawn`/`go` + `spawnBlocking` structured concurrency on a
 worker pool + blocking pool (suspend-capable functions compile to
 stackless state machines — tasks are ~96 B frames, not threads; see
 `docs/semantics/concurrency.md`); buffered channels `mkchan(n)` and
 `select` multi-channel wait; `break`/`continue`; `interface` op
-constraints; generics `fn f[T ordered](a: T, b: T)` monomorphized per
-call site; `import "std/strings"` modules with `as` aliases and
+constraints; generics `fn f[T any]`/`fn g[T cmp.Ordered]` monomorphized
+per call site; `import "std/strings"` modules with `as` aliases and
 `.{name, ...}` selection; top-level `let` globals
 (process-wide state, initialized before `main`); builtin surface: `print`,
 `itoa`, string ops, `mkbuf`/`poke*`, `argc`/`argv`, `readfile`/
@@ -137,7 +142,8 @@ Import resolution order:
 
 Packages under `internal/` may only be imported by code beneath the
 `internal` directory's parent. Import cycles are a compile error and
-print the cycle chain.
+print the cycle chain. And an import the file never references is a
+compile error too — unused imports do not build.
 
 ### Fetching dependencies
 
@@ -146,10 +152,10 @@ plus `git archive` of the resolved commit — canonical tree bytes, never
 a checkout) into the module cache, upserts the `require` line in
 `oxl.mod`, and pins both `h1:` hashes in `oxl.sum`. Queries: `@latest`
 (highest semver tag), `@vX.Y.Z` (a tag), or a branch/SHA (recorded as a
-Go-style pseudo-version). The cache is content-addressed
-(`<cache>/<escaped-path>@<version>/`, uppercase `!`-escaped like Go) and
-sealed read-only; every build verifies a cached module against
-`oxl.sum` — a tampered or missing entry fails with Go's
+pseudo-version, `v0.0.0-<timestamp>-<sha>`). The cache is
+content-addressed (`<cache>/<escaped-path>@<version>/`, uppercase
+letters `!`-escaped) and sealed read-only; every build verifies a cached
+module against `oxl.sum` — a tampered or missing entry fails with
 `checksum mismatch` / `missing oxl.sum entry` diagnostics. `replace`
 directories bypass cache and sums by design. Private repos work through
 git's own auth (ssh agent, credential helpers); `git` is a toolchain
@@ -206,7 +212,7 @@ curl localhost:8080/items                      # → {"items":[{"id":1,"name":"w
 ## Repo layout
 
 ```
-oxl/          the compiler (Rust): lexer → parser → check → codegen → C → cc
+oxl/          the seed compiler (Rust): lexer → parser → check → codegen → C → cc
 runtime/       rt.c/rt.h — arenas, ObjHdr checks, scopes/traps, executor, channels
 docs/          design doc, semantics annex, prototype report
 std/           the standard library, written in the language (strings, testing, http/net, json, csv, base64, hex, binary, sync, time, os, errors, io, bytes, bufio, fmt, strconv, path, filepath, sort, slices, maps, cmp, math, rand, unicode/utf8, flag, log, net, net/http, hash, crypto/{sha256,md5,hmac}, collections, regexp)
