@@ -89,6 +89,10 @@ out=$("$OXL" run examples/hello.oxl)
 "$OXL" build examples/hello.oxl -o "$scratch/hello$EXE" || { echo "FAIL hello build"; exit 1; }
 echo "  hello.oxl binary: $(wc -c <"$scratch/hello$EXE") bytes"
 
+# the README's language-surface example lives at examples/http-hello —
+# build it so the doc snippet can't drift from what compiles
+"$OXL" build examples/http-hello/main.oxl -o "$scratch/http-hello$EXE" || { echo "FAIL http-hello build"; exit 1; }
+
 echo "== features =="
 out=$("$OXL" run examples/features.oxl)
 [ "$(tail -1 <<<"$out")" = "done" ] || { echo "FAIL features"; exit 1; }

@@ -1,0 +1,38 @@
+package main
+
+// Minimal HTTP service on std — the README's language-surface example.
+// Keep the two in sync.
+//
+//   oxl run examples/http-hello/main.oxl
+//   curl localhost:8080/hello/oxl → {"message":"hello, oxl","from":"oxl"}
+import "std/encoding/json"
+
+import "std/net/http"
+
+import "std/strings"
+
+struct App { name: str }
+
+fn greet(path: str) -> str {
+    who := substr(path, len("/hello/"), len(path))
+    who = strings.trim(who)
+    if who == "" {
+        who = "world"
+    }
+    return "hello, " + who
+}
+
+fn (a App) route(method: str, path: str, body: str) -> http.Resp {
+    if method == "GET" && strings.startswith(path, "/hello/") {
+        r := json.jobj()
+        json.jadd(r, "message", json.jstr(greet(path)))
+        json.jadd(r, "from", json.jstr(a.name))
+        return http.Resp{status: 200, body: json.tojson(r) + "\n", ctype: "application/json"}
+    }
+    return http.Resp{status: 404, body: "{\"error\":\"not found\"}\n", ctype: "application/json"}
+}
+
+fn main() {
+    println("listening on :8080")
+    http.serve(8080, App{name: "oxl"})
+}

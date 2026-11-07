@@ -76,26 +76,44 @@ oxl list -m all               # same build list (alias)
 oxl lsp                        # stdio LSP: diagnostics, hover, goto-definition
 ```
 
-## Language surface (v0)
+## Language surface
+
+A complete program — a tiny HTTP service built on `std`, compiled by
+`oxl run` to a native binary that answers `GET /hello/<who>`:
 
 ```oxl
-struct Point { x: int, y: int }
+package main
 
-fn fail(b: bool) -> [int, err] {
-    if b { return 0, 1 }
-    return 42, nil
+import "std/encoding/json"
+
+import "std/net/http"
+
+import "std/strings"
+
+struct App { name: str }
+
+fn greet(path: str) -> str {
+    who := substr(path, len("/hello/"), len(path))
+    who = strings.trim(who)
+    if who == "" {
+        who = "world"
+    }
+    return "hello, " + who
+}
+
+fn (a App) route(method: str, path: str, body: str) -> http.Resp {
+    if method == "GET" && strings.startswith(path, "/hello/") {
+        r := json.jobj()
+        json.jadd(r, "message", json.jstr(greet(path)))
+        json.jadd(r, "from", json.jstr(a.name))
+        return http.Resp{status: 200, body: json.tojson(r) + "\n", ctype: "application/json"}
+    }
+    return http.Resp{status: 404, body: "{\"error\":\"not found\"}\n", ctype: "application/json"}
 }
 
 fn main() {
-    [v, err] = fail(false)
-    if err != nil { return }
-    println(itoa(v))
-
-    ch := mkchan()
-    scope {
-        spawn send(ch, 7)
-        println(itoa(recv(ch)))
-    }
+    println("listening on :8080")
+    http.serve(8080, App{name: "oxl"})
 }
 ```
 
@@ -192,6 +210,7 @@ already in sync tidies offline.
 | `examples/features.oxl` | structs, `own`/`mut`, `[v,err]`, FFI, scope/spawn/channels |
 | `examples/cli/main.oxl` | CLI pilot: argv, string ops, error paths |
 | `examples/http-crud-sqlite/main.oxl` | the flagship pilot: HTTP server + SQLite + per-connection tasks |
+| `examples/http-hello/main.oxl` | the minimal `std/net/http` service shown above |
 | `examples/smoke_test.oxl` | `oxl test` scoped test harness |
 | `tests/stdlib_test.oxl` | stdlib + break/continue coverage |
 | `tests/stdmods_test.oxl` | `std/encoding/json`, `std/sync`, `std/time` end-to-end |
