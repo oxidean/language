@@ -15,7 +15,7 @@ Per-file rule: each file's import list is judged against that file's
 decls only. One diag per unused binding, in source order; the compile
 still aborts (loud → `None` / `load_fail`).
 
-## Task 1 — Rust (`oxl/src/`)
+## Task 1 — seed (`oxl/src/`)
 
 1. Parser (`parser.rs`): after `as`, accept `P::Underscore` →
    `alias = Some("_")` (today `_` lexes as Underscore, not Ident —

@@ -14,7 +14,7 @@ entirely. This is the "core packages" bulk of the ask.
   the pilot's raw calls migrate behind it.
 - `std/net/http` — moved from `std/http` (S1), rebuilt on `std/net` +
   `std/io` + `std/bufio`: `serve(port, handler)` keeps today's shape;
-  `Client`/`get`/`post` is the growth (Go's `http.Get` equivalent —
+  `Client`/`get`/`post` is the growth (one-shot client calls —
   client-side HTTP on `net.dial`).
 - `std/encoding/json` — moved (S1); add `encode`/`decode` over
   `io.Reader/Writer` signatures where sensible.

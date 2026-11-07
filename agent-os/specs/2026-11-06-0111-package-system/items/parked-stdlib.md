@@ -1,4 +1,4 @@
-# Parked — Go stdlib packages deliberately out of reach
+# Parked — core-library areas deliberately out of reach
 
 "Full functional match as much as logically possible" — these are the
 honest bounds. Each says why it doesn't map or doesn't pay yet. None
@@ -20,9 +20,11 @@ machinery they need.
 
 - `crypto/tls`, `x509`, `crypto/{rsa,ecdsa,ed25519}` — a TLS stack is
   a project, not a package. `std/crypto` v1 = hash+HMAC (S4).
-- `plugin`, `go/*` (ast/parser/token), `runtime` internals,
+- Plugin loading, compiler-self packages (ast/parser/token class),
+  `runtime` internals,
   `runtime/pprof` — runtime/codecs introspection doesn't exist.
-- `unsafe` (Go sense) — oxl `unsafe` is an ownership-check opt-out
+- `unsafe` in the memory-unsafe sense — oxl `unsafe` is an
+  ownership-check opt-out
   block, not `Pointer` arithmetic.
 
 ## Replaced by language semantics — porting them would be wrong
@@ -34,7 +36,7 @@ machinery they need.
   possible later but not a parity blocker.
 - `os/exec`, `os/signal` — process/signal surface exists in `rt.c`
   but is runtime-owned; a thin `std/os` growth covers what's needed
-  without a Go `exec.Cmd` clone.
+  without a process-exec API.
 
 ## Doesn't pay at this scale
 

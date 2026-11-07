@@ -4,7 +4,7 @@
 
 A module is a *file*. `load_mod` qualifies decls by file stem, so a
 "package" can never span files, `bootstrap/` can never hold 4 related
-tools, and import paths leak filesystem detail. Go's unit is the
+tools, and import paths leak filesystem detail. The unit is the
 directory; ours has to match for `std/` to restructure (S1) and for
 `oxl.mod` (M2) to have something to point at.
 
@@ -26,7 +26,7 @@ directory; ours has to match for `std/` to restructure (S1) and for
   duplicate-decl error.
 - `package main` + `fn main` = command. `oxl run x.oxl` on a loose
   file requires `package main`; multiple file args = all same dir +
-  same package (Go's file-list rule).
+  same package (the directory is the unit).
 - No decl-level visibility — every decl is visible to importers
   (shape.md explains why capitalization can't carry it; `internal/`
   in M2 is the encapsulation tool).

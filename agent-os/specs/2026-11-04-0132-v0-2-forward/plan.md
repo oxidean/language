@@ -80,7 +80,7 @@ self-compiles, and its diagnostics are diffed against `oxl`'s by the
 `tests/diag/` differential corpus in `tests/run.sh` (landed with the
 for-loop move check + import-error format alignment). Documented
 deltas, not parity gaps: `std/` resolution outside the repo tree (the
-Rust driver falls back to the toolchain exe's ancestors — no self-host
+The seed driver falls back to the toolchain exe's ancestors — no self-host
 equivalent), `[parse]`/`[lex]` kinds (self-host tags them `[check]`),
 and a few shared silence cases neither checker catches.
 
@@ -114,13 +114,13 @@ moderate size.
 ### Task D3: methods + interface dispatch [done]
 
 `items/d3-methods-interfaces.md`. `impl`-style methods and interface-
-typed values. The biggest type-system item; keep shallow (Go-style
+typed values. The biggest type-system item; keep shallow (structural
 structural interfaces, no trait solving).
 
 ### Task D4: shape-based generics [deferred — spec-sanctioned slip]
 
 `items/d4-shape-generics.md`. Design doc's preferred instantiation
-(gcshape stenciling — share code per memory layout, not per type).
+(shape stenciling — share code per memory layout, not per type).
 Full monomorphization works today; this is a compile-time/binary-size
 optimization. Slipped per spec: measured 2026-11-05 — 3 generic defs,
 ~0 instantiations in-corpus; win is nil at v0 scale (see item doc).

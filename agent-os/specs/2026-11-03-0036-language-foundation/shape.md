@@ -16,10 +16,10 @@ All design decisions live in the approved design doc —
 - Static types, explicit at boundaries, inferred inside bodies
 - Dynamic ownership/borrow checking (no GC, no static borrow checker);
   hybrid reclamation; scope-contained traps; aliasing + dangling coverage
-- Go-shaped concurrency surface on stackless coroutines;
+- Structured concurrency surface on stackless coroutines;
   executor-as-library
-- Go-style `[v, err]` errors; dropped error = compile error
-- Go-style generics; constants-only comptime; no macros
+- `[v, err]` error returns; dropped error = compile error
+- Constraint-interface generics; constants-only comptime; no macros
 - v0.0.1 = CLI + services; GUI (all three paths) and web deferred
 - Execution: single driver + parallel agent worktrees; milestone-gated
 

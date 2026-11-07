@@ -7,7 +7,7 @@
 (remaining-gap section). Reference implementation: `oxl/src/codegen.rs`
 (lines noted per task).
 
-**Constraint:** emitted C must match the Rust backend's ABI — same
+**Constraint:** emitted C must match the seed backend's ABI — same
 `RtIface` layout, `o_vt_*`/`o_vtt_*`/`o_vret_*`/`o_f_<inst>` names —
 the runtime can't tell which compiler emitted it.
 
@@ -22,9 +22,9 @@ receiver param) and `x.m()` has no dispatch at all.
   `struct o_s_T`, own/ref/mut → `struct o_s_T*`).
 - `gcall`/`xty_call`: when `f` is `Node.Field{obj,m}` and `name` isn't a
   plain fn → `check.method_target(ck, gsub(xty(obj)), m)`. `mt.k==1` →
-  `o_f_<q>` with receiver as arg0 adapted by `adapt_recv` (Rust
+  `o_f_<q>` with receiver as arg0 adapted by `adapt_recv` (codegen.rs
   2224-2246: value-want + ptr-got → `(*e)`; ptr-want + value-got → `(&e)`).
-  Bare `m(x,..)` → `mt.k==1` on args[0] without adapt (Rust 2187-2195).
+  Bare `m(x,..)` → `mt.k==1` on args[0] without adapt (codegen.rs:2187-2195).
 - `xty_call`: `k==1` ret = sig.retk/ret1, generic sigs subst'd by call
   bindings (recv+args vs sig.params via `check.bind_vars`).
 
@@ -34,7 +34,7 @@ both call shapes, enum receiver — emits, cc builds, runs.
 ## Task 2 — monomorphization
 
 codegen.oxl currently skips `typarams` entirely. Port `insts`/
-`inst_done`/`inst_name`/`call_bindings`/`func_inst` (Rust 373-388,
+`inst_done`/`inst_name`/`call_bindings`/`func_inst` (codegen.rs:373-388,
 549-600) over check.oxl primitives (`subst_ty`, `bind_vars`,
 `FnSig.typarams`).
 
@@ -55,26 +55,26 @@ runs.
 ## Task 3 — RtIface / vtables
 
 - `gcty`: `k_iface()` → `"RtIface"`.
-- `conv(g, e, want)` (Rust 2250-2268): want-iface → got Err `"{0,0}"`,
+- `conv(g, e, want)` (codegen.rs:2250-2268): want-iface → got Err `"{0,0}"`,
   same iface passthrough, other iface rewrap `iface:<g>` implkey,
   concrete → `iface_wrap` (ptr impls hand data over; values box via
-  `rt_alloc_own` — Rust 2270-2295). Call sites mirror Rust: let/global
+  `rt_alloc_own` — codegen.rs:2270-2295). Call sites mirror the seed emitter: let/global
   init, assign, return, call args (sig/vtab/method params), struct +
   enum literal fields, slice elem.
-- `mt.k==2` → vtab call (Rust 2364-2384): `({ RtIface _iv = <obj>;
+- `mt.k==2` → vtab call (codegen.rs:2364-2384): `({ RtIface _iv = <obj>;
   ((ret (*)(void*, params...))_iv.vtab[i])(_iv.data, args); })` —
   pair-ret casts to `struct o_vret_<W>_<m>`; args conv'd to declared
   `mt.ps`. `xty_call` ret from `mt.rk/r1`.
 - `o_vret_<W>_<m>` decls in `genall` for pair-ret iface methods.
-- `emit_vtabs` (Rust 2041-2160): per `(w, implkey)` in `vtab_uses`
+- `emit_vtabs` (codegen.rs:2041-2160): per `(w, implkey)` in `vtab_uses`
   (insertion-ordered list + dedup map) — thunk per method
   (`o_vtt_<w>_<impl>_<i>`) + `o_vt_<w>_<impl>[]`. Concrete impl:
   receiver-normalize `(*cn*)_d`/`((cn*)_d)`, forward to `o_f_<T>_<m>`
-  or `o_f_<inst>` via `vtab_bind` (generic impl, Rust 2005-2016);
+  or `o_f_<inst>` via `vtab_bind` (generic impl, codegen.rs:2005-2016);
   pair-ret wraps `o_ret_` → `o_vret_`. `iface:` impls forward through
   the source pair's matching vtab slot.
-- `seed_vtab_insts` in the inst fixpoint (Rust 2018-2037).
-- `==`/`!=` on iface → compare `.data` (Rust 1585-1595).
+- `seed_vtab_insts` in the inst fixpoint (codegen.rs:2018-2037).
+- `==`/`!=` on iface → compare `.data` (codegen.rs:1585-1595).
 
 Verify: `tests/methods.oxl` + http pilot emit, build, run identically.
 

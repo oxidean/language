@@ -9,7 +9,8 @@ anything else.
 
 ## Design sketch
 
-`oxl.mod` at the module root — Go grammar, renamed:
+`oxl.mod` at the module root — the established manifest grammar,
+renamed:
 
 ```
 module github.com/oxidean/app
@@ -28,12 +29,12 @@ replace github.com/oxidean/widget => ../widget
   noted deferral).
 - Root discovery: walk up from the entry file/cwd to the first
   `oxl.mod`. None found → module mode off: only `oxl run`/`fmt`/file
-  args work, and only `std` imports resolve (Go-without-go.mod
+  args work, and only `std` imports resolve (module mode off —
   behavior).
 - This repo migrates with the item: root `oxl.mod` declares
   `module oxl`, and M1's bare-path imports (`bootstrap/check`,
   `tests/d5a`) rewrite to `oxl/bootstrap/check`, `oxl/tests/d5a` —
-  Go has no module-relative bare imports, so rule 2 below covers
+  there are no module-relative bare imports, so rule 2 below covers
   every in-repo path once the prefix lands.
 - Resolution order for import path `P` in file `F`:
   1. `std/...` → toolchain std root (shipped tree found via exe
@@ -67,7 +68,7 @@ replace github.com/oxidean/widget => ../widget
   ../widget`; `import "github.com/oxidean/widget/thing"` resolves to
   the replaced dir; `widget` code itself builds
 - `cannot find package`, `missing module`, `import cycle`, and
-  `internal/` violations each produce corpus'd diagnostics — Rust +
+  `internal/` violations each produce corpus'd diagnostics — seed +
   self-hosted checker agree
 - Module with an unimported require compiles and emits nothing for it
 - `oxl 9.9` floor errors cleanly on a v0.3 toolchain

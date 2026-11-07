@@ -10,8 +10,8 @@ there: a cache, a fetcher, and integrity pinning.
 - Cache: `$OXLMODCACHE`, default `~/.oxl/mod`
   (`%LOCALAPPDATA%\oxl\mod` on Windows — reuse the E3 path veneer).
   Layout `<cache>/<escaped-path>@<version>/` — path elements
-  `!`-escaped on case-folding chars like Go's `module.EscapePath`.
-  Cache dirs read-only (`a-w`) — corruption-by-edit is a real Go
+  `!`-escaped on case-folding chars (the established escape scheme).
+  Cache dirs read-only (`a-w`) — corruption-by-edit is a real
   footgun worth pre-empting.
 - `oxl get <path>@<query>`:
   - `@latest` → highest semver tag in the repo
@@ -21,18 +21,19 @@ there: a cache, a fetcher, and integrity pinning.
     `git archive <resolved-sha>` extracted into the cache — canonical
     tree content, never a checkout, so `core.autocrlf` / smudge
     filters can't fork the bytes; `export-ignore` is honoured, as in
-    Go module zips) — same model as the Go module proxy; `git` binary
+    upstream module archives) — the module-proxy model applied to git;
+    `git` binary
     is a documented toolchain dependency for `get` only.
   - Adds/updates the `require` line in `oxl.mod` and refreshes
     `oxl.sum`.
 - `oxl.sum`: one line per module: `<path> <ver> h1:<b64-sha256>` —
   hash of the deterministic dir tree (sorted relpaths + contents,
-  same idea as Go's dirhash) plus `<path> <ver>/mod h1:<...>` for the
+  dirhash) plus `<path> <ver>/mod h1:<...>` for the
   manifest itself. One procedure serves both sides: it runs over the
   extracted archive at `get` time and over the cached dir at load
   time — identical inputs, since the cache is the archive extracted
   byte-for-byte. Verified on every load: cached dir whose hash
-  mismatches → `checksum mismatch` (Go wording).
+  mismatches → `checksum mismatch`.
 - Private repos work through git's own auth (ssh agent, credential
   helper) — nothing oxl-specific needed; document that.
 - `replace` dirs bypass cache + sum entirely (local code is already
@@ -66,7 +67,7 @@ V1 (queries need semver; MVS runs over the fetched manifests).
   extraction anyway. The same rule covers case-folding collisions —
   an archive containing both `Icon.png` and `icon.png` is rejected
   before extraction (a tree one filesystem can hold and another
-  can't is unportable by definition; Go enforces the identical
+  can't is unportable by definition; the model enforces the identical
   restriction in module zips). Every component is also validated on
   all platforms against Windows-reserved device names — `CON`,
   `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, matched

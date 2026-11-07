@@ -8,18 +8,20 @@
 
 ## Prior art studied during design
 
-- **Go** — surface model: DX, `[v, err]` errors, generics shape, gcshape
+- Scripting-class managed languages — surface model: DX, `[v, err]`
+  errors, generics shape, shape
   stenciling, goroutines/channels (and its runtime-weight failure mode)
-- **Zig** — lean runtime philosophy, error unions, comptime discipline,
+- Lean systems languages — runtime philosophy, error unions, comptime
+  discipline,
   colorless stackless async precedent; preferred compiler implementation
   language
-- **Rust `RefCell<T>`** — existence proof for runtime borrow-rule
+- **Interior-mutability types** — existence proof for runtime borrow-rule
   enforcement
-- **Swift dynamic exclusivity** — shipped precedent for runtime
+- **Dynamic exclusivity enforcement** — shipped precedent for runtime
   aliasing/exclusivity traps
-- **Vale generational references** — precedent for runtime dangling
+- **Generational references** — precedent for runtime dangling
   checks
-- **Rust async / embassy** — stackless coroutine state machines and
+- **Stackless async runtimes** — coroutine state machines and
   minimal single-thread executors
 
 ## Codebase references

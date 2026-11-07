@@ -1,22 +1,23 @@
-# D4 — Shape-based generics (gcshape stenciling)
+# D4 — Shape-based generics (shape stenciling)
 
 ## Problem
 
 Today every concrete call site gets a full monomorphized copy —
 `Max[int]` and `Max[int64]` are separate functions. Works, but:
 binary bloat + compile time grow linearly with instantiations. The
-design doc's preferred implementation is Go's gcshape stenciling:
+design doc's preferred implementation is shape stenciling:
 share code per *memory shape*, not per type.
 
 ## Design sketch
 
-- Classify each concrete type argument by gcshape (Go's term):
+- Classify each concrete type argument by shape:
   pointer-shaped, word-sized int, f64, or aggregate-specific
 - Instantiate one function per distinct *shape signature*, not per
   type signature — `Max[int]`/`Max[int64]`/`Max[own X]` can share the
   same emitted body when their shapes coincide
 - Runtime type identity: generic fns get a hidden shape descriptor
-  (Go passes itab/dictionary params; C backend can pass a `void*`-sized
+  (upstream designs pass iface-table/dictionary params; our C backend
+  can pass a `void*`-sized
   descriptor or specialize only the ops that differ)
 - Fallback: full monomorphization stays for types whose ops differ
   semantically (the constraint ops are the shape-breaking part)
@@ -36,7 +37,7 @@ share code per *memory shape*, not per type.
 
 ## Risks
 
-- The dictionary-passing machinery is the fiddly part (Go's itab);
+- The dictionary-passing machinery is the fiddly part;
   the win is real but the complexity-per-benefit is low at v0 scale —
   spec honestly says: do it when generic usage is heavy enough to
   measure, not before.
@@ -52,4 +53,4 @@ contains **zero** shared-shape instantiation groups worth stenciling —
 cost at this volume is nil; dictionaries + shape descriptors would be
 pure complexity. Revisit when generic definitions or emitted
 instantiations reach an order of magnitude more (rough threshold:
-hundreds of mono'd bodies sharing a gcshape in one compile).
+hundreds of mono'd bodies sharing a shape in one compile).

@@ -8,7 +8,7 @@ feature early adopters hit within minutes of opening a file.
 
 ## Design sketch
 
-- Position index: after check, walk the merged crate collecting
+- Position index: after check, walk the merged AST collecting
   `(file,line,col) → decl` — fn sigs, struct fields, locals (from the
   typed env), globals, imports
 - `textDocument/hover` → the decl's signature text (fn sig, struct
@@ -31,5 +31,5 @@ Nothing — pure `main.rs` tooling work over the existing checker data.
 ## Risks
 
 - Imported-file spans must map back to *their* files, not the merged
-  crate's — the import-resolution span bookkeeping is the fiddly part
+  unit's — the import-resolution span bookkeeping is the fiddly part
   (diagnostics already do this; reuse it).

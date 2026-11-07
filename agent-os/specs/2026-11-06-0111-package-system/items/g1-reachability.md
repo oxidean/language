@@ -4,7 +4,7 @@
 
 The merged AST emits *everything*: every fn in every imported package
 reaches the binary whether called or not. Unused imports are now
-errors (M3), but *used* packages still drag their dead fns. Go's
+errors (M3), but *used* packages still drag their dead fns.
 linker GCs this by default; ours must too — "no bloat" is the user's
 requirement, not a nice-to-have.
 
@@ -30,7 +30,7 @@ requirement, not a nice-to-have.
   skipped).
 - Both backends: `codegen.rs` and `codegen.oxl` — identical marking,
   identical output; the self-compile byte-identity gate catches drift.
-- Always on (Go-default). `-gc-off` debug escape hatch noted but not
+- Always on. A `-gc-off` debug escape hatch is noted but not
   required.
 
 ## Acceptance

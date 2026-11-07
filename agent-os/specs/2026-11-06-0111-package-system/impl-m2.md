@@ -96,7 +96,7 @@ declares `extern fn rt_getenv(name: str) -> str`. Modcache dir:
 
 ## Tasks
 
-- **M2.1** Rust: manifest parser, `find_root`, `ModCtx`, resolution
+- **M2.1** seed: manifest parser, `find_root`, `ModCtx`, resolution
   rewrite, internal/ + cycle checks, `oxl <ver>` floor vs
   `env!("CARGO_PKG_VERSION")` (Cargo.toml → `0.3.0`).
 - **M2.2** `.oxl`: `rt_getenv` extern (rt.c/rt.h + codegen extern ok

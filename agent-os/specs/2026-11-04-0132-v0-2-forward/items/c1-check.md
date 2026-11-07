@@ -27,7 +27,7 @@ Port `oxl/src/check.rs` rule-for-rule:
   "ok" — matching `oxl build`'s errors on the example corpus
 - Self-application: `check.oxl` checks `parser.oxl` (the real AST
   corpus, ~450 lines) — error-free
-- Differential test in `tests/run.sh`: same `.oxl` file, Rust
+- Differential test in `tests/run.sh`: same `.oxl` file, seed
   checker's diagnostics == self-hosted checker's diagnostics
 
 ## Depends on
@@ -39,7 +39,7 @@ Port `oxl/src/check.rs` rule-for-rule:
 ## Risks
 
 - Rule drift: two checkers is a fork — mitigate with the differential
-  test; the Rust one stays the reference until C2 completes the chain.
+  test; the seed one stays the reference until C2 completes the chain.
 - Volume: ~900 lines of checker to port — the largest single .oxl
   file written so far; will surface real DX gaps (that's the point —
   log them as they appear).

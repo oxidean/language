@@ -3,18 +3,18 @@
 ## Problem
 
 `stdlib/` is 8 flat files. Under directory packages it must become a
-tree — and this is the moment to lay it out on Go's paths so the
+tree — and this is the moment to lay it out on canonical paths so the
 growth in S2-S5 lands in the right places.
 
 ## Design sketch
 
 - `stdlib/` → `std/` at repo/toolchain root; each module a dir with
   `package <name>` files.
-- Path mapping (Go paths where they map):
+- Path mapping (canonical paths where they map):
   `strings` → `std/strings`, `os` → `std/os`, `sync` → `std/sync`,
   `testing` → `std/testing`, `time` → `std/time`,
   `json` → `std/encoding/json`, `http` → `std/net/http`,
-  `collections` → `std/collections` (kept — Go's analog is spread
+  `collections` → `std/collections` (kept — the analog is spread
   across `container`+`maps`; our `Map`/`Set` types don't split
   cleanly. Documented divergence in parked-stdlib notes).
 - Import strings change: `"std/json"` → `"std/encoding/json"` —
