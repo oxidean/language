@@ -3052,11 +3052,30 @@ static char **argv_c(RtSlice argv) {
     return a;
 }
 
-#ifdef _WIN32
-#define oxl_environ _environ
-#else
+#ifndef _WIN32
 extern char **environ;
-#define oxl_environ environ
+#endif
+
+#ifdef _WIN32
+/* UTF-8 <-> UTF-16 for the wide process APIs — oxl strings are UTF-8
+ * and the A-suffixed calls would reinterpret them in the ANSI code
+ * page, mangling any arg/path/env value that isn't ASCII */
+static wchar_t *u2w(const char *s, int64_t n) {
+    int wn = MultiByteToWideChar(CP_UTF8, 0, s, (int)n, NULL, 0);
+    wchar_t *w = xmalloc(((size_t)wn + 1) * sizeof *w);
+    MultiByteToWideChar(CP_UTF8, 0, s, (int)n, w, wn);
+    w[wn] = 0;
+    return w;
+}
+
+static wchar_t *u2wz(const char *s) { return u2w(s, (int64_t)strlen(s) + 1); }
+
+static char *w2u(const wchar_t *w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    char *s = xmalloc((size_t)n);
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
+    return s;
+}
 #endif
 
 static int env_key_eq(const char *base, OxlStr ov) {
@@ -3069,17 +3088,34 @@ static int env_key_eq(const char *base, OxlStr ov) {
 
 /* envp = inherited environment with overrides applied (replace on key
  * match, else append). NULL when env is empty → caller inherits. */
+/* inherited env as UTF-8 strings: _wenviron is authoritative on
+ * Windows (_environ entries would arrive ANSI-decoded and mangle
+ * non-ASCII values in the merged block); POSIX borrows environ */
+static char **env_base(void) {
+#ifdef _WIN32
+    size_t n = 0;
+    while (_wenviron && _wenviron[n]) n++;
+    char **r = xmalloc((n + 1) * sizeof *r);
+    for (size_t i = 0; i < n; i++) r[i] = w2u(_wenviron[i]);
+    r[n] = NULL;
+    return r;
+#else
+    return environ;
+#endif
+}
+
 static char **env_merge(RtSlice env) {
     if (env.len <= 0) return NULL;
+    char **base = env_base();
     size_t nb = 0;
-    while (oxl_environ[nb]) nb++;
+    while (base[nb]) nb++;
     char **r = xmalloc((nb + (size_t)env.len + 1) * sizeof(char *));
     size_t w = 0;
     for (size_t i = 0; i < nb; i++) {
         int drop = 0;
         for (int64_t j = 0; j < env.len; j++)
-            if (env_key_eq(oxl_environ[i], ((OxlStr *)env.ptr)[j])) { drop = 1; break; }
-        if (!drop) r[w++] = oxl_environ[i];
+            if (env_key_eq(base[i], ((OxlStr *)env.ptr)[j])) { drop = 1; break; }
+        if (!drop) r[w++] = base[i];
     }
     for (int64_t j = 0; j < env.len; j++) r[w++] = os_cstr(((OxlStr *)env.ptr)[j]);
     r[w] = NULL;
@@ -3278,20 +3314,38 @@ static char *join_cmdline(RtSlice argv) {
     return b;
 }
 
-/* merged env as the double-NUL block CreateProcess expects */
-static char *env_block(RtSlice env) {
+/* Unicode env blocks must be sorted or CreateProcessW rejects them —
+ * case-insensitive primary key, codepoint order on ties (uppercase
+ * before lowercase, matching the system's own block layout) */
+static int wenv_cmp(const void *a, const void *b) {
+    const wchar_t *x = *(const wchar_t *const *)a;
+    const wchar_t *y = *(const wchar_t *const *)b;
+    int c = _wcsicmp(x, y);
+    return c ? c : wcscmp(x, y);
+}
+
+/* merged env as the sorted double-NUL wide block CreateProcessW
+ * expects (paired with CREATE_UNICODE_ENVIRONMENT) */
+static wchar_t *env_block_w(RtSlice env) {
     char **m = env_merge(env);
     if (!m) return NULL;
-    size_t n = 1;
-    for (char **p = m; *p; p++) n += strlen(*p) + 1;
-    char *b = xmalloc(n), *w = b;
-    for (char **p = m; *p; p++) {
-        size_t l = strlen(*p);
-        memcpy(w, *p, l);
-        w += l;
-        *w++ = 0;
+    int64_t n = 0;
+    for (char **p = m; *p; p++) n++;
+    wchar_t **ws = xmalloc((size_t)n * sizeof *ws);
+    for (int64_t i = 0; i < n; i++) ws[i] = u2wz(m[i]);
+    qsort(ws, (size_t)n, sizeof *ws, wenv_cmp);
+    size_t total = 1;
+    for (int64_t i = 0; i < n; i++) total += wcslen(ws[i]) + 1;
+    wchar_t *b = xmalloc(total * sizeof *b), *o = b;
+    for (int64_t i = 0; i < n; i++) {
+        size_t l = wcslen(ws[i]);
+        memcpy(o, ws[i], l * sizeof *o);
+        o += l;
+        *o++ = 0;
+        free(ws[i]);
     }
-    *w = 0;
+    *o = 0;
+    free(ws);
     free(m);
     return b;
 }
@@ -3299,8 +3353,9 @@ static char *env_block(RtSlice env) {
 int64_t rt_proc_run(RtSlice argv, RtSlice env) {
     if (argv.len < 1) return -EINVAL;
     char *cmd = join_cmdline(argv);
-    char *envb = env_block(env);
-    STARTUPINFOA si;
+    wchar_t *cmdw = u2wz(cmd);
+    wchar_t *envw = env_block_w(env);
+    STARTUPINFOW si;
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -3308,7 +3363,8 @@ int64_t rt_proc_run(RtSlice argv, RtSlice env) {
     si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION pi;
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, envb, NULL, &si, &pi))
+    if (!CreateProcessW(NULL, cmdw, NULL, NULL, TRUE,
+                        CREATE_UNICODE_ENVIRONMENT, envw, NULL, &si, &pi))
         return RT_GLE();
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 0;
@@ -3333,7 +3389,8 @@ static DWORD WINAPI drain_th(void *pv) {
 int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
     if (argv.len < 1) return -EINVAL;
     char *cmd = join_cmdline(argv);
-    char *envb = env_block(env);
+    wchar_t *cmdw = u2wz(cmd);
+    wchar_t *envw = env_block_w(env);
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     HANDLE outR = NULL, outW = NULL, errR = NULL, errW = NULL;
     if (!CreatePipe(&outR, &outW, &sa, 0)) return RT_GLE();
@@ -3344,7 +3401,7 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
         return -((int64_t)e | RT_GLE_TAG);
     }
     SetHandleInformation(errR, HANDLE_FLAG_INHERIT, 0);
-    STARTUPINFOA si;
+    STARTUPINFOW si;
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -3352,7 +3409,8 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
     si.hStdOutput = outW;
     si.hStdError = errW;
     PROCESS_INFORMATION pi;
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, envb, NULL, &si, &pi)) {
+    if (!CreateProcessW(NULL, cmdw, NULL, NULL, TRUE,
+                        CREATE_UNICODE_ENVIRONMENT, envw, NULL, &si, &pi)) {
         DWORD e = GetLastError();
         CloseHandle(outR); CloseHandle(outW);
         CloseHandle(errR); CloseHandle(errW);
@@ -3386,6 +3444,22 @@ int main(int argc, char **argv) {
     /* select's uniform pick draws on rand() — seed per-process or every
      * run replays the same arm-pick sequence */
     srand((unsigned)(time(NULL) ^ oxl_pid()));
+#ifdef _WIN32
+    /* the CRT argv is ANSI-decoded — rebuild from the wide command
+     * line so UTF-8 args spawned via CreateProcessW reach argv() */
+    {
+        int wargc = 0;
+        LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+        if (wargv) {
+            char **u = xmalloc(((size_t)wargc + 1) * sizeof *u);
+            for (int i = 0; i < wargc; i++) u[i] = w2u(wargv[i]);
+            u[wargc] = NULL;
+            LocalFree(wargv);
+            argc = wargc;
+            argv = u;
+        }
+    }
+#endif
     rt_set_args(argc, argv);
     RtScope base;
     rt_scope_enter(&base);

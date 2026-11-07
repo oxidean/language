@@ -21,6 +21,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <shellapi.h>
+#include <wchar.h>
 #include <process.h>
 #include <io.h>
 #include <fcntl.h>
