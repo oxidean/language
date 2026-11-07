@@ -33,10 +33,14 @@ AST consumers, and the fetch/cache write paths.
 - `std/os`: `mkdir_all`, `remove_all`, `rename`, `temp_dir`, `getenv`,
   `exists`, `isdir`, `ls`, `fullpath` (wrapping existing externs +
   new ones).
-- `std/os/exec`: `cmd(name, args)` → `run() -> [int, err]` (child
-  exit status + spawn error) / `output() -> [Out, err]` with
-  `Out{stdout, stderr, status}` — spawn failure is the only `err`, so
-  `oxl run` can propagate exit 42 losslessly.
+- `std/os/exec`: `cmd(name, args)` / `cmd_env(name, args, env
+  []str)` — env `K=V` pairs override the inherited environment
+  (`TZ=UTC`, `GIT_TERMINAL_PROMPT=0` for the fetch veneer). `run() ->
+  [int, err]` returns child exit status; `output() -> [Out, err]`
+  returns `Out{stdout, stderr, status:int}`; `err` covers
+  spawn/capture/wait failures while a nonzero child exit stays a
+  status, never an `err` — `oxl run` propagates exit 42 losslessly
+  and `git archive` bytes can't silently truncate.
 - Tests: `tests/exec_test.oxl`, `tests/fsops_test.oxl` + run.sh
   section; Windows leg exercises the veneer.
 - Deps: none. Gate: suite green incl. windows.

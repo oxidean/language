@@ -17,11 +17,15 @@ WI-0002 precedent.
 
 1. **`std/os` + `std/os/exec`** (ADR-0007): `mkdir_all`, `remove_all`
    (recursive), `rename`, `temp_dir`, `getenv`, `exists`, `isdir`,
-   `ls`, `fullpath`; `exec.cmd(name, args)` → `run() -> [int, err]`
-   (child exit status + spawn error — status recoverable, spawn
-   failure distinguishable) and `output() -> [Out, err]` with
-   `Out{stdout, stderr, status}` (both streams captured; spawn
-   failure is the only `err`).
+   `ls`, `fullpath`; `exec.cmd(name, args)` and
+   `exec.cmd_env(name, args, env []str)` — env entries are `K=V`
+   pairs overriding the inherited environment (required: the fetch
+   veneer sets `TZ=UTC` and `GIT_TERMINAL_PROMPT=0`). `run() ->
+   [int, err]` returns the child exit status; `output() -> [Out,
+   err]` returns `Out{stdout, stderr, status:int}`. In both, `err`
+   covers spawn/capture/wait failures — a nonzero child exit is
+   **not** an `err`, it lands in the status so `oxl run` propagates
+   exit codes losslessly and `git` callers read both streams.
    Backing rt.c primitives: POSIX `posix_spawn`/fork+execvp+`waitpid`
    +`pipe`, Windows `CreateProcess`/`WaitForSingleObject`/`CreatePipe`
    via the E3 veneer; `mkdir`, `rename`, recursive-remove.
