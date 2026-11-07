@@ -23,5 +23,5 @@
 - [ ] Both checkers and both codegens stay in parity — seed toolchain and self-hosted must agree
 - [ ] Diagnostics changes add or update `tests/diag/` fixtures
 - [ ] Docs updated where behavior, commands, or the language surface changed
-- [ ] Commit subjects follow `type(scope): subject` — see [CONTRIBUTING.md](CONTRIBUTING.md)
+- [ ] Commit subjects follow `type(scope): subject` — see [CONTRIBUTING.md](https://github.com/oxidean/oxl/blob/main/CONTRIBUTING.md)
 - [ ] No secrets or credentials committed

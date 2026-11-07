@@ -10,6 +10,12 @@ borrow checker; concurrency is structured (`scope`, `spawn`, channels);
 everything compiles ahead-of-time to native binaries through one
 toolchain binary.
 
+The dynamic checking is not yet unconditional — two documented gaps
+remain (`docs/semantics/ownership.md`): assigning a scope-backed slice
+to an outer struct field is not checked (access after the scope closes
+reads freed storage), and ordinary `own` dereferences compile to raw C
+access without per-dereference dangling checks.
+
 **Status: v0.2.0 released; the package/module system is on `main`.**
 The compiler works end to end — programs in `examples/` compile to
 native binaries today, including an HTTP CRUD + SQLite service and a

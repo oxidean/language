@@ -64,7 +64,10 @@ not yet emitted by the checker:
 
 ## Codegen (interim backend)
 
-Target: **C11 → cc → native binary**. Chosen as the bootstrap backend:
+Target: **GNU C11 → cc → native binary** — `match` lowers to GNU
+statement expressions (`({ ... })`), so the output needs the `gnu11`
+dialect (`cc`'s default); a strict `-std=c11 -pedantic` build rejects
+it. Chosen as the bootstrap backend:
 LLVM bindings would gate the skeleton on an external dependency; C emit
 exercises the full pipeline today and keeps the backend swappable
 (`codegen/` is the only cc-aware module; an LLVM backend drops in behind
