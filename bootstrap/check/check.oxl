@@ -19,7 +19,7 @@ import "std/collections"
 import "std/strings"
 
 // package loading needs portable dir probes (seed resolve_pkg mirrors)
-extern fn rt_lsdir(path: str) -> str
+extern fn rt_lsdir(path: str) -> []str
 
 extern fn rt_isdir(path: str) -> int
 
@@ -5403,7 +5403,7 @@ fn find_root(d: str) -> str {
         d = c
     }
     for len(d) > 0 {
-        if rt_fexists(d + "/oxl.mod") == 1 {
+        if rt_isfile(d + "/oxl.mod") == 1 {
             return d
         }
         if d == "." || d == "/" {
@@ -5411,7 +5411,7 @@ fn find_root(d: str) -> str {
         }
         d = dir_of(d)
     }
-    if rt_fexists("/oxl.mod") == 1 {
+    if rt_isfile("/oxl.mod") == 1 {
         return "/"
     }
     return ""
@@ -5789,7 +5789,7 @@ fn mod_build_list(ck: mut Ck) {
             continue
         }
         mf := dr.dir + "/oxl.mod"
-        if rt_fexists(mf) == 0 {
+        if rt_isfile(mf) == 0 {
             continue
         }
         reqs := dep_manifest_reqs(readfile(mf))
@@ -5838,7 +5838,7 @@ fn mod_ctx_load(ck: mut Ck, start: str) -> int {
     if parse_manifest(ck, text) == 0 {
         return 0
     }
-    if rt_fexists(root + "/oxl.sum") == 1 {
+    if rt_isfile(root + "/oxl.sum") == 1 {
         if parse_sums(ck, readfile(root + "/oxl.sum")) == 0 {
             return 0
         }
@@ -6104,16 +6104,10 @@ fn b64_of(b: []int) -> str {
 // "rel|hex" entries for every regular file under dir — `|` can't be a
 // filename char here (fetch's component check bans it)
 fn dir_walk(base: str, dir: str, acc: mut SAcc) {
-    raw := rt_lsdir(dir)
-    for len(raw) > 0 {
-        i := find(raw, "\n")
-        nm := raw
-        if i >= 0 {
-            nm = substr(raw, 0, i)
-            raw = substr(raw, i + 1, len(raw))
-        } else {
-            raw = ""
-        }
+    ents := rt_lsdir(dir)
+    i := 0
+    for i < len(ents) {
+        nm := ents[i]
         p := dir + "/" + nm
         if rt_islnk(p) == 1 {
             continue
@@ -6124,6 +6118,7 @@ fn dir_walk(base: str, dir: str, acc: mut SAcc) {
             rel := substr(p, len(base) + 1, len(p))
             acc.items = push(acc.items, rel + "|" + hex_of(sha256(readfile(p)).v))
         }
+        i = i + 1
     }
 }
 
@@ -6222,7 +6217,7 @@ fn verify_slot(ck: ref Ck, dir: str, path: str, ver: str) -> str {
         return "verifying " + path + "@" + ver + ": checksum mismatch"
     }
     mp := dir + "/oxl.mod"
-    if rt_fexists(mp) == 0 {
+    if rt_isfile(mp) == 0 {
         return mp + ": No such file or directory (os error 2)"
     }
     if mod_h1(path, ver, readfile(mp)) != m {
@@ -6515,19 +6510,13 @@ fn load_pkg_inner(ck: mut Ck, ld: mut Loader, dir: str, imp: str, as_import: int
     // .oxl entries of the dir — rt_lsdir presorts so the load order
     // (and diagnostics) match the seed loader deterministically
     fs := mkslice(str, 0)
-    raw := rt_lsdir(dir)
-    for len(raw) > 0 {
-        i := find(raw, "\n")
-        nm := raw
-        if i >= 0 {
-            nm = substr(raw, 0, i)
-            raw = substr(raw, i + 1, len(raw))
-        } else {
-            raw = ""
+    ents := rt_lsdir(dir)
+    ei := 0
+    for ei < len(ents) {
+        if strings.endswith(ents[ei], ".oxl") {
+            fs = push(fs, ents[ei])
         }
-        if strings.endswith(nm, ".oxl") {
-            fs = push(fs, nm)
-        }
+        ei = ei + 1
     }
     if len(fs) == 0 {
         diag(ck, "check", "no .oxl source files in `" + dir + "`")

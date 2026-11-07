@@ -321,7 +321,7 @@ void rt_poke16(void *buf, int64_t off, int64_t v);
 void rt_poke32(void *buf, int64_t off, int64_t v);
 void rt_init(void);                                    /* proc init (WinSock); main() calls it */
 int64_t rt_file_readable(const char *path);            /* open+close probe */
-OxlStr rt_lsdir(OxlStr path);
+RtSlice rt_lsdir(OxlStr path);
 int64_t rt_isdir(OxlStr path);
 int64_t rt_isfile(OxlStr path);
 int64_t rt_islnk(OxlStr path);

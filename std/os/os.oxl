@@ -61,7 +61,7 @@ extern fn rt_isdir(path: str) -> int
 
 extern fn rt_islnk(path: str) -> int
 
-extern fn rt_lsdir(path: str) -> str
+extern fn rt_lsdir(path: str) -> []str
 
 extern fn rt_getenv(name: str) -> str
 
@@ -158,7 +158,7 @@ fn remove(path: str) -> err {
 
 /// exists reports whether path exists (file, dir, or link).
 fn exists(path: str) -> bool {
-    return rt_fexists(path) != 0
+    return rt_fexists(path) != 0 || rt_islnk(path) != 0
 }
 
 /// isdir reports whether path is a directory.
@@ -168,15 +168,7 @@ fn isdir(path: str) -> bool {
 
 /// ls returns the sorted entry names of directory path.
 fn ls(path: str) -> own []str {
-    out := mkslice(str, 0)
-    cur := strings.split(rt_lsdir(path), "\n")
-    for cur != nil {
-        if len(cur.v) > 0 {
-            out = push(out, cur.v)
-        }
-        cur = cur.next
-    }
-    return new(out)
+    return new(rt_lsdir(path))
 }
 
 /// getenv returns the value of environment variable name, "" when unset.
@@ -247,15 +239,14 @@ fn remove_all(path: str) -> err {
     if rt_islnk(path) != 0 || !isdir(path) {
         return remove(path)
     }
-    cur := strings.split(rt_lsdir(path), "\n")
-    for cur != nil {
-        if len(cur.v) > 0 {
-            e := remove_all(path + "/" + cur.v)
-            if e != nil {
-                return e
-            }
+    ents := rt_lsdir(path)
+    i := 0
+    for i < len(ents) {
+        e := remove_all(path + "/" + ents[i])
+        if e != nil {
+            return e
         }
-        cur = cur.next
+        i = i + 1
     }
     r := rt_rmdir(path)
     if r < 0 {

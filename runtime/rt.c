@@ -2182,21 +2182,21 @@ OxlStr rt_getenv(OxlStr name) {
     return v ? rt_str(v) : rt_str("");
 }
 
-/* file-exists probe — rt_isdir answers dirs; the module loader needs
- * "is there a FILE here" for oxl.mod discovery */
+/* file-exists probe — stat, not fopen: dirs, unreadable entries and
+ * permission-denied paths still exist, and callers (remove_all, module
+ * resolve) make deletion decisions on this answer */
 int64_t rt_fexists(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);
     cp[path.n] = 0;
-    FILE *f = fopen(cp, "rb");
-    if (!f) return 0;
-    fclose(f);
-    return 1;
+#ifdef _WIN32
+    return GetFileAttributesA(cp) != INVALID_FILE_ATTRIBUTES ? 1 : 0;
+#else
+    struct stat st;
+    return stat(cp, &st) == 0 ? 1 : 0;
+#endif
 }
 
-/* absolute canonical path, `/`-separated; "" when the path doesn't
- * resolve. find_root and the internal-package rule walk/compare real
- * ancestors, so `.`/relative starts must resolve before the walk */
 OxlStr rt_fullpath(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);
@@ -2349,6 +2349,23 @@ int64_t rt_fd_write(int64_t fd, RtSlice b) {
 }
 
 OxlStr rt_errstr(int64_t code) {
+#ifdef _WIN32
+    /* two error domains share this channel: errno (strerror) and
+     * Win32 GetLastError. The primitives tag Win32 codes with
+     * RT_GLE_TAG so they can't be misreported as errno text */
+    if (code & RT_GLE_TAG) {
+        char *buf = rt_alloc(256);
+        DWORD n = FormatMessageA(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL, (DWORD)(code & ~RT_GLE_TAG),
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, 255, NULL);
+        while (n > 0 && (buf[n - 1] == '\r' || buf[n - 1] == '\n' ||
+               buf[n - 1] == '.' || buf[n - 1] == ' '))
+            buf[--n] = 0;
+        if (n == 0) return rt_str("win32 error");
+        return (OxlStr){ buf, (int64_t)n };
+    }
+#endif
     const char *m = strerror((int)code);
     return m ? rt_str(m) : rt_str("unknown error");
 }
@@ -2514,10 +2531,11 @@ static int name_cmp(const void *a, const void *b) {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-/* directory entry names, sorted + newline-joined; "" on any failure.
- * package loading needs a portable enumeration — the sort keeps the
- * load order (and generated code) deterministic across filesystems */
-OxlStr rt_lsdir(OxlStr path) {
+/* sorted dir entries as a []str — element boundaries are the API, so
+ * names can't smuggle separators (a POSIX name may legally contain
+ * '\n'); callers never re-split. Empty slice on any failure, matching
+ * the old "" contract. Entries are process-lifetime. */
+RtSlice rt_lsdir(OxlStr path) {
     char *cp = rt_alloc(path.n + 1);
     memcpy(cp, path.p, (size_t)path.n);
     cp[path.n] = 0;
@@ -2534,7 +2552,7 @@ OxlStr rt_lsdir(OxlStr path) {
     free(pat);
     if (h == INVALID_HANDLE_VALUE) {
         free(names);
-        return rt_str("");
+        return (RtSlice){ NULL, 0, 0, 1 };
     }
     do {
         const char *nm = fd.cFileName;
@@ -2550,7 +2568,7 @@ OxlStr rt_lsdir(OxlStr path) {
     DIR *d = opendir(cp);
     if (!d) {
         free(names);
-        return rt_str("");
+        return (RtSlice){ NULL, 0, 0, 1 };
     }
     struct dirent *e;
     while ((e = readdir(d))) {
@@ -2565,20 +2583,17 @@ OxlStr rt_lsdir(OxlStr path) {
     closedir(d);
 #endif
     qsort(names, n, sizeof *names, name_cmp);
-    size_t total = 0;
-    for (size_t i = 0; i < n; i++) total += strlen(names[i]) + 1;
-    char *buf = rt_alloc((int64_t)total + 1);
-    size_t off = 0;
-    for (size_t i = 0; i < n; i++) {
-        size_t m = strlen(names[i]);
-        memcpy(buf + off, names[i], m);
-        off += m;
-        if (i + 1 < n) buf[off++] = '\n';
-        free(names[i]);
+    if (n == 0) {
+        free(names);
+        return (RtSlice){ NULL, 0, 0, 1 };
     }
-    buf[off] = 0;
+    OxlStr *elems = xmalloc(n * sizeof *elems);
+    for (size_t i = 0; i < n; i++) {
+        elems[i].p = names[i];
+        elems[i].n = (int64_t)strlen(names[i]);
+    }
     free(names);
-    return (OxlStr){ buf, (int64_t)off };
+    return (RtSlice){ elems, (int64_t)n, (int64_t)n, 1 };
 }
 
 #ifdef OXL_NET
@@ -3032,6 +3047,10 @@ static char **argv_c(RtSlice argv) {
 
 #ifdef _WIN32
 #define oxl_environ _environ
+/* high tag bit marks GetLastError codes in the int64 error channel —
+ * rt_errstr decodes via FormatMessage; untagged values stay errno */
+#define RT_GLE_TAG ((int64_t)1 << 30)
+#define RT_GLE() (-((int64_t)GetLastError() | RT_GLE_TAG))
 #else
 extern char **environ;
 #define oxl_environ environ
@@ -3083,7 +3102,7 @@ int64_t rt_mkdir(OxlStr path) {
     if (path.n > 0 && memchr(path.p, 0, (size_t)path.n)) return -EINVAL;
     const char *cp = rt_cstr(path);
 #ifdef _WIN32
-    return CreateDirectoryA(cp, NULL) ? 0 : -(int64_t)GetLastError();
+    return CreateDirectoryA(cp, NULL) ? 0 : RT_GLE();
 #else
     return mkdir(cp, 0777) < 0 ? -(int64_t)errno : 0;
 #endif
@@ -3093,7 +3112,7 @@ int64_t rt_rmdir(OxlStr path) {
     if (path.n > 0 && memchr(path.p, 0, (size_t)path.n)) return -EINVAL;
     const char *cp = rt_cstr(path);
 #ifdef _WIN32
-    return RemoveDirectoryA(cp) ? 0 : -(int64_t)GetLastError();
+    return RemoveDirectoryA(cp) ? 0 : RT_GLE();
 #else
     return rmdir(cp) < 0 ? -(int64_t)errno : 0;
 #endif
@@ -3106,7 +3125,7 @@ int64_t rt_rename(OxlStr old_p, OxlStr new_p) {
 #ifdef _WIN32
     /* rename() can't cross volumes or replace — MoveFileEx can both */
     return MoveFileExA(oc, nc, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)
-        ? 0 : -(int64_t)GetLastError();
+        ? 0 : RT_GLE();
 #else
     return rename(oc, nc) < 0 ? -(int64_t)errno : 0;
 #endif
@@ -3219,7 +3238,14 @@ static char *win_quote(OxlStr a) {
     for (int64_t i = 0; i < a.n; i++) {
         char c = a.p[i];
         if (c == '\\') { bs++; continue; }
-        if (c == '"') for (int64_t k = 0; k < 2 * bs + 1; k++) *w++ = '\\';
+        if (c == '"') {
+            /* a quote doubles the pending backslashes and takes one
+             * more to escape itself */
+            for (int64_t k = 0; k < 2 * bs + 1; k++) *w++ = '\\';
+        } else {
+            /* backslashes not preceding a quote are literal */
+            for (int64_t k = 0; k < bs; k++) *w++ = '\\';
+        }
         bs = 0;
         *w++ = c;
     }
@@ -3280,7 +3306,7 @@ int64_t rt_proc_run(RtSlice argv, RtSlice env) {
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION pi;
     if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, envb, NULL, &si, &pi))
-        return -(int64_t)GetLastError();
+        return RT_GLE();
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
@@ -3307,12 +3333,12 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
     char *envb = env_block(env);
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     HANDLE outR = NULL, outW = NULL, errR = NULL, errW = NULL;
-    if (!CreatePipe(&outR, &outW, &sa, 0)) return -(int64_t)GetLastError();
+    if (!CreatePipe(&outR, &outW, &sa, 0)) return RT_GLE();
     SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);
     if (!CreatePipe(&errR, &errW, &sa, 0)) {
         DWORD e = GetLastError();
         CloseHandle(outR); CloseHandle(outW);
-        return -(int64_t)e;
+        return -((int64_t)e | RT_GLE_TAG);
     }
     SetHandleInformation(errR, HANDLE_FLAG_INHERIT, 0);
     STARTUPINFOA si;
@@ -3327,7 +3353,7 @@ int64_t rt_proc_output(RtSlice argv, RtSlice env, RtSlice *out, RtSlice *errb) {
         DWORD e = GetLastError();
         CloseHandle(outR); CloseHandle(outW);
         CloseHandle(errR); CloseHandle(errW);
-        return -(int64_t)e;
+        return -((int64_t)e | RT_GLE_TAG);
     }
     CloseHandle(outW);
     CloseHandle(errW);
