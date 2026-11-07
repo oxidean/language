@@ -50,6 +50,13 @@ static void *xrealloc(void *p, size_t n) {
     return q;
 }
 
+#ifdef _WIN32
+/* high tag bit marks GetLastError codes in the int64 error channel —
+ * rt_errstr decodes via FormatMessage; untagged values stay errno */
+#define RT_GLE_TAG ((int64_t)1 << 30)
+#define RT_GLE() (-((int64_t)GetLastError() | RT_GLE_TAG))
+#endif
+
 static ObjHdr *hdr_of(void *obj) { return ((ObjHdr *)obj) - 1; }
 
 static void *alloc_in(RtScope *s, int64_t size, int own) {
@@ -3047,10 +3054,6 @@ static char **argv_c(RtSlice argv) {
 
 #ifdef _WIN32
 #define oxl_environ _environ
-/* high tag bit marks GetLastError codes in the int64 error channel —
- * rt_errstr decodes via FormatMessage; untagged values stay errno */
-#define RT_GLE_TAG ((int64_t)1 << 30)
-#define RT_GLE() (-((int64_t)GetLastError() | RT_GLE_TAG))
 #else
 extern char **environ;
 #define oxl_environ environ
